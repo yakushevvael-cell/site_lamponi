@@ -53,7 +53,7 @@ if ! command -v node >/dev/null || [[ "$(node -p 'process.versions.node.split(".
 fi
 node --version
 
-git config --global --add safe.directory "$RELEASE_DIR" 2>/dev/null || true
+git config --system --add safe.directory "$RELEASE_DIR" 2>/dev/null || true
 
 log "Готовлю пользователя и папки"
 id -u "$APP_USER" >/dev/null 2>&1 || useradd --system --create-home --home-dir "$APP_ROOT" --shell /usr/sbin/nologin "$APP_USER"
