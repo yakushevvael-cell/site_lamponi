@@ -1,0 +1,12 @@
+[Unit]
+Description=Заказы Lamponi каждые 30 минут
+
+[Timer]
+# Резерв должен быть свежим до того, как остатки поедут на площадки,
+# поэтому заказы обновляются чаще и раньше выгрузки.
+OnCalendar=*:00,30
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

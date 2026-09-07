@@ -1,0 +1,11 @@
+[Unit]
+Description=Остатки Lamponi каждый час
+
+[Timer]
+# Через 10 минут после получаса: заказы уже загружены, резерв пересчитан.
+OnCalendar=*:10
+RandomizedDelaySec=180
+Persistent=true
+
+[Install]
+WantedBy=timers.target

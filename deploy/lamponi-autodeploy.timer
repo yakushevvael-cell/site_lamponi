@@ -1,0 +1,11 @@
+[Unit]
+Description=Проверять репозиторий на новые коммиты каждые 3 минуты
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=3min
+AccuracySec=30s
+Persistent=false
+
+[Install]
+WantedBy=timers.target

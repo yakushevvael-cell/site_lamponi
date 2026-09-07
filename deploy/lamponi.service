@@ -1,0 +1,27 @@
+[Unit]
+Description=Lamponi FBS Hub
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lamponi
+Group=lamponi
+WorkingDirectory=/opt/lamponi/current
+EnvironmentFile=/opt/lamponi/shared/.env
+ExecStart=/usr/bin/node .next/standalone/server.js
+Restart=always
+RestartSec=5
+
+# Приложению нужны только свой код и папка данных.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/lamponi
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=multi-user.target

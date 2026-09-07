@@ -1,0 +1,9 @@
+[Unit]
+Description=Автодеплой Lamponi: проверка новых коммитов и выкат
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/env bash /opt/lamponi/current/deploy/autodeploy.sh
+TimeoutStartSec=1800

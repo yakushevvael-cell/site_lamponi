@@ -1,0 +1,62 @@
+{
+  "version": "7",
+  "dialect": "sqlite",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "6",
+      "when": 1787748362589,
+      "tag": "0000_open_shriek",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1787749555680,
+      "tag": "0001_wild_boomerang",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1787820797172,
+      "tag": "0002_violet_hellion",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1787844394987,
+      "tag": "0003_ordinary_spiral",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1787844443134,
+      "tag": "0004_lying_anita_blake",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1788200000000,
+      "tag": "0005_stock_guard",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1788200100000,
+      "tag": "0006_osv_reserves",
+      "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1788200200000,
+      "tag": "0007_password_login",
+      "breakpoints": true
+    }
+  ]
+}

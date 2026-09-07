@@ -1,0 +1,10 @@
+[Unit]
+Description=Ежедневная копия базы Lamponi
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+RandomizedDelaySec=600
+Persistent=true
+
+[Install]
+WantedBy=timers.target

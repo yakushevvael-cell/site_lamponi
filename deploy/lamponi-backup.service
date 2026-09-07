@@ -1,0 +1,10 @@
+[Unit]
+Description=Lamponi: резервная копия базы
+
+[Service]
+Type=oneshot
+User=lamponi
+Group=lamponi
+WorkingDirectory=/opt/lamponi/current
+EnvironmentFile=/opt/lamponi/shared/.env
+ExecStart=/usr/bin/node scripts/backup.mjs

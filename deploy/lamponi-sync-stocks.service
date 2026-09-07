@@ -1,0 +1,15 @@
+[Unit]
+Description=Lamponi: выгрузка остатков на маркетплейсы
+After=lamponi.service
+Requires=lamponi.service
+
+[Service]
+Type=oneshot
+User=lamponi
+Group=lamponi
+WorkingDirectory=/opt/lamponi/current
+EnvironmentFile=/opt/lamponi/shared/.env
+ExecStart=/usr/bin/node scripts/sync-task.mjs stocks
+# Ozon разрешает обновлять остаток одного артикула не чаще раза в 2 минуты,
+# поэтому запуск не должен накладываться сам на себя.
+TimeoutStartSec=1800
