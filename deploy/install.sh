@@ -74,7 +74,7 @@ if [[ -n "$REPO_URL" ]]; then
   else
     log "Клонирую репозиторий в $RELEASE_DIR"
     # Клонируем во временную папку и переносим внутрь: RELEASE_DIR уже создан.
-    TMP_SRC="$(mktemp -d)"
+    TMP_SRC="$(mktemp -d)"; chown "$APP_USER:$APP_USER" "$TMP_SRC"
     sudo -u "$APP_USER" git clone --depth 1 --branch "$REPO_BRANCH" "$REPO_URL" "$TMP_SRC/repo" || die "Не удалось склонировать репозиторий $REPO_URL"
     find "$RELEASE_DIR" -mindepth 1 -maxdepth 1 ! -name node_modules -exec rm -rf {} +
     shopt -s dotglob
@@ -84,7 +84,7 @@ if [[ -n "$REPO_URL" ]]; then
   fi
 else
   [[ -f "$SOURCE_ARCHIVE" ]] || die "Архив не найден: $SOURCE_ARCHIVE"
-  TMP_SRC="$(mktemp -d)"
+  TMP_SRC="$(mktemp -d)"; chown "$APP_USER:$APP_USER" "$TMP_SRC"
   tar -xzf "$SOURCE_ARCHIVE" -C "$TMP_SRC"
   # Архив может содержать одну верхнюю папку — заходим внутрь.
   if [[ "$(find "$TMP_SRC" -mindepth 1 -maxdepth 1 -type d | wc -l)" -eq 1 && ! -f "$TMP_SRC/package.json" ]]; then

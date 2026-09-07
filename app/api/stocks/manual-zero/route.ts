@@ -3,6 +3,7 @@ import { getMarketplaceCredentials } from "@/lib/credentials";
 import { updateOzonStocks } from "@/lib/ozon";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow } from "@/lib/stock-log";
+import type { MarketplaceStockId } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
 
 type MappingRow = {
@@ -15,7 +16,7 @@ type MappingRow = {
 };
 type WarehouseRow = { marketplaceId: string; externalId: string };
 
-function zeroLogRows(marketplaceId: string, warehouseId: string, mappings: MappingRow[], message?: string | null): LogRow[] {
+function zeroLogRows(marketplaceId: MarketplaceStockId, warehouseId: string, mappings: MappingRow[], message?: string | null): LogRow[] {
   return mappings.map((mapping) => ({
     marketplaceId,
     warehouseId,

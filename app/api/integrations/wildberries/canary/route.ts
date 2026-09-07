@@ -214,7 +214,7 @@ async function syncOrdersAndReservations(db: D1Database, token: string) {
         `INSERT INTO order_items (order_id, product_sku, external_sku, quantity, unit_price)
          VALUES (?, ?, ?, 1, ?) RETURNING id`,
       ).bind(orderRow.id, mapping?.productSku ?? null, String(order.chrtId), Number(order.convertedFinalPrice ?? order.finalPrice ?? 0) / 100).first<{ id: number }>();
-      item = inserted ?? undefined;
+      item = inserted ?? null;
     } else if (mapping) {
       await db.prepare("UPDATE order_items SET product_sku = ? WHERE id = ?").bind(mapping.productSku, item.id).run();
     }
@@ -226,7 +226,7 @@ async function syncOrdersAndReservations(db: D1Database, token: string) {
          VALUES (?, ?, ?, 1, 'active')
          ON CONFLICT(order_item_id) DO NOTHING`,
       ).bind(item.id, mapping.productSku, MARKETPLACE_ID).run();
-      if (result.meta.changes > 0) newReservations += 1;
+      if ((result.meta.changes ?? 0) > 0) newReservations += 1;
     }
   }
 

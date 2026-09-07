@@ -307,7 +307,7 @@ async function syncOrdersAndReservations(
         item = await db.prepare(
           `INSERT INTO order_items (order_id, product_sku, external_sku, quantity, unit_price)
            VALUES (?, ?, ?, ?, ?) RETURNING id`,
-        ).bind(order.id, mapping?.productSku ?? null, externalSku, quantity, moneyAmount(product)).first<{ id: number }>() ?? undefined;
+        ).bind(order.id, mapping?.productSku ?? null, externalSku, quantity, moneyAmount(product)).first<{ id: number }>() ?? null;
       } else {
         await db.prepare(
           "UPDATE order_items SET product_sku = ?, quantity = ?, unit_price = ? WHERE id = ?",
@@ -321,7 +321,7 @@ async function syncOrdersAndReservations(
            VALUES (?, ?, ?, ?, 'active')
            ON CONFLICT(order_item_id) DO NOTHING`,
         ).bind(item.id, mapping.productSku, MARKETPLACE_ID, quantity).run();
-        if (result.meta.changes > 0) newReservations += 1;
+        if ((result.meta.changes ?? 0) > 0) newReservations += 1;
       }
     }
   }
