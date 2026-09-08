@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
+import type { LucideIcon } from "lucide-react";
 import {
   BarChart3,
   Boxes,
@@ -30,7 +31,17 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar";
 
-const navigation = [
+type NavItem = {
+  href: string;
+  label: string;
+  icon: LucideIcon;
+  /** Пункт для полного доступа: владелец и полный доступ. */
+  adminOnly?: boolean;
+  /** Пункт только для владельца. */
+  ownerOnly?: boolean;
+};
+
+const navigation: NavItem[] = [
   { href: "/", label: "Обзор", icon: BarChart3 },
   { href: "/stocks", label: "Остатки", icon: Boxes },
   { href: "/upload", label: "Загрузка ОСВ", icon: UploadCloud },
@@ -38,11 +49,11 @@ const navigation = [
   { href: "/warehouses", label: "Склады", icon: Building2 },
   { href: "/logs", label: "Журнал выгрузки", icon: ScrollText },
   { href: "/password", label: "Смена пароля", icon: KeyRound },
-  { href: "/settings", label: "Подключения", icon: Settings2, adminOnly: true },
+  { href: "/settings", label: "Подключения", icon: Settings2, ownerOnly: true },
   { href: "/users", label: "Пользователи", icon: Users, adminOnly: true },
 ];
 
-export function AppSidebar({ fullAccess }: { fullAccess: boolean }) {
+export function AppSidebar({ fullAccess, owner }: { fullAccess: boolean; owner: boolean }) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -72,7 +83,7 @@ export function AppSidebar({ fullAccess }: { fullAccess: boolean }) {
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation.filter((item) => !item.adminOnly || fullAccess).map((item) => {
+              {navigation.filter((item) => (!item.adminOnly || fullAccess) && (!item.ownerOnly || owner)).map((item) => {
                 const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
                 return (
                   <SidebarMenuItem key={item.href}>
