@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Copy, KeyRound, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
+import { Check, ChevronDown, Copy, Crown, KeyRound, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -30,7 +30,7 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 type UserRole = "admin" | "manager" | "user";
-type AccessLevel = "simple" | "full";
+type AccessLevel = "simple" | "full" | "owner";
 type UserRow = {
   email: string;
   fullName: string | null;
@@ -64,6 +64,7 @@ export function UsersWorkspace() {
   const [loading, setLoading] = useState(true);
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   const [fullAccessTarget, setFullAccessTarget] = useState<UserRow | null>(null);
+  const [ownerTarget, setOwnerTarget] = useState<UserRow | null>(null);
   const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
 
@@ -132,7 +133,7 @@ export function UsersWorkspace() {
   }
 
   function RightsMenu({ user }: { user: UserRow }) {
-    const value: AccessLevel = user.role === "manager" ? "full" : "simple";
+    const value: AccessLevel = user.role === "admin" ? "owner" : user.role === "manager" ? "full" : "simple";
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -148,12 +149,14 @@ export function UsersWorkspace() {
             value={value}
             onValueChange={(nextValue) => {
               if (nextValue === value) return;
-              if (nextValue === "full") requestFullAccess(user);
+              if (nextValue === "owner") setOwnerTarget(user);
+              else if (nextValue === "full") requestFullAccess(user);
               else void update(user.email, "set_role", "Установлен простой доступ", "simple");
             }}
           >
             <DropdownMenuRadioItem value="simple">Простой — ОСВ, просмотр, обнуление</DropdownMenuRadioItem>
             <DropdownMenuRadioItem value="full">Полный — все права администратора</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="owner">Владелец — полный доступ, нельзя заблокировать</DropdownMenuRadioItem>
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -209,6 +212,7 @@ export function UsersWorkspace() {
                                 {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />} Разрешить: простой
                               </Button>
                               <Button size="sm" disabled={busyEmail === user.email} onClick={() => requestFullAccess(user)}><ShieldCheck className="size-4" /> Разрешить: полный</Button>
+                              <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setOwnerTarget(user)}><Crown className="size-4" /> Назначить владельцем</Button>
                             </>
                           ) : null}
                           {user.role !== "admin" && user.status !== "pending" ? <RightsMenu user={user} /> : null}
@@ -255,6 +259,33 @@ export function UsersWorkspace() {
               setFullAccessTarget(null);
               void update(user.email, user.status === "pending" ? "approve" : "set_role", user.status === "pending" ? "Регистрация разрешена: полный доступ" : "Выдан полный доступ", "full");
             }}>Выдать полный доступ</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(ownerTarget)} onOpenChange={(open) => { if (!open) setOwnerTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Назначить владельцем?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {ownerTarget ? displayName(ownerTarget) : "Пользователь"} получит права владельца: все функции полного доступа,
+              а также защиту от блокировки и от изменения прав. Снять права владельца через интерфейс нельзя — только через базу данных.
+              Владельцев может быть несколько.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              if (!ownerTarget) return;
+              const user = ownerTarget;
+              setOwnerTarget(null);
+              void update(
+                user.email,
+                user.status === "pending" ? "approve" : "set_role",
+                user.status === "pending" ? "Регистрация разрешена: владелец" : "Назначен владельцем",
+                "owner",
+              );
+            }}>Назначить владельцем</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
