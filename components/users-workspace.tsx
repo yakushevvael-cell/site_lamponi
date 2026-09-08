@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
+import { Check, ChevronDown, Copy, KeyRound, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -64,6 +64,8 @@ export function UsersWorkspace() {
   const [loading, setLoading] = useState(true);
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   const [fullAccessTarget, setFullAccessTarget] = useState<UserRow | null>(null);
+  const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
+  const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
 
   const load = useCallback(async () => {
     try {
@@ -99,6 +101,27 @@ export function UsersWorkspace() {
       await load();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось изменить доступ.");
+    } finally {
+      setBusyEmail(null);
+    }
+  }
+
+  // Сброс пароля: сервер возвращает временный пароль один раз, показываем его
+  // администратору и нигде не сохраняем — в базе лежит только хеш.
+  async function resetPassword(user: UserRow) {
+    setBusyEmail(user.email);
+    try {
+      const response = await fetch("/api/admin/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email: user.email, action: "reset_password" }),
+      });
+      const result = await response.json() as { temporaryPassword?: string; error?: string };
+      if (!response.ok || !result.temporaryPassword) throw new Error(result.error ?? "Не удалось сбросить пароль.");
+      setIssuedPassword({ email: user.email, password: result.temporaryPassword });
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось сбросить пароль.");
     } finally {
       setBusyEmail(null);
     }
@@ -203,6 +226,9 @@ export function UsersWorkspace() {
                               </AlertDialogContent>
                             </AlertDialog>
                           ) : null}
+                          <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setResetTarget(user)}>
+                            {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />} Сбросить пароль
+                          </Button>
                         </div>
                       </TableCell>
                     </TableRow>
@@ -229,6 +255,57 @@ export function UsersWorkspace() {
               setFullAccessTarget(null);
               void update(user.email, user.status === "pending" ? "approve" : "set_role", user.status === "pending" ? "Регистрация разрешена: полный доступ" : "Выдан полный доступ", "full");
             }}>Выдать полный доступ</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(resetTarget)} onOpenChange={(open) => { if (!open) setResetTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Сбросить пароль?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {resetTarget ? displayName(resetTarget) : "Пользователь"} получит временный пароль — он будет показан здесь один раз.
+              Все текущие сеансы этого пользователя завершатся, а при первом входе система попросит задать новый пароль.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              if (!resetTarget) return;
+              const user = resetTarget;
+              setResetTarget(null);
+              void resetPassword(user);
+            }}>Сбросить пароль</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(issuedPassword)} onOpenChange={(open) => { if (!open) setIssuedPassword(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Временный пароль</AlertDialogTitle>
+            <AlertDialogDescription>
+              Пароль для {issuedPassword?.email}. Он показывается один раз — скопируйте и передайте сотруднику лично.
+              При первом входе система попросит сменить его.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-3">
+            <code className="flex-1 break-all font-mono text-base">{issuedPassword?.password}</code>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => {
+                if (!issuedPassword) return;
+                void navigator.clipboard.writeText(issuedPassword.password)
+                  .then(() => toast.success("Пароль скопирован"))
+                  .catch(() => toast.error("Не удалось скопировать — выделите пароль вручную."));
+              }}
+            >
+              <Copy className="size-4" /> Копировать
+            </Button>
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setIssuedPassword(null)}>Готово</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
