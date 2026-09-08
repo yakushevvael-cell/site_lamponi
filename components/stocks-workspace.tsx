@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, Loader2, RefreshCw, Ruler, Search, ShoppingCart, Warehouse } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Loader2, PackageCheck, RefreshCw, Ruler, Search, ShoppingCart, Warehouse } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync } from "@/lib/stock-sync-client";
@@ -48,6 +48,41 @@ type StockTotals = {
   manualZeroCount: number;
 };
 
+/** Строка отчёта выборочной синхронизации: что посчитали и что ушло на площадку. */
+type SelectedSyncRow = {
+  marketplaceId: "wildberries" | "ozon";
+  warehouseId: string;
+  warehouseName: string;
+  sourceSku: string;
+  externalSku: string;
+  size: string | null;
+  osvQty: number;
+  reserveQty: number;
+  computedQty: number;
+  sentQty: number;
+  status: "success" | "error" | "skipped" | "blocked";
+  message: string | null;
+};
+
+type SelectedSyncResult = {
+  ok: boolean;
+  selected: number;
+  unmapped: string[];
+  wildberries: { warehouseCount: number; mappingCount: number; sent: number };
+  ozon: { warehouseCount: number; mappingCount: number; sent: number; reserveDrift: number };
+  failures: string[];
+  rows: SelectedSyncRow[];
+};
+
+const marketplaceLabel = { wildberries: "Wildberries", ozon: "Ozon" } as const;
+
+const statusLabel = {
+  success: "Отправлено",
+  error: "Ошибка",
+  skipped: "Пропущено",
+  blocked: "Заблокировано",
+} as const;
+
 const emptyTotals: StockTotals = {
   articleCount: 0,
   skuCount: 0,
@@ -66,7 +101,7 @@ function StatusBadge({ row }: { row: StockRow }) {
   return <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">В наличии</Badge>;
 }
 
-export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
+export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: boolean; canSyncSelected: boolean }) {
   const [stocks, setStocks] = useState<StockRow[]>([]);
   const [totals, setTotals] = useState<StockTotals>(emptyTotals);
   const [query, setQuery] = useState("");
@@ -76,6 +111,8 @@ export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
   const [syncProgress, setSyncProgress] = useState("");
   const [unfinishedRun, setUnfinishedRun] = useState<{ startedAt: string | null; stale: boolean } | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [syncingSelected, setSyncingSelected] = useState(false);
+  const [selectedResult, setSelectedResult] = useState<SelectedSyncResult | null>(null);
 
   const load = useCallback(async (search: string) => {
     setLoading(true);
@@ -144,6 +181,34 @@ export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
       toast.error("Не удалось изменить остаток", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSaving(false);
+    }
+  }
+
+  /**
+   * Выборочная синхронизация: одна операция по отмеченным позициям.
+   * Полная синхронизация идёт заданием в несколько шагов, здесь этого не нужно —
+   * выбор ограничен полусотней строк и укладывается в один запрос.
+   */
+  async function syncSelectedStocks() {
+    if (selected.size === 0) return;
+    setSyncingSelected(true);
+    try {
+      const response = await fetch("/api/stocks/sync-selected", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceSkus: [...selected] }),
+      });
+      const data = await response.json() as SelectedSyncResult & { error?: string };
+      if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Синхронизация не выполнена.");
+      setSelectedResult(data);
+      const sent = data.wildberries.sent + data.ozon.sent;
+      if (data.ok) toast.success("Выбранные остатки отправлены", { description: `Позиций: ${data.selected}. Отправлено значений: ${sent}.` });
+      else toast.warning("Отправлено частично", { description: data.failures[0] ?? `Отправлено значений: ${sent}.` });
+      await load(query);
+    } catch (error) {
+      toast.error("Не удалось синхронизировать выбранные", { description: error instanceof Error ? error.message : "Повторите попытку." });
+    } finally {
+      setSyncingSelected(false);
     }
   }
 
@@ -230,11 +295,11 @@ export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="mr-1 text-xs text-muted-foreground">Выбрано: {selected.size}</span>
-            <Button variant="outline" onClick={() => void applyManualZero("restore")} disabled={!canRestore || saving || syncingAll}>
+            <Button variant="outline" onClick={() => void applyManualZero("restore")} disabled={!canRestore || saving || syncingAll || syncingSelected}>
               {saving ? <Loader2 className="animate-spin" /> : <RefreshCw />}Снять обнуление
             </Button>
             <AlertDialog>
-              <AlertDialogTrigger asChild><Button variant="destructive" disabled={selected.size === 0 || saving || syncingAll}><Ban />Обнулить выбранные</Button></AlertDialogTrigger>
+              <AlertDialogTrigger asChild><Button variant="destructive" disabled={selected.size === 0 || saving || syncingAll || syncingSelected}><Ban />Обнулить выбранные</Button></AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
                   <AlertDialogTitle>Обнулить {selected.size} позиций?</AlertDialogTitle>
@@ -246,10 +311,34 @@ export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
                 </AlertDialogFooter>
               </AlertDialogContent>
             </AlertDialog>
+            {canSyncSelected ? (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="secondary" disabled={selected.size === 0 || saving || syncingAll || syncingSelected}>
+                    {syncingSelected ? <Loader2 className="animate-spin" /> : <PackageCheck />}
+                    {syncingSelected ? "Отправляем…" : "Синхронизировать выбранные"}
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Синхронизировать {selected.size} позиций?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Сервис пересчитает резервы по текущим заказам и отправит остаток только по выбранным позициям — на все включённые склады WB и Ozon.
+                      Формула та же, что и при полной синхронизации: ОСВ минус активные резервы, минус страховой запас, с учётом ручного обнуления.
+                      Остальной ассортимент не затрагивается.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Отмена</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => void syncSelectedStocks()}><PackageCheck />Отправить выбранные</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
+            ) : null}
             {canSyncAll ? (
                 <AlertDialog>
                   <AlertDialogTrigger asChild>
-                    <Button disabled={saving || syncingAll}>{syncingAll ? <Loader2 className="animate-spin" /> : <CloudUpload />}{syncingAll ? "Синхронизация…" : "Синхронизировать все остатки"}</Button>
+                    <Button disabled={saving || syncingAll || syncingSelected}>{syncingAll ? <Loader2 className="animate-spin" /> : <CloudUpload />}{syncingAll ? "Синхронизация…" : "Синхронизировать все остатки"}</Button>
                   </AlertDialogTrigger>
                   <AlertDialogContent>
                     <AlertDialogHeader>
@@ -265,7 +354,7 @@ export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
                   </AlertDialogContent>
                 </AlertDialog>
             ) : null}
-            <Button variant="outline" onClick={() => void load(query)} disabled={loading || syncingAll}><RefreshCw className={loading ? "animate-spin" : ""} />Обновить</Button>
+            <Button variant="outline" onClick={() => void load(query)} disabled={loading || syncingAll || syncingSelected}><RefreshCw className={loading ? "animate-spin" : ""} />Обновить</Button>
             <Button variant="outline" asChild><a href="/upload">Загрузить ОСВ</a></Button>
           </div>
         </div>
@@ -299,6 +388,76 @@ export function StocksWorkspace({ canSyncAll }: { canSyncAll: boolean }) {
           )}
         </div>
       </Card>
+
+      <AlertDialog open={Boolean(selectedResult)} onOpenChange={(open) => { if (!open) setSelectedResult(null); }}>
+        <AlertDialogContent className="max-w-4xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>{selectedResult?.ok ? "Выбранные позиции синхронизированы" : "Синхронизация выполнена частично"}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Позиций выбрано: {selectedResult?.selected ?? 0}.
+              {" "}Wildberries: отправлено {selectedResult?.wildberries.sent ?? 0} значений на {selectedResult?.wildberries.warehouseCount ?? 0} складов.
+              {" "}Ozon: отправлено {selectedResult?.ozon.sent ?? 0} пар товар–склад.
+              {selectedResult?.unmapped.length ? ` Без сопоставления на площадках: ${selectedResult.unmapped.length}.` : ""}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {selectedResult?.failures.length ? (
+            <div className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3">
+              {selectedResult.failures.map((failure) => (
+                <p key={failure} className="text-xs leading-5 text-amber-900">{failure}</p>
+              ))}
+            </div>
+          ) : null}
+
+          {selectedResult?.ozon.reserveDrift ? (
+            <p className="text-xs leading-5 text-muted-foreground">
+              Резерв Ozon заметно больше нашего по {selectedResult.ozon.reserveDrift} позициям — признак, что заказы подтянуты не полностью. На отправленное число это не влияет.
+            </p>
+          ) : null}
+
+          <div className="max-h-[45vh] overflow-auto rounded-lg border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Площадка</TableHead>
+                  <TableHead>Склад</TableHead>
+                  <TableHead>Артикул</TableHead>
+                  <TableHead className="text-right">ОСВ</TableHead>
+                  <TableHead className="text-right">Резерв</TableHead>
+                  <TableHead className="text-right">Расчёт</TableHead>
+                  <TableHead className="text-right">Отправлено</TableHead>
+                  <TableHead className="text-right">Статус</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(selectedResult?.rows ?? []).map((row, index) => (
+                  <TableRow key={`${row.marketplaceId}-${row.warehouseId}-${row.externalSku}-${index}`}>
+                    <TableCell className="text-xs">{marketplaceLabel[row.marketplaceId]}</TableCell>
+                    <TableCell className="text-xs text-muted-foreground">{row.warehouseName}</TableCell>
+                    <TableCell className="font-mono text-xs">{row.sourceSku || row.externalSku}{row.size ? ` · ${row.size}` : ""}</TableCell>
+                    <TableCell className="text-right text-xs">{Number(row.osvQty).toLocaleString("ru-RU")}</TableCell>
+                    <TableCell className="text-right text-xs text-violet-700">{Number(row.reserveQty).toLocaleString("ru-RU")}</TableCell>
+                    <TableCell className="text-right text-xs">{Number(row.computedQty).toLocaleString("ru-RU")}</TableCell>
+                    <TableCell className="text-right text-xs font-semibold">{Number(row.sentQty).toLocaleString("ru-RU")}</TableCell>
+                    <TableCell className="text-right">
+                      <Badge variant={row.status === "success" ? "outline" : row.status === "skipped" ? "secondary" : "destructive"} title={row.message ?? undefined}>
+                        {statusLabel[row.status]}
+                      </Badge>
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {(selectedResult?.rows.length ?? 0) === 0 ? (
+                  <TableRow><TableCell colSpan={8} className="h-24 text-center text-sm text-muted-foreground">Ни одной пары товар–склад не отправлено.</TableCell></TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setSelectedResult(null)}>Закрыть</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }
