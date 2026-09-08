@@ -1,11 +1,12 @@
-import { authorizeApi } from "@/lib/app-auth";
+import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
 import { generateTemporaryPassword, hashPassword } from "@/lib/password.mjs";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { destroyAllSessions } from "@/lib/session";
 
 export async function GET() {
-  const auth = await authorizeApi(true);
+  const auth = await authorizeApi();
   if ("response" in auth) return auth.response;
+  if (!hasManagerAccess(auth.user)) return Response.json({ error: "Требуется полный доступ." }, { status: 403 });
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
   const rows = await runtime.DB.prepare(
@@ -22,8 +23,9 @@ export async function GET() {
 }
 
 export async function POST(request: Request) {
-  const auth = await authorizeApi(true);
+  const auth = await authorizeApi();
   if ("response" in auth) return auth.response;
+  if (!hasManagerAccess(auth.user)) return Response.json({ error: "Требуется полный доступ." }, { status: 403 });
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
   const body = await request.json().catch(() => null) as { email?: unknown; action?: unknown; accessLevel?: unknown } | null;
