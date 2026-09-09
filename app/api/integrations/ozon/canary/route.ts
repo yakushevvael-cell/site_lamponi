@@ -4,6 +4,7 @@ import { buildSendableRow } from "@/lib/stock-math";
 import { authorizeApi } from "@/lib/app-auth";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import {
+import { OSV_UNITS_SQL } from "@/lib/osv-units";
   getOzonProductCatalog,
   getOzonStocksByWarehouse,
   getOzonUnfulfilledPostings,
@@ -95,10 +96,10 @@ async function readCanaryStatus(db: D1Database) {
     `SELECT p.source_sku AS sourceSku,
             p.article,
             p.size,
-            p.current_physical_qty AS physicalQuantity,
+            ${OSV_UNITS_SQL} AS physicalQuantity,
             sm.external_sku AS offerId,
             COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) AS reservedQuantity,
-            CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, p.current_physical_qty - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock) END AS availableQuantity
+            CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, ${OSV_UNITS_SQL} - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock) END AS availableQuantity
      FROM sku_mappings sm
      JOIN products p ON p.source_sku = sm.product_sku
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
@@ -453,7 +454,7 @@ export async function POST() {
               p.article,
               p.size,
               sm.external_sku AS offerId,
-              p.current_physical_qty AS osvQty,
+              ${OSV_UNITS_SQL} AS osvQty,
               COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) AS reserveQty,
               p.safety_stock AS safetyStock,
               p.manual_zero AS manualZero

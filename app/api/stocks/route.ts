@@ -1,5 +1,6 @@
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { authorizeApi } from "@/lib/app-auth";
+import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 export async function GET(request: Request) {
   const auth = await authorizeApi();
@@ -16,12 +17,13 @@ export async function GET(request: Request) {
        p.article AS sku,
        p.size AS size,
        p.current_physical_qty AS physicalQuantity,
+       p.units_per_item AS unitsPerItem,
        COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) AS reservedQuantity,
        p.safety_stock AS safetyStock,
        p.manual_zero AS manualZero,
        p.manual_zero_at AS manualZeroAt,
        -- Та же формула, что и в lib/stock-math: MAX(0; ОСВ − резерв − страховой), целое.
-       CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(p.current_physical_qty - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock AS INTEGER)) END AS availableQuantity,
+       CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(${OSV_UNITS_SQL} - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock AS INTEGER)) END AS availableQuantity,
        p.updated_at AS updatedAt
      FROM products p
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
@@ -44,7 +46,7 @@ export async function GET(request: Request) {
       COALESCE((SELECT SUM(quantity) FROM stock_reservations WHERE status = 'active'), 0) AS reservedQuantity,
       COALESCE(SUM(p.safety_stock), 0) AS safetyStock,
       COALESCE(SUM(CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(
-        p.current_physical_qty
+        ${OSV_UNITS_SQL}
         - COALESCE((SELECT SUM(quantity) FROM stock_reservations r WHERE r.status = 'active' AND r.product_sku = p.source_sku), 0)
         - p.safety_stock
       AS INTEGER)) END), 0) AS availableQuantity

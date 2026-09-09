@@ -9,6 +9,7 @@ import { finishSyncRun, logStockRows, startSyncRun, type LogRow } from "@/lib/st
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
 import { clearAllDirtySkus } from "@/lib/stock-queue";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 const JOB_KEY = "stocks_full_sync_job";
 const LAST_STARTED_KEY = "stocks_full_sync_last_started_at";
@@ -107,7 +108,7 @@ async function readStockBasis(
             sm.external_sku AS externalSku,
             p.article AS article,
             p.size AS size,
-            p.current_physical_qty AS osvQty,
+            ${OSV_UNITS_SQL} AS osvQty,
             COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) AS reserveQty,
             p.safety_stock AS safetyStock,
             p.manual_zero AS manualZero
@@ -184,7 +185,7 @@ async function readZeroRatio(db: D1Database) {
             COUNT(CASE WHEN computed <= 0 THEN 1 END) AS zeros
      FROM (
        SELECT CASE WHEN p.manual_zero = 1 THEN 0 ELSE
-                MAX(0, CAST(p.current_physical_qty
+                MAX(0, CAST(${OSV_UNITS_SQL}
                   - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0)
                   - p.safety_stock AS INTEGER))
               END AS computed

@@ -3,6 +3,7 @@ import { stockSyncBlocked } from "@/lib/sync-pause";
 import { authorizeApi } from "@/lib/app-auth";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import {
+import { OSV_UNITS_SQL } from "@/lib/osv-units";
   getWildberriesCardsByArticle,
   getWildberriesNewOrders,
   getWildberriesOrderStatuses,
@@ -58,10 +59,10 @@ async function readCanaryStatus(db: D1Database) {
     `SELECT p.source_sku AS sourceSku,
             p.article,
             p.size,
-            p.current_physical_qty AS physicalQuantity,
+            ${OSV_UNITS_SQL} AS physicalQuantity,
             sm.external_sku AS chrtId,
             COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) AS reservedQuantity,
-            CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, p.current_physical_qty - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock) END AS availableQuantity
+            CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, ${OSV_UNITS_SQL} - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock) END AS availableQuantity
      FROM sku_mappings sm
      JOIN products p ON p.source_sku = sm.product_sku
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
@@ -342,7 +343,7 @@ export async function POST() {
               p.article,
               p.size,
               CAST(sm.external_sku AS INTEGER) AS chrtId,
-              CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(p.current_physical_qty - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock AS INTEGER)) END AS amount
+              CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(${OSV_UNITS_SQL} - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock AS INTEGER)) END AS amount
        FROM products p
        JOIN sku_mappings sm ON sm.product_sku = p.source_sku AND sm.marketplace_id = ? AND sm.active = 1
        LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku

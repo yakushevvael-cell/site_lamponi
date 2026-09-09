@@ -37,6 +37,11 @@ export const products = sqliteTable(
     size: text("size"),
     name: text("name"),
     currentPhysicalQty: real("current_physical_qty").notNull().default(0),
+    /**
+     * Сколько единиц ОСВ составляют один товар на площадке.
+     * Серьги: в 1С штуки, на площадке пара — значит 2. Обычный товар — 1.
+     */
+    unitsPerItem: integer("units_per_item").notNull().default(1),
     latestUploadId: integer("latest_upload_id").references(() => osvUploads.id),
     safetyStock: real("safety_stock").notNull().default(0),
     manualZero: integer("manual_zero", { mode: "boolean" }).notNull().default(false),

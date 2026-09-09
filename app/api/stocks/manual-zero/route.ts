@@ -6,6 +6,7 @@ import { getRuntimeEnv } from "@/lib/runtime-env";
 import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow } from "@/lib/stock-log";
 import type { MarketplaceStockId } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 type MappingRow = {
   productSku: string;
@@ -133,7 +134,7 @@ export async function POST(request: Request) {
             sm.external_sku AS externalSku,
             p.article AS article,
             p.size AS size,
-            p.current_physical_qty AS osvQty
+            ${OSV_UNITS_SQL} AS osvQty
      FROM sku_mappings sm
      JOIN products p ON p.source_sku = sm.product_sku
      WHERE sm.active = 1 AND sm.product_sku IN (${placeholders}) AND sm.marketplace_id IN ('wildberries', 'ozon')`,

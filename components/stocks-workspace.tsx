@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync } from "@/lib/stock-sync-client";
@@ -29,6 +29,7 @@ type StockRow = {
   sku: string;
   size: string | null;
   physicalQuantity: number;
+  unitsPerItem: number;
   reservedQuantity: number;
   safetyStock: number;
   availableQuantity: number;
@@ -122,6 +123,9 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [selectedResult, setSelectedResult] = useState<SelectedSyncResult | null>(null);
   const [pause, setPause] = useState<StockSyncPause | null>(null);
   const [pending, setPending] = useState(0);
+  const [unitsOpen, setUnitsOpen] = useState(false);
+  const [unitsValue, setUnitsValue] = useState("2");
+  const [savingUnits, setSavingUnits] = useState(false);
   const [pushingPending, setPushingPending] = useState(false);
   const [switching, setSwitching] = useState(false);
 
@@ -235,6 +239,38 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       toast.error("Не удалось переключить выгрузку", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSwitching(false);
+    }
+  }
+
+  /**
+   * Кратность позиции: сколько единиц ОСВ составляют один товар на площадке.
+   * Проставляется пачкой — по отмеченным строкам или сразу по всему, что нашёл поиск.
+   */
+  async function applyUnits(scope: "selected" | "search") {
+    const parsed = Math.trunc(Number(unitsValue));
+    if (!Number.isFinite(parsed) || parsed < 1 || parsed > 100) {
+      toast.error("Некорректная кратность", { description: "Введите целое число от 1 до 100." });
+      return;
+    }
+    setSavingUnits(true);
+    try {
+      const response = await fetch("/api/stocks/units", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(scope === "selected"
+          ? { unitsPerItem: parsed, scope: "selected", sourceSkus: [...selected] }
+          : { unitsPerItem: parsed, scope: "search", query }),
+      });
+      const data = await response.json() as { updated?: number; error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Не удалось изменить кратность.");
+      toast.success("Кратность обновлена", { description: `Позиций: ${data.updated ?? 0}. Новое значение: ${parsed}.` });
+      setUnitsOpen(false);
+      await load(query);
+      await loadPending();
+    } catch (error) {
+      toast.error("Кратность не изменена", { description: error instanceof Error ? error.message : "Повторите попытку." });
+    } finally {
+      setSavingUnits(false);
     }
   }
 
@@ -492,6 +528,9 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                 </AlertDialogContent>
               </AlertDialog>
             ) : null}
+            {canSyncSelected ? (
+              <Button variant="outline" onClick={() => setUnitsOpen(true)} disabled={loading || savingUnits}><Layers />Кратность позиции</Button>
+            ) : null}
             <Button variant="outline" onClick={() => void load(query)} disabled={loading || syncingAll || syncingSelected}><RefreshCw className={loading ? "animate-spin" : ""} />Обновить</Button>
             <Button variant="outline" asChild><a href="/upload">Загрузить ОСВ</a></Button>
           </div>
@@ -506,7 +545,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12 pl-5"><Checkbox checked={allSelected} onCheckedChange={(checked) => setSelected(checked ? new Set(stocks.slice(0, 50).map((row) => row.variantKey)) : new Set())} aria-label="Выбрать строки" /></TableHead>
-                  <TableHead>Артикул из 1С</TableHead><TableHead>Размер</TableHead><TableHead className="text-right">Физически</TableHead><TableHead className="text-right">Резерв</TableHead><TableHead className="text-right">Доступно</TableHead><TableHead className="pr-5 text-right">Статус</TableHead>
+                  <TableHead>Артикул из 1С</TableHead><TableHead>Размер</TableHead><TableHead className="text-right">Физически</TableHead><TableHead className="text-right">Ед. в товаре</TableHead><TableHead className="text-right">Резерв</TableHead><TableHead className="text-right">Доступно</TableHead><TableHead className="pr-5 text-right">Статус</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -516,6 +555,11 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                     <TableCell className="font-mono text-xs font-semibold">{row.sku}</TableCell>
                     <TableCell>{row.size ? <Badge variant="outline">{row.size}</Badge> : <span className="text-xs text-muted-foreground">Без размера</span>}</TableCell>
                     <TableCell className="text-right">{Number(row.physicalQuantity).toLocaleString("ru-RU")}</TableCell>
+                    <TableCell className="text-right">
+                      {Number(row.unitsPerItem ?? 1) > 1
+                        ? <Badge className="bg-sky-100 text-sky-900 hover:bg-sky-100">{Number(row.unitsPerItem)}</Badge>
+                        : <span className="text-xs text-muted-foreground">1</span>}
+                    </TableCell>
                     <TableCell className="text-right text-violet-700">{Number(row.reservedQuantity).toLocaleString("ru-RU")}</TableCell>
                     <TableCell className="text-right font-semibold">{Number(row.availableQuantity).toLocaleString("ru-RU")}</TableCell>
                     <TableCell className="pr-5 text-right"><StatusBadge row={row} /></TableCell>
@@ -526,6 +570,47 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           )}
         </div>
       </Card>
+
+      <AlertDialog open={unitsOpen} onOpenChange={(open) => { if (!savingUnits) setUnitsOpen(open); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Кратность позиции</AlertDialogTitle>
+            <AlertDialogDescription>
+              Сколько единиц из ОСВ составляют один товар на площадке. Серьги в 1С лежат штуками, а продаются парой — для них 2:
+              остаток «10 штук» станет 5 товарами. Для остального ассортимента 1, то есть как в ОСВ.
+              Резерв по заказам и страховой запас не пересчитываются — они и так в единицах площадки.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            <p className="text-sm font-medium">Единиц ОСВ в одном товаре</p>
+            <Input
+              type="number"
+              min={1}
+              max={100}
+              value={unitsValue}
+              onChange={(event) => setUnitsValue(event.target.value)}
+              className="w-28"
+            />
+            <p className="text-xs leading-5 text-muted-foreground">
+              Быстрый способ: наберите в поиске нужный признак (например, «С» для серёг), проверьте, что в таблице остались только они,
+              и примените ко всему найденному — отмечать галочками каждую строку не нужно.
+            </p>
+            {query
+              ? <p className="text-xs font-medium text-amber-700">Поиск «{query}» — найдено позиций: {stocks.length}.</p>
+              : <p className="text-xs font-medium text-red-700">Поиск пуст: «всем по поиску» затронет весь ассортимент ({stocks.length}). Сначала сузьте поиск.</p>}
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={savingUnits}>Отмена</AlertDialogCancel>
+            <Button variant="outline" onClick={() => void applyUnits("selected")} disabled={savingUnits || selected.size === 0}>
+              Выбранным ({selected.size})
+            </Button>
+            <Button onClick={() => void applyUnits("search")} disabled={savingUnits}>
+              {savingUnits ? <Loader2 className="animate-spin" /> : <Layers />}
+              Всем по поиску ({stocks.length})
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={Boolean(selectedResult)} onOpenChange={(open) => { if (!open) setSelectedResult(null); }}>
         <AlertDialogContent className="max-w-4xl">

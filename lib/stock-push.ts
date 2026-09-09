@@ -5,6 +5,7 @@ import { collectReserveDrift, rebuildReservations } from "@/lib/reservations";
 import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow, type SyncTrigger } from "@/lib/stock-log";
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 /**
  * Отправка остатков по списку позиций.
@@ -75,7 +76,7 @@ async function readSelectedBasis(db: D1Database, marketplaceId: MarketplaceId, s
             sm.external_sku AS externalSku,
             p.article AS article,
             p.size AS size,
-            p.current_physical_qty AS osvQty,
+            ${OSV_UNITS_SQL} AS osvQty,
             COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) AS reserveQty,
             p.safety_stock AS safetyStock,
             p.manual_zero AS manualZero
