@@ -57,6 +57,13 @@
       "when": 1788200200000,
       "tag": "0007_password_login",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1788200300000,
+      "tag": "0008_stock_dirty",
+      "breakpoints": true
     }
   ]
 }

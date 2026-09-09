@@ -13,6 +13,8 @@
  *  - `released`      — заказ отменён, выкуплен или протух.
  */
 
+import { markStocksDirty } from "@/lib/stock-queue";
+
 /** Заказ, не получивший финального статуса за это время, перестаёт держать остаток. */
 export const RESERVE_TTL_DAYS = 45;
 
@@ -22,6 +24,8 @@ export type RebuildResult = {
   released: number;
   balanceDate: string | null;
   reservedQuantity: number;
+  /** Сколько позиций изменили резерв и поставлены в очередь на доотправку. */
+  changedSkus: number;
 };
 
 /** Дата, на которую актуальна последняя загруженная ОСВ. */
@@ -35,12 +39,26 @@ export async function readBalanceDate(db: D1Database) {
   return row?.balanceDate ?? null;
 }
 
+/** Текущий активный резерв по каждому артикулу — снимок для сравнения «до/после». */
+async function readActiveReserveBySku(db: D1Database) {
+  const rows = await db.prepare(
+    `SELECT product_sku AS productSku, COALESCE(SUM(quantity), 0) AS quantity
+     FROM stock_reservations
+     WHERE status = 'active'
+     GROUP BY product_sku`,
+  ).all<{ productSku: string; quantity: number }>();
+  return new Map(rows.results.map((row) => [row.productSku, Number(row.quantity) || 0]));
+}
+
 /**
  * Полностью перестраивает резервы. Вызывается после загрузки ОСВ, после
  * синхронизации заказов и перед стартом полной синхронизации остатков.
  */
 export async function rebuildReservations(db: D1Database): Promise<RebuildResult> {
   const balanceDate = await readBalanceDate(db);
+  // Снимок «до»: по разнице с состоянием «после» видно, какие именно позиции
+  // изменили остаток. Только они поедут на площадки доотправкой.
+  const reserveBefore = await readActiveReserveBySku(db).catch(() => null);
   // Если ОСВ ещё не загружали, считаем, что списанного нет вовсе.
   const cutoff = balanceDate ?? "0001-01-01T00:00:00Z";
 
@@ -100,12 +118,29 @@ export async function rebuildReservations(db: D1Database): Promise<RebuildResult
      FROM stock_reservations`,
   ).first<{ active: number; closedByOsv: number; released: number; reservedQuantity: number }>();
 
+  let changedSkus = 0;
+  if (reserveBefore) {
+    const reserveAfter = await readActiveReserveBySku(db).catch(() => null);
+    if (reserveAfter) {
+      const changed: string[] = [];
+      for (const [sku, quantity] of reserveAfter) {
+        if ((reserveBefore.get(sku) ?? 0) !== quantity) changed.push(sku);
+      }
+      for (const [sku, quantity] of reserveBefore) {
+        // Позиция, у которой резерв обнулился, тоже изменилась: остаток вырос.
+        if (quantity !== 0 && !reserveAfter.has(sku)) changed.push(sku);
+      }
+      changedSkus = await markStocksDirty(db, changed, "изменился резерв по заказам");
+    }
+  }
+
   return {
     active: Number(totals?.active ?? 0),
     closedByOsv: Number(totals?.closedByOsv ?? 0),
     released: Number(totals?.released ?? 0),
     reservedQuantity: Number(totals?.reservedQuantity ?? 0),
     balanceDate,
+    changedSkus,
   };
 }
 

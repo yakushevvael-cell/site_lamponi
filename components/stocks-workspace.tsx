@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync } from "@/lib/stock-sync-client";
@@ -121,6 +121,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [syncingSelected, setSyncingSelected] = useState(false);
   const [selectedResult, setSelectedResult] = useState<SelectedSyncResult | null>(null);
   const [pause, setPause] = useState<StockSyncPause | null>(null);
+  const [pending, setPending] = useState(0);
+  const [pushingPending, setPushingPending] = useState(false);
   const [switching, setSwitching] = useState(false);
 
   const load = useCallback(async (search: string) => {
@@ -148,6 +150,19 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       .then((state: StockSyncPause) => setPause(state))
       .catch(() => undefined);
   }, []);
+
+  // Очередь доотправки: позиции, у которых изменился резерв после заказов.
+  const loadPending = useCallback(async () => {
+    try {
+      const response = await fetch("/api/stocks/sync-pending", { cache: "no-store" });
+      const data = await response.json() as { pending?: number };
+      setPending(Number(data.pending ?? 0));
+    } catch {
+      // Индикатор вспомогательный: без него страница работает как раньше.
+    }
+  }, []);
+
+  useEffect(() => { void loadPending(); }, [loadPending]);
 
   // Автоподхват: цикл синхронизации ведёт вкладка браузера, поэтому закрытая
   // вкладка оставляет запуск незавершённым. Показываем его администратору,
@@ -220,6 +235,25 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       toast.error("Не удалось переключить выгрузку", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSwitching(false);
+    }
+  }
+
+  /** Ручной запуск доотправки: обычно её делает планировщик каждые 15 минут. */
+  async function pushPendingStocks() {
+    setPushingPending(true);
+    try {
+      const response = await fetch("/api/stocks/sync-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
+      const data = await response.json() as { ok?: boolean; selected?: number; pendingLeft?: number; failures?: string[]; error?: string };
+      if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Доотправка не выполнена.");
+      if (!data.selected) toast.info("Доотправлять нечего", { description: "С прошлой выгрузки остатки не менялись." });
+      else if (data.ok) toast.success("Изменившиеся остатки отправлены", { description: `Позиций: ${data.selected}.` });
+      else toast.warning("Отправлено частично", { description: data.failures?.[0] ?? `Позиций: ${data.selected}.` });
+      await loadPending();
+      await load(query);
+    } catch (error) {
+      toast.error("Не удалось доотправить остатки", { description: error instanceof Error ? error.message : "Повторите попытку." });
+    } finally {
+      setPushingPending(false);
     }
   }
 
@@ -301,6 +335,16 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
         <p className="mt-1 text-xs leading-5 text-blue-800">
           Доступный остаток рассчитывается из ОСВ с учётом активных резервов, страхового запаса и ручного обнуления. Кнопка отправляет рассчитанные значения на все подключённые склады WB и Ozon.
         </p>
+        <p className="mt-2 text-xs leading-5 text-blue-800">
+          После каждой загрузки заказов (каждые 15 минут) остаток по позициям, у которых изменился резерв, уходит на площадки отдельно — не дожидаясь часовой выгрузки.
+          {pending > 0 ? ` Сейчас ждут отправки: ${pending}.` : " Сейчас очередь пуста."}
+        </p>
+        {canSyncSelected && !paused ? (
+          <Button variant="outline" size="sm" className="mt-3 bg-white" onClick={() => void pushPendingStocks()} disabled={pushingPending || syncingAll || syncingSelected}>
+            {pushingPending ? <Loader2 className="animate-spin" /> : <Zap />}
+            {pushingPending ? "Отправляем…" : "Доотправить изменившиеся сейчас"}
+          </Button>
+        ) : null}
         {syncProgress ? <p className="mt-2 flex items-center gap-2 text-xs font-medium text-blue-950"><Loader2 className="size-3.5 animate-spin" />{syncProgress}</p> : null}
       </section>
 

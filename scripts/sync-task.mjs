@@ -8,7 +8,8 @@
  * вкладка, только без человека.
  *
  * Запуск:
- *   node scripts/sync-task.mjs orders   — подтянуть заказы и пересчитать резервы
+ *   node scripts/sync-task.mjs orders   — подтянуть заказы, пересчитать резервы
+ *                                         и сразу доотправить изменившиеся остатки
  *   node scripts/sync-task.mjs stocks   — полная выгрузка остатков на площадки
  *
  * Скрипт обращается к собственному HTTP-API приложения со служебным токеном:
@@ -91,6 +92,39 @@ async function syncOrders() {
   log(`Заказы загружены. Активный резерв: ${reserved ?? "не пересчитан"}.`);
   if (Array.isArray(data.errors) && data.errors.length > 0) {
     for (const error of data.errors) log(`Замечание: ${error.marketplace} — ${error.message}`);
+    process.exitCode = 2;
+  }
+  await pushChangedStocks();
+}
+
+/**
+ * Доотправка остатков по изменившимся позициям.
+ *
+ * Смысл: заказ на одной площадке должен как можно быстрее уменьшить остаток на
+ * всех остальных. Ждать часовой выгрузки нельзя — за это время товар успевают
+ * заказать повторно. Отправляются только те артикулы, у которых при пересчёте
+ * изменился резерв, поэтому запуск дешёвый и его не жалко делать часто.
+ */
+async function pushChangedStocks() {
+  const { status, data } = await call("/api/stocks/sync-pending", {});
+  if (status === 423 && data.stockSyncPaused) {
+    log("Выгрузка остатков остановлена вручную — доотправка пропущена.");
+    return;
+  }
+  if (status >= 400 && status !== 207) {
+    log(`Доотправка остатков не выполнена: ${data.error ?? `ответ ${status}`}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (!data.selected) {
+    log("Изменившихся позиций нет — доотправлять нечего.");
+    return;
+  }
+  const wb = data.wildberries?.sent ?? 0;
+  const ozon = data.ozon?.sent ?? 0;
+  log(`Доотправка: позиций ${data.selected}, WB ${wb}, Ozon ${ozon}. В очереди осталось: ${data.pendingLeft ?? 0}.`);
+  if (Array.isArray(data.failures) && data.failures.length > 0) {
+    for (const failure of data.failures) log(`Замечание: ${failure}`);
     process.exitCode = 2;
   }
 }

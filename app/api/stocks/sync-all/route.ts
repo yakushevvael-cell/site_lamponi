@@ -7,6 +7,7 @@ import { retryAfterSecondsOf } from "@/lib/http-retry";
 import { collectReserveDrift, rebuildReservations } from "@/lib/reservations";
 import { finishSyncRun, logStockRows, startSyncRun, type LogRow } from "@/lib/stock-log";
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
+import { clearAllDirtySkus } from "@/lib/stock-queue";
 import { updateWildberriesStocks } from "@/lib/wildberries";
 
 const JOB_KEY = "stocks_full_sync_job";
@@ -629,6 +630,9 @@ async function finishJob(db: D1Database, job: FullSyncJob) {
     ok ? "success" : "partial",
     ok ? null : [...job.wildberries.failures, ...job.ozon.failures][0]?.message ?? "Синхронизация завершена частично.",
   );
+  // После полной выгрузки на площадках уже актуальные числа: очередь
+  // доотправки обнуляется, чтобы не отправлять то же самое второй раз.
+  if (ok) await clearAllDirtySkus(db);
   return Response.json(summary, { status: ok ? 200 : 207 });
 }
 

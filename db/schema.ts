@@ -182,6 +182,20 @@ export const stockReservations = sqliteTable(
   ],
 );
 
+/**
+ * Очередь позиций, у которых изменился резерв и остаток ещё не доехал до площадок.
+ * Наполняется при пересчёте резервов, разбирается фоновой доотправкой.
+ */
+export const stockDirtySkus = sqliteTable(
+  "stock_dirty_skus",
+  {
+    productSku: text("product_sku").primaryKey(),
+    reason: text("reason"),
+    markedAt: text("marked_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("stock_dirty_marked_at_idx").on(table.markedAt)],
+);
+
 export const syncEvents = sqliteTable(
   "sync_events",
   {
