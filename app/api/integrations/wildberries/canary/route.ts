@@ -1,4 +1,5 @@
 import { getRuntimeEnv } from "@/lib/runtime-env";
+import { stockSyncBlocked } from "@/lib/sync-pause";
 import { authorizeApi } from "@/lib/app-auth";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import {
@@ -288,6 +289,8 @@ export async function POST() {
   if ("response" in auth) return auth.response;
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
+  const paused = await stockSyncBlocked(runtime.DB);
+  if (paused) return paused;
   const credentials = await getMarketplaceCredentials(runtime.DB, runtime, MARKETPLACE_ID);
   const token = credentials.WB_API_TOKEN;
   if (!token) return Response.json({ error: "Ключ Wildberries не добавлен." }, { status: 400 });

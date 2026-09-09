@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, Loader2, PackageCheck, RefreshCw, Ruler, Search, ShoppingCart, Warehouse } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync } from "@/lib/stock-sync-client";
@@ -74,6 +74,13 @@ type SelectedSyncResult = {
   rows: SelectedSyncRow[];
 };
 
+type StockSyncPause = {
+  paused: boolean;
+  changedAt: string | null;
+  changedBy: string | null;
+  reason: string | null;
+};
+
 const marketplaceLabel = { wildberries: "Wildberries", ozon: "Ozon" } as const;
 
 const statusLabel = {
@@ -113,6 +120,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [syncingSelected, setSyncingSelected] = useState(false);
   const [selectedResult, setSelectedResult] = useState<SelectedSyncResult | null>(null);
+  const [pause, setPause] = useState<StockSyncPause | null>(null);
+  const [switching, setSwitching] = useState(false);
 
   const load = useCallback(async (search: string) => {
     setLoading(true);
@@ -132,6 +141,14 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
 
   useEffect(() => { void Promise.resolve().then(() => load("")); }, [load]);
 
+  // Состояние стоп-крана: пока выгрузка на паузе, кнопки отправки заблокированы.
+  useEffect(() => {
+    void fetch("/api/stocks/pause", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((state: StockSyncPause) => setPause(state))
+      .catch(() => undefined);
+  }, []);
+
   // Автоподхват: цикл синхронизации ведёт вкладка браузера, поэтому закрытая
   // вкладка оставляет запуск незавершённым. Показываем его администратору,
   // а не ждём, пока истечёт получасовая блокировка.
@@ -143,6 +160,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       })
       .catch(() => undefined);
   }, [canSyncAll]);
+  const paused = pause?.paused ?? false;
   const allSelected = stocks.length > 0 && stocks.slice(0, 50).every((row) => selected.has(row.variantKey));
   const selectedRows = useMemo(() => stocks.filter((row) => selected.has(row.variantKey)), [selected, stocks]);
   const canRestore = selectedRows.some((row) => Boolean(row.manualZero));
@@ -181,6 +199,27 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       toast.error("Не удалось изменить остаток", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSaving(false);
+    }
+  }
+
+  /** Стоп-кран: включение и снятие общей паузы выгрузки остатков. */
+  async function toggleStockSync(next: boolean) {
+    setSwitching(true);
+    try {
+      const response = await fetch("/api/stocks/pause", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ paused: next }),
+      });
+      const data = await response.json() as StockSyncPause & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Не удалось изменить режим выгрузки.");
+      setPause(data);
+      if (next) toast.success("Выгрузка остатков остановлена", { description: "Отправка на WB и Ozon прекращена. Ключи и настройки складов сохранены." });
+      else toast.success("Выгрузка остатков возобновлена", { description: "Отправка на площадки снова разрешена." });
+    } catch (error) {
+      toast.error("Не удалось переключить выгрузку", { description: error instanceof Error ? error.message : "Повторите попытку." });
+    } finally {
+      setSwitching(false);
     }
   }
 
@@ -281,6 +320,38 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
         </section>
       ) : null}
 
+      {paused ? (
+        <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 px-5 py-4">
+          <div>
+            <p className="flex items-center gap-2 text-sm font-semibold text-red-950"><ShieldAlert className="size-4" />Выгрузка остатков на площадки остановлена</p>
+            <p className="mt-1 text-xs leading-5 text-red-900">
+              Сервис не отправляет остатки на Wildberries и Ozon: ни по расписанию, ни вручную. Заказы продолжают загружаться, API-ключи и настройки складов сохранены.
+              {pause?.changedAt ? ` Остановлено ${new Date(pause.changedAt).toLocaleString("ru-RU")}` : ""}
+              {pause?.changedBy ? `, пользователь ${pause.changedBy}.` : pause?.changedAt ? "." : ""}
+            </p>
+          </div>
+          {canSyncAll ? (
+            <AlertDialog>
+              <AlertDialogTrigger asChild>
+                <Button disabled={switching}>{switching ? <Loader2 className="animate-spin" /> : <Play />}Возобновить выгрузку</Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent>
+                <AlertDialogHeader>
+                  <AlertDialogTitle>Возобновить выгрузку остатков?</AlertDialogTitle>
+                  <AlertDialogDescription>
+                    Отправка остатков на WB и Ozon снова станет доступна — вручную и по расписанию. Сразу после включения площадки получат остатки при ближайшей синхронизации.
+                  </AlertDialogDescription>
+                </AlertDialogHeader>
+                <AlertDialogFooter>
+                  <AlertDialogCancel>Отмена</AlertDialogCancel>
+                  <AlertDialogAction onClick={() => void toggleStockSync(false)}><Play />Возобновить</AlertDialogAction>
+                </AlertDialogFooter>
+              </AlertDialogContent>
+            </AlertDialog>
+          ) : null}
+        </section>
+      ) : null}
+
       <Card className="gap-0 overflow-hidden border-border/80 py-0">
         <div className="flex flex-col gap-3 border-b px-4 py-4 xl:flex-row xl:items-center xl:justify-between">
           <div className="relative w-full sm:max-w-sm">
@@ -295,11 +366,11 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="mr-1 text-xs text-muted-foreground">Выбрано: {selected.size}</span>
-            <Button variant="outline" onClick={() => void applyManualZero("restore")} disabled={!canRestore || saving || syncingAll || syncingSelected}>
+            <Button variant="outline" onClick={() => void applyManualZero("restore")} disabled={!canRestore || saving || syncingAll || syncingSelected || paused}>
               {saving ? <Loader2 className="animate-spin" /> : <RefreshCw />}Снять обнуление
             </Button>
             <AlertDialog>
-              <AlertDialogTrigger asChild><Button variant="destructive" disabled={selected.size === 0 || saving || syncingAll || syncingSelected}><Ban />Обнулить выбранные</Button></AlertDialogTrigger>
+              <AlertDialogTrigger asChild><Button variant="destructive" disabled={selected.size === 0 || saving || syncingAll || syncingSelected || paused}><Ban />Обнулить выбранные</Button></AlertDialogTrigger>
               <AlertDialogContent>
                 <AlertDialogHeader>
                   <AlertDialogTitle>Обнулить {selected.size} позиций?</AlertDialogTitle>
@@ -314,7 +385,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             {canSyncSelected ? (
               <AlertDialog>
                 <AlertDialogTrigger asChild>
-                  <Button variant="secondary" disabled={selected.size === 0 || saving || syncingAll || syncingSelected}>
+                  <Button variant="secondary" disabled={selected.size === 0 || saving || syncingAll || syncingSelected || paused}>
                     {syncingSelected ? <Loader2 className="animate-spin" /> : <PackageCheck />}
                     {syncingSelected ? "Отправляем…" : "Синхронизировать выбранные"}
                   </Button>
@@ -338,7 +409,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             {canSyncAll ? (
                 <AlertDialog>
                   <AlertDialogTrigger asChild>
-                    <Button disabled={saving || syncingAll || syncingSelected}>{syncingAll ? <Loader2 className="animate-spin" /> : <CloudUpload />}{syncingAll ? "Синхронизация…" : "Синхронизировать все остатки"}</Button>
+                    <Button disabled={saving || syncingAll || syncingSelected || paused}>{syncingAll ? <Loader2 className="animate-spin" /> : <CloudUpload />}{syncingAll ? "Синхронизация…" : "Синхронизировать все остатки"}</Button>
                   </AlertDialogTrigger>
                   <AlertDialogContent>
                     <AlertDialogHeader>
@@ -353,6 +424,29 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                     </AlertDialogFooter>
                   </AlertDialogContent>
                 </AlertDialog>
+            ) : null}
+            {canSyncAll && !paused ? (
+              <AlertDialog>
+                <AlertDialogTrigger asChild>
+                  <Button variant="outline" className="border-red-300 text-red-700 hover:bg-red-50 hover:text-red-800" disabled={switching || syncingAll || syncingSelected}>
+                    {switching ? <Loader2 className="animate-spin" /> : <PowerOff />}Остановить выгрузку
+                  </Button>
+                </AlertDialogTrigger>
+                <AlertDialogContent>
+                  <AlertDialogHeader>
+                    <AlertDialogTitle>Остановить выгрузку остатков на площадки?</AlertDialogTitle>
+                    <AlertDialogDescription>
+                      Сервис перестанет отправлять остатки по всем артикулам на все склады Wildberries и Ozon — и вручную, и по расписанию.
+                      API-ключи, склады и сопоставления остаются на месте, заказы продолжат загружаться. На площадках останутся те остатки, которые были отправлены последними.
+                      Включить обратно можно этой же кнопкой в любой момент.
+                    </AlertDialogDescription>
+                  </AlertDialogHeader>
+                  <AlertDialogFooter>
+                    <AlertDialogCancel>Отмена</AlertDialogCancel>
+                    <AlertDialogAction onClick={() => void toggleStockSync(true)} variant="destructive"><PowerOff />Остановить</AlertDialogAction>
+                  </AlertDialogFooter>
+                </AlertDialogContent>
+              </AlertDialog>
             ) : null}
             <Button variant="outline" onClick={() => void load(query)} disabled={loading || syncingAll || syncingSelected}><RefreshCw className={loading ? "animate-spin" : ""} />Обновить</Button>
             <Button variant="outline" asChild><a href="/upload">Загрузить ОСВ</a></Button>

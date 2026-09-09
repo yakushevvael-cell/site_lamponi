@@ -1,4 +1,5 @@
 import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
+import { stockSyncBlocked } from "@/lib/sync-pause";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
 import { collectReserveDrift, rebuildReservations } from "@/lib/reservations";
@@ -111,6 +112,8 @@ export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
   const db = runtime.DB;
+  const paused = await stockSyncBlocked(db);
+  if (paused) return paused;
 
   const body = await request.json().catch(() => null) as { sourceSkus?: unknown } | null;
   const sourceSkus = Array.isArray(body?.sourceSkus)

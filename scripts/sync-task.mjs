@@ -25,6 +25,9 @@ function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
 }
 
+/** Ручная остановка выгрузки — это не сбой, а осознанное решение оператора. */
+class SyncPausedError extends Error {}
+
 function fail(message) {
   console.error(`[${new Date().toISOString()}] ОШИБКА: ${message}`);
   process.exit(1);
@@ -55,6 +58,11 @@ async function step(body, describe) {
       log(`${describe}: площадка просит подождать ${seconds} с`);
       await sleep(seconds * 1000);
       continue;
+    }
+
+    // Стоп-кран включён на вкладке «Остатки»: отправлять на площадки нечего.
+    if (status === 423 && data.stockSyncPaused) {
+      throw new SyncPausedError(data.error ?? "Выгрузка остатков остановлена вручную.");
     }
 
     // Массовое обнуление подтверждает только человек. Фоновая задача обязана
@@ -145,4 +153,10 @@ async function main() {
   fail("укажите режим: orders или stocks.");
 }
 
-main().catch((error) => fail(error instanceof Error ? error.message : String(error)));
+main().catch((error) => {
+  if (error instanceof SyncPausedError) {
+    log(`Выгрузка остатков остановлена вручную — запуск пропущен. ${error.message}`);
+    process.exit(0);
+  }
+  fail(error instanceof Error ? error.message : String(error));
+});
