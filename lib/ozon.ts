@@ -280,33 +280,67 @@ export async function getOzonUnfulfilledPostings(clientId: string, apiKey: strin
   return postings;
 }
 
+/**
+ * Заказы FBS за период.
+ *
+ * Раньше здесь стоял потолок в 30 страниц по 100 отправлений — ровно 3000 штук
+ * за заход. Ozon отдаёт список от старых к новым, поэтому при обороте больше
+ * 3000 заказов за 30 дней обрезались именно СВЕЖИЕ заказы: они не попадали ни
+ * в аналитику, ни в резервы, и остаток на площадки уходил завышенным. Теперь
+ * страница берётся максимального размера, а запас по количеству страниц даёт
+ * сотни тысяч заказов — и запросов к API при этом уходит в десять раз меньше.
+ */
+const OZON_POSTINGS_PAGE_SIZE = 1000;
+const OZON_POSTINGS_FALLBACK_PAGE_SIZE = 100;
+const OZON_POSTINGS_MAX_PAGES = 200;
+
 export async function getOzonPostings(clientId: string, apiKey: string, days: number) {
   const postings: OzonPosting[] = [];
   let cursor = "";
+  let limit = OZON_POSTINGS_PAGE_SIZE;
+  let truncated = false;
   const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
   const to = new Date().toISOString();
 
-  for (let page = 0; page < 30; page += 1) {
-    const payload = await ozonRequest<{
-      postings?: OzonPosting[];
-      cursor?: string;
-      has_next?: boolean;
-    }>(
-      "/v4/posting/fbs/list",
-      clientId,
-      apiKey,
-      {
-        cursor,
-        filter: { since, to },
-        limit: 100,
-        sort_dir: "ASC",
-        with: { analytics_data: true, financial_data: false, legal_info: false, barcodes: false },
-      },
-    );
+  for (let page = 0; page < OZON_POSTINGS_MAX_PAGES; page += 1) {
+    let payload: { postings?: OzonPosting[]; cursor?: string; has_next?: boolean };
+    try {
+      payload = await ozonRequest<{
+        postings?: OzonPosting[];
+        cursor?: string;
+        has_next?: boolean;
+      }>(
+        "/v4/posting/fbs/list",
+        clientId,
+        apiKey,
+        {
+          cursor,
+          filter: { since, to },
+          limit,
+          sort_dir: "ASC",
+          with: { analytics_data: true, financial_data: false, legal_info: false, barcodes: false },
+        },
+      );
+    } catch (error) {
+      // Если аккаунт не принимает большую страницу, повторяем тем размером,
+      // который работал раньше, — заказы важнее скорости.
+      if (limit !== OZON_POSTINGS_FALLBACK_PAGE_SIZE && error instanceof OzonApiError && error.status === 400) {
+        limit = OZON_POSTINGS_FALLBACK_PAGE_SIZE;
+        page -= 1;
+        continue;
+      }
+      throw error;
+    }
     const rows = Array.isArray(payload.postings) ? payload.postings : [];
     postings.push(...rows.filter((posting) => posting && typeof posting.posting_number === "string"));
     if (payload.has_next !== true || typeof payload.cursor !== "string" || !payload.cursor || payload.cursor === cursor) break;
     cursor = payload.cursor;
+    if (page === OZON_POSTINGS_MAX_PAGES - 1) truncated = true;
+  }
+
+  if (truncated) {
+    // Молчать нельзя: обрезанный список означает неполные резервы.
+    console.warn(`Ozon: за один заход получено ${postings.length} заказов, список не закончился. Уменьшите период загрузки.`);
   }
 
   return [...new Map(postings.map((posting) => [posting.posting_number, posting])).values()];
