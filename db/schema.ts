@@ -2,6 +2,7 @@ import { sql } from "drizzle-orm";
 import {
   index,
   integer,
+  primaryKey,
   real,
   sqliteTable,
   text,
@@ -333,5 +334,31 @@ export const appSessions = sqliteTable(
   (table) => [
     index("app_session_user_idx").on(table.userEmail),
     index("app_session_expires_idx").on(table.expiresAt),
+  ],
+);
+
+/**
+ * Выкупы и возвраты по дням — из финансовых данных площадок.
+ *
+ * Дата выкупа есть только там: список отправлений Ozon и сборочные задания
+ * Wildberries знают статус, но не день вручения покупателю. Суммы хранятся по
+ * цене продавца; синхронизация пересчитывает период целиком.
+ */
+export const marketplaceDailyFinance = sqliteTable(
+  "marketplace_daily_finance",
+  {
+    marketplaceId: text("marketplace_id").notNull(),
+    /** Дата по московскому времени, ГГГГ-ММ-ДД. */
+    date: text("date").notNull(),
+    buyoutAmount: real("buyout_amount").notNull().default(0),
+    buyoutCount: integer("buyout_count").notNull().default(0),
+    buyoutUnits: real("buyout_units").notNull().default(0),
+    returnAmount: real("return_amount").notNull().default(0),
+    returnCount: integer("return_count").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.marketplaceId, table.date] }),
+    index("daily_finance_date_idx").on(table.date),
   ],
 );

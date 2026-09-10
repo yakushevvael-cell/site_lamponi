@@ -93,6 +93,7 @@ async function wildberriesRequest<T>(
   token: string,
   init: RequestInit = {},
   requiredCategory = "Marketplace",
+  timeoutMs = 15_000,
 ): Promise<T> {
   // 429 и временные сбои повторяются с учётом Retry-After (ТЗ, п. 9).
   // PUT /api/v3/stocks/{warehouseId} принимает абсолютные остатки, поэтому
@@ -109,7 +110,7 @@ async function wildberriesRequest<T>(
           ...(init.body ? { "Content-Type": "application/json" } : {}),
           ...init.headers,
         },
-        signal: AbortSignal.timeout(15_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (error) {
       const timeout = error instanceof Error && error.name === "TimeoutError";
@@ -118,7 +119,7 @@ async function wildberriesRequest<T>(
         status: 503,
         retryAfterMs: null,
         error: new WildberriesApiError(503, timeout
-          ? "Wildberries не ответил за 15 секунд. Повторите операцию."
+          ? `Wildberries не ответил за ${Math.round(timeoutMs / 1000)} с. Повторите операцию.`
           : "Не удалось связаться с Wildberries. Повторите операцию позже."),
       };
     }
@@ -270,4 +271,47 @@ export async function getWildberriesStocks(token: string, warehouseId: string, c
     { method: "POST", body: JSON.stringify({ chrtIds }) },
   );
   return Array.isArray(payload.stocks) ? payload.stocks : [];
+}
+
+/**
+ * Продажи и возвраты Wildberries (Статистика).
+ *
+ * Marketplace-методы, на которых работает остальная синхронизация, знают только
+ * статус сборочного задания: «продано» там появляется без даты выкупа. Отчёт
+ * «Продажи» отдаёт каждую продажу отдельной строкой с датой и ценой:
+ *   priceWithDisc — цена с учётом скидки продавца, то есть та цена, которую
+ *   установил продавец (в отличие от finishedPrice, где учтена ещё и скидка WB).
+ * Возвраты приходят тем же отчётом: saleID начинается с «R», а суммы у них
+ * отрицательные.
+ *
+ * Метод лимитирован: один запрос в минуту и до 80 000 строк за раз, отвечает
+ * медленно — поэтому таймаут увеличен, а вызывается он только фоновой задачей.
+ */
+const WILDBERRIES_SALES_URL = "https://statistics-api.wildberries.ru/api/v1/supplier/sales";
+
+export type WildberriesSale = {
+  date: string;
+  lastChangeDate?: string;
+  saleID?: string;
+  srid?: string;
+  supplierArticle?: string;
+  nmId?: number;
+  totalPrice?: number;
+  priceWithDisc?: number;
+  finishedPrice?: number;
+  forPay?: number;
+  quantity?: number;
+  isStorno?: number;
+  IsStorno?: number;
+};
+
+export async function getWildberriesSales(token: string, dateFrom: string): Promise<WildberriesSale[]> {
+  const url = new URL(WILDBERRIES_SALES_URL);
+  url.searchParams.set("dateFrom", dateFrom);
+  url.searchParams.set("flag", "0");
+  const payload = await wildberriesRequest<unknown>(url.toString(), token, {}, "Статистика", 120_000);
+  if (!Array.isArray(payload)) {
+    throw new WildberriesApiError(502, "Wildberries вернул неожиданный ответ с отчётом о продажах.");
+  }
+  return payload.filter((row): row is WildberriesSale => Boolean(row) && typeof row === "object" && typeof (row as WildberriesSale).date === "string");
 }

@@ -8,7 +8,7 @@ import {
 } from "@/lib/product-matching";
 import { rebuildReservations } from "@/lib/reservations";
 import { getRuntimeEnv } from "@/lib/runtime-env";
-import { getOzonPostings, getOzonProductCatalog, type OzonPosting } from "@/lib/ozon";
+import { getOzonPostings, getOzonProductCatalog, ozonProductPrice, type OzonPosting } from "@/lib/ozon";
 import {
   getWildberriesCards,
   getWildberriesOrders,
@@ -276,14 +276,14 @@ async function syncOzon(db: D1Database, runtime: ReturnType<typeof getRuntimeEnv
     const source = ozonCancellationSource(posting);
     const items = products.map((product): NormalizedItem => {
       const mapping = mappingIndex.get(product.offer_id);
-      const unitPrice = Number(product.price?.amount ?? 0);
+      const unitPrice = ozonProductPrice(product);
       return {
         externalSku: product.offer_id || String(product.sku),
         productSku: mapping?.sourceSku ?? null,
         sellerArticle: mapping?.article ?? product.offer_id ?? String(product.sku),
         size: mapping?.size ?? null,
         quantity: Math.max(1, Number(product.quantity ?? 1)),
-        unitPrice: Number.isFinite(unitPrice) ? unitPrice : 0,
+        unitPrice,
       };
     });
     const amount = items.reduce((sum, item) => sum + item.unitPrice * item.quantity, 0);

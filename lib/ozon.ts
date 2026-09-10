@@ -31,8 +31,17 @@ export type OzonPostingProduct = {
   sku: number;
   offer_id: string;
   quantity: number;
-  price?: { amount?: number | string; currency?: string };
+  /** Ozon отдаёт цену то строкой, то объектом — учитываем оба варианта. */
+  price?: string | number | { amount?: number | string; currency?: string };
 };
+
+/** Цена позиции в отправлении Ozon — та, которую установил продавец. */
+export function ozonProductPrice(product: OzonPostingProduct) {
+  const raw = product.price;
+  const value = raw && typeof raw === "object" ? raw.amount : raw;
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
 
 export type OzonPosting = {
   posting_number: string;
@@ -429,4 +438,81 @@ export async function getOzonStocksByWarehouse(
     cursor = payload.cursor;
   }
   return stocks;
+}
+
+/**
+ * Финансовые операции Ozon за период.
+ *
+ * Зачем это нужно отдельно от списка отправлений: в `/v4/posting/fbs/list`
+ * нет даты вручения покупателю. Статус «доставлено» там появляется, а когда
+ * именно товар выкупили — нет. Финансовый отчёт отдаёт операцию «Доставка
+ * покупателю» с точной датой и полем `accruals_for_sale` — стоимостью товаров
+ * по цене продавца (с учётом его скидок, но без скидок и комиссий площадки).
+ * Именно она нужна для вопроса «на какую сумму выкупили в этот день».
+ */
+export type OzonFinanceOperation = {
+  operationDate: string;
+  operationType: string;
+  /** Группа операции: orders — продажа, returns — возврат. */
+  group: string;
+  postingNumber: string;
+  /** Схема продажи: FBS, RFBS, FBO, Crossborder. */
+  deliverySchema: string;
+  accrualsForSale: number;
+  itemCount: number;
+};
+
+const OZON_FINANCE_PAGE_SIZE = 1000;
+const OZON_FINANCE_MAX_PAGES = 200;
+
+export async function getOzonFinanceOperations(
+  clientId: string,
+  apiKey: string,
+  from: string,
+  to: string,
+): Promise<OzonFinanceOperation[]> {
+  const operations: OzonFinanceOperation[] = [];
+
+  for (let page = 1; page <= OZON_FINANCE_MAX_PAGES; page += 1) {
+    const payload = await ozonRequest<Record<string, unknown>>(
+      "/v3/finance/transaction/list",
+      clientId,
+      apiKey,
+      {
+        filter: {
+          date: { from, to },
+          operation_type: [],
+          posting_number: "",
+          transaction_type: "all",
+        },
+        page,
+        page_size: OZON_FINANCE_PAGE_SIZE,
+      },
+    );
+    const result = asObject(payload.result) ?? payload;
+    const rows = Array.isArray(result.operations) ? result.operations : [];
+    for (const row of rows) {
+      const item = asObject(row);
+      if (!item) continue;
+      const operationDate = typeof item.operation_date === "string" ? item.operation_date : "";
+      if (!operationDate) continue;
+      const posting = asObject(item.posting);
+      const items = Array.isArray(item.items) ? item.items : [];
+      operations.push({
+        operationDate,
+        operationType: typeof item.operation_type === "string" ? item.operation_type : "",
+        group: typeof item.type === "string" ? item.type : "",
+        postingNumber: typeof posting?.posting_number === "string" ? posting.posting_number : "",
+        deliverySchema: typeof posting?.delivery_schema === "string" ? posting.delivery_schema : "",
+        accrualsForSale: asNumber(item.accruals_for_sale) ?? 0,
+        itemCount: items.length,
+      });
+    }
+
+    const pageCount = asNumber(result.page_count) ?? 0;
+    if (rows.length < OZON_FINANCE_PAGE_SIZE) break;
+    if (pageCount > 0 && page >= pageCount) break;
+  }
+
+  return operations;
 }

@@ -95,6 +95,37 @@ async function syncOrders() {
     process.exitCode = 2;
   }
   await pushChangedStocks();
+  await syncFinance();
+}
+
+/**
+ * Выкупы и возвраты по дням.
+ *
+ * Дата выкупа есть только в финансовых данных площадок: в списке отправлений
+ * Ozon её нет вовсе. Запрос дешёвый и на сервере защищён от частых запусков,
+ * поэтому он идёт следом за заказами, а не отдельным таймером. Ошибка здесь не
+ * должна ронять загрузку заказов: без выкупов дашборд неполный, но остатки
+ * считаются как обычно.
+ */
+async function syncFinance() {
+  const { status, data } = await call("/api/finance/sync", { days: 90, force: false });
+  if (status >= 400 && status !== 207) {
+    log(`Выкупы не обновлены: ${data.error ?? `ответ ${status}`}`);
+    process.exitCode = 2;
+    return;
+  }
+  if (data.cached) {
+    log("Выкупы обновлялись недавно — пропускаю.");
+    return;
+  }
+  for (const result of data.results ?? []) {
+    if (result.skipped) log(`Выкупы ${result.marketplace}: пропущено (${result.reason}).`);
+    else log(`Выкупы ${result.marketplace}: дней ${result.days}, строк ${result.operations}.`);
+  }
+  for (const error of data.errors ?? []) {
+    log(`Замечание: выкупы ${error.marketplace} — ${error.message}`);
+    process.exitCode = 2;
+  }
 }
 
 /**
