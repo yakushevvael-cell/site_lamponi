@@ -307,7 +307,7 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
                                 formatter={(value, name, entry) => (
                                   <div className="flex w-full items-center gap-2">
                                     <span className="size-2.5 shrink-0 rounded-[2px]" style={{ background: entry?.color }} />
-                                    <span className="text-muted-foreground">{chartConfig[name as keyof typeof chartConfig]?.label ?? name}</span>
+                                    <span className="text-muted-foreground">{chartConfig[String(name) as keyof typeof chartConfig]?.label ?? String(name)}</span>
                                     <span className="ml-auto font-mono font-medium tabular-nums">{formatMoney(Number(value))}</span>
                                   </div>
                                 )}

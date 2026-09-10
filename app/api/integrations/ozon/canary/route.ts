@@ -10,6 +10,7 @@ import {
   getOzonUnfulfilledPostings,
   getOzonWarehouses,
   OzonApiError,
+  ozonProductPrice,
   type OzonPostingProduct,
   type OzonProduct,
   type OzonWarehouseStock,
@@ -71,9 +72,8 @@ function expectedOfferKeys(product: LocalProduct) {
 }
 
 function moneyAmount(product: OzonPostingProduct) {
-  const amount = product.price?.amount;
-  const parsed = Number(amount ?? 0);
-  return Number.isFinite(parsed) ? parsed : 0;
+  // Разбор цены живёт в lib/ozon: Ozon отдаёт её то строкой, то объектом.
+  return ozonProductPrice(product);
 }
 
 function isShippedStatus(status: string) {
