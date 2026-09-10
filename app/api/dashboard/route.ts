@@ -1,26 +1,21 @@
 /**
  * Дашборд площадки: суммы заказов и выкупов по дням, по цене продавца.
  *
- * Заказы берутся из таблицы `orders` (цена продавца в момент заказа), выкупы —
- * из агрегата `marketplace_daily_finance`, который собирается из финансовых
- * данных площадок. Складывать их в одном запросе нельзя: у заказа и выкупа
- * разные даты, и день выкупа известен только площадке.
+ * Данные берутся из суточных таблиц (lib/daily-finance.ts). Пока они не
+ * заполнены, заказы показываются из таблицы orders — там только отправления
+ * своего склада, поэтому суммы получаются меньше кабинета; об этом
+ * предупреждает поле ordersSource.
  */
 import { authorizeApi } from "@/lib/app-auth";
 import { getRuntimeEnv } from "@/lib/runtime-env";
-import { marketplaceDay, readDailyFinance } from "@/lib/daily-finance";
+import { marketplaceDay, readDailyFinance, readDailyOrders } from "@/lib/daily-finance";
 
 const MARKETPLACE_NAMES: Record<string, string> = {
   ozon: "Ozon",
   wildberries: "Wildberries",
 };
 
-type OrderRow = {
-  orderedAt: string;
-  amount: number;
-  canceledAt: string | null;
-  units: number;
-};
+const MAX_RANGE_DAYS = 370;
 
 function round(value: number, digits = 2) {
   const factor = 10 ** digits;
@@ -49,6 +44,25 @@ function emptyDay(date: string) {
   };
 }
 
+function isDay(value: string | null): value is string {
+  return Boolean(value && /^\d{4}-\d{2}-\d{2}$/.test(value));
+}
+
+function addDays(day: string, count: number) {
+  const [year, month, date] = day.split("-").map(Number);
+  const shifted = new Date(Date.UTC(year, month - 1, date + count));
+  return shifted.toISOString().slice(0, 10);
+}
+
+function dayToUtc(day: string) {
+  const [year, month, date] = day.split("-").map(Number);
+  return Date.UTC(year, month - 1, date);
+}
+
+function daysBetween(from: string, to: string) {
+  return Math.round((dayToUtc(to) - dayToUtc(from)) / 86_400_000) + 1;
+}
+
 export async function GET(request: Request) {
   const auth = await authorizeApi();
   if ("response" in auth) return auth.response;
@@ -58,20 +72,15 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const marketplaceId = url.searchParams.get("marketplace") === "wildberries" ? "wildberries" : "ozon";
-  const requestedDays = Number(url.searchParams.get("days") ?? 30);
-  const days = [7, 30, 90].includes(requestedDays) ? requestedDays : 30;
+  const today = marketplaceDay(new Date().toISOString());
 
-  const sinceMs = Date.now() - (days - 1) * 86_400_000;
-  const sinceDate = marketplaceDay(new Date(sinceMs).toISOString());
-  // Заказ мог быть создан вечером по Москве, но храним мы UTC — берём с запасом в сутки.
-  const sinceIso = new Date(sinceMs - 86_400_000).toISOString();
-
-  const orderRows = await db.prepare(
-    `SELECT o.ordered_at AS orderedAt, o.amount, o.canceled_at AS canceledAt,
-            (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) AS units
-     FROM orders o
-     WHERE o.marketplace_id = ? AND o.ordered_at >= ?`,
-  ).bind(marketplaceId, sinceIso).all<OrderRow>();
+  const requestedTo = url.searchParams.get("to");
+  const requestedFrom = url.searchParams.get("from");
+  let toDay = isDay(requestedTo) ? requestedTo : today;
+  let fromDay = isDay(requestedFrom) ? requestedFrom : addDays(toDay, -29);
+  if (fromDay > toDay) [fromDay, toDay] = [toDay, fromDay];
+  if (daysBetween(fromDay, toDay) > MAX_RANGE_DAYS) fromDay = addDays(toDay, -(MAX_RANGE_DAYS - 1));
+  const dayCount = daysBetween(fromDay, toDay);
 
   const byDate = new Map<string, ReturnType<typeof emptyDay>>();
   const dayOf = (date: string) => {
@@ -82,31 +91,54 @@ export async function GET(request: Request) {
     return created;
   };
 
-  for (const order of orderRows.results) {
-    const date = marketplaceDay(order.orderedAt);
-    if (date < sinceDate) continue;
-    const row = dayOf(date);
-    const amount = Number(order.amount) || 0;
-    const units = Number(order.units) || 0;
-    row.orderAmount += amount;
-    row.orderCount += 1;
-    row.orderUnits += units;
-    if (order.canceledAt) row.canceledAmount += amount;
-    else row.orderNetAmount += amount;
+  const dailyOrders = await readDailyOrders(db, marketplaceId, fromDay, toDay);
+  let ordersSource: "daily" | "fbs" = "daily";
+
+  if (dailyOrders.length > 0) {
+    for (const row of dailyOrders) {
+      const day = dayOf(row.date);
+      day.orderAmount += Number(row.orderedAmount) || 0;
+      day.orderNetAmount += Number(row.orderedNetAmount) || 0;
+      day.canceledAmount += Number(row.canceledAmount) || 0;
+      day.orderCount += Number(row.orderedCount) || 0;
+      day.orderUnits += Number(row.orderedUnits) || 0;
+    }
+  } else {
+    // Запасной путь до первой загрузки суточных данных.
+    ordersSource = "fbs";
+    const sinceIso = `${addDays(fromDay, -1)}T00:00:00.000Z`;
+    const untilIso = `${addDays(toDay, 2)}T00:00:00.000Z`;
+    const rows = await db.prepare(
+      `SELECT o.ordered_at AS orderedAt, o.amount, o.canceled_at AS canceledAt,
+              (SELECT COALESCE(SUM(oi.quantity), 0) FROM order_items oi WHERE oi.order_id = o.id) AS units
+       FROM orders o
+       WHERE o.marketplace_id = ? AND o.ordered_at >= ? AND o.ordered_at < ?`,
+    ).bind(marketplaceId, sinceIso, untilIso).all<{ orderedAt: string; amount: number; canceledAt: string | null; units: number }>();
+    for (const order of rows.results) {
+      const date = marketplaceDay(order.orderedAt);
+      if (date < fromDay || date > toDay) continue;
+      const day = dayOf(date);
+      const amount = Number(order.amount) || 0;
+      day.orderAmount += amount;
+      day.orderCount += 1;
+      day.orderUnits += Number(order.units) || 0;
+      if (order.canceledAt) day.canceledAmount += amount;
+      else day.orderNetAmount += amount;
+    }
   }
 
-  for (const finance of await readDailyFinance(db, marketplaceId, sinceDate)) {
-    const row = dayOf(finance.date);
-    row.buyoutAmount += Number(finance.buyoutAmount) || 0;
-    row.buyoutCount += Number(finance.buyoutCount) || 0;
-    row.buyoutUnits += Number(finance.buyoutUnits) || 0;
-    row.returnAmount += Number(finance.returnAmount) || 0;
+  for (const finance of await readDailyFinance(db, marketplaceId, fromDay, toDay)) {
+    const day = dayOf(finance.date);
+    day.buyoutAmount += Number(finance.buyoutAmount) || 0;
+    day.buyoutCount += Number(finance.buyoutCount) || 0;
+    day.buyoutUnits += Number(finance.buyoutUnits) || 0;
+    day.returnAmount += Number(finance.returnAmount) || 0;
   }
 
   // Пустые дни тоже нужны: без них график «склеивает» выходные с буднями.
   const series: Array<ReturnType<typeof emptyDay>> = [];
-  for (let index = 0; index < days; index += 1) {
-    const date = marketplaceDay(new Date(sinceMs + index * 86_400_000).toISOString());
+  for (let index = 0; index < dayCount; index += 1) {
+    const date = addDays(fromDay, index);
     const row = byDate.get(date) ?? emptyDay(date);
     series.push({
       ...row,
@@ -141,7 +173,10 @@ export async function GET(request: Request) {
   return Response.json({
     marketplace: marketplaceId,
     marketplaceName: MARKETPLACE_NAMES[marketplaceId],
-    days,
+    from: fromDay,
+    to: toDay,
+    days: dayCount,
+    ordersSource,
     series,
     totals: {
       orderAmount: round(orderAmount),

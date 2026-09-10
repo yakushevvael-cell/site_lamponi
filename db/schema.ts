@@ -362,3 +362,29 @@ export const marketplaceDailyFinance = sqliteTable(
     index("daily_finance_date_idx").on(table.date),
   ],
 );
+
+/**
+ * Заказы по дням — по всем схемам продаж.
+ *
+ * Таблица orders собирается только из отправлений своего склада, потому что
+ * держит резервы. На дашборде продавец сравнивает суммы с кабинетом, где
+ * учтён и склад площадки, — поэтому суммы заказов хранятся отдельно.
+ */
+export const marketplaceDailyOrders = sqliteTable(
+  "marketplace_daily_orders",
+  {
+    marketplaceId: text("marketplace_id").notNull(),
+    /** Дата по московскому времени, ГГГГ-ММ-ДД. */
+    date: text("date").notNull(),
+    orderedAmount: real("ordered_amount").notNull().default(0),
+    orderedNetAmount: real("ordered_net_amount").notNull().default(0),
+    canceledAmount: real("canceled_amount").notNull().default(0),
+    orderedCount: integer("ordered_count").notNull().default(0),
+    orderedUnits: real("ordered_units").notNull().default(0),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    primaryKey({ columns: [table.marketplaceId, table.date] }),
+    index("daily_orders_date_idx").on(table.date),
+  ],
+);

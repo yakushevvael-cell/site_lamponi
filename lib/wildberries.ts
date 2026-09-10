@@ -315,3 +315,41 @@ export async function getWildberriesSales(token: string, dateFrom: string): Prom
   }
   return payload.filter((row): row is WildberriesSale => Boolean(row) && typeof row === "object" && typeof (row as WildberriesSale).date === "string");
 }
+
+/**
+ * Заказы Wildberries (Статистика).
+ *
+ * Marketplace-методы, на которых работает синхронизация остатков, знают только
+ * сборочные задания своего склада. В кабинете продавец видит все заказы,
+ * включая склад площадки, — поэтому для дашборда заказы берём из статистики.
+ * Цена — priceWithDisc, то есть с учётом скидки продавца; отменённые заказы
+ * помечены isCancel.
+ */
+const WILDBERRIES_STAT_ORDERS_URL = "https://statistics-api.wildberries.ru/api/v1/supplier/orders";
+
+export type WildberriesStatOrder = {
+  date: string;
+  lastChangeDate?: string;
+  srid?: string;
+  gNumber?: string;
+  supplierArticle?: string;
+  nmId?: number;
+  totalPrice?: number;
+  discountPercent?: number;
+  priceWithDisc?: number;
+  finishedPrice?: number;
+  isCancel?: boolean;
+  cancelDate?: string;
+  warehouseName?: string;
+};
+
+export async function getWildberriesStatOrders(token: string, dateFrom: string): Promise<WildberriesStatOrder[]> {
+  const url = new URL(WILDBERRIES_STAT_ORDERS_URL);
+  url.searchParams.set("dateFrom", dateFrom);
+  url.searchParams.set("flag", "0");
+  const payload = await wildberriesRequest<unknown>(url.toString(), token, {}, "Статистика", 120_000);
+  if (!Array.isArray(payload)) {
+    throw new WildberriesApiError(502, "Wildberries вернул неожиданный ответ с отчётом о заказах.");
+  }
+  return payload.filter((row): row is WildberriesStatOrder => Boolean(row) && typeof row === "object" && typeof (row as WildberriesStatOrder).date === "string");
+}

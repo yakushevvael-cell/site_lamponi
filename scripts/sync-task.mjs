@@ -110,20 +110,20 @@ async function syncOrders() {
 async function syncFinance() {
   const { status, data } = await call("/api/finance/sync", { days: 90, force: false });
   if (status >= 400 && status !== 207) {
-    log(`Выкупы не обновлены: ${data.error ?? `ответ ${status}`}`);
+    log(`Показатели дашборда не обновлены: ${data.error ?? `ответ ${status}`}`);
     process.exitCode = 2;
     return;
   }
   if (data.cached) {
-    log("Выкупы обновлялись недавно — пропускаю.");
+    log("Показатели дашборда обновлялись недавно — пропускаю.");
     return;
   }
   for (const result of data.results ?? []) {
-    if (result.skipped) log(`Выкупы ${result.marketplace}: пропущено (${result.reason}).`);
-    else log(`Выкупы ${result.marketplace}: дней ${result.days}, строк ${result.operations}.`);
+    if (result.skipped) log(`Дашборд ${result.marketplace}: пропущено (${result.reason}).`);
+    else log(`Дашборд ${result.marketplace}: дней с заказами ${result.orderDays}, с выкупами ${result.buyoutDays}.`);
   }
   for (const error of data.errors ?? []) {
-    log(`Замечание: выкупы ${error.marketplace} — ${error.message}`);
+    log(`Замечание: дашборд ${error.marketplace} — ${error.message}`);
     process.exitCode = 2;
   }
 }

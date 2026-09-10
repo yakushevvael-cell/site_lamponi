@@ -1,10 +1,13 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { DateRange } from "react-day-picker";
+import { ru } from "date-fns/locale";
 import { CalendarRange, CheckCircle2, Coins, Loader2, RefreshCw, ShoppingBag, Undo2 } from "lucide-react";
 import { CartesianGrid, Line, LineChart, XAxis, YAxis } from "recharts";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { Calendar } from "@/components/ui/calendar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import {
   ChartContainer,
@@ -14,7 +17,7 @@ import {
   ChartTooltipContent,
   type ChartConfig,
 } from "@/components/ui/chart";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 
@@ -48,7 +51,10 @@ type DashboardDay = {
 type Dashboard = {
   marketplace: string;
   marketplaceName: string;
+  from: string;
+  to: string;
   days: number;
+  ordersSource: "daily" | "fbs";
   series: DashboardDay[];
   totals: {
     orderAmount: number;
@@ -74,6 +80,26 @@ const MARKETPLACES = [
   { id: "wildberries", name: "Wildberries" },
 ];
 
+function pad(value: number) {
+  return String(value).padStart(2, "0");
+}
+
+/** Ключ дня из локальной даты: toISOString сдвинул бы её на часовой пояс. */
+function toDayKey(date: Date) {
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function fromDayKey(key: string) {
+  const [year, month, date] = key.split("-").map(Number);
+  return new Date(year, (month || 1) - 1, date || 1);
+}
+
+function addDays(date: Date, count: number) {
+  const shifted = new Date(date);
+  shifted.setDate(shifted.getDate() + count);
+  return shifted;
+}
+
 function formatMoney(value: number | null | undefined) {
   if (value === null || value === undefined || !Number.isFinite(value)) return "—";
   return new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 }).format(value);
@@ -88,18 +114,21 @@ function formatUnits(value: number) {
   return new Intl.NumberFormat("ru-RU", { maximumFractionDigits: 2 }).format(value);
 }
 
-/** Дата приходит строкой «ГГГГ-ММ-ДД» и уже посчитана по Москве — часовой пояс браузера её сдвигать не должен. */
-function dateFromKey(value: string) {
-  const parts = value.split("-").map((part) => Number(part));
-  return new Date(Date.UTC(parts[0] || 1970, (parts[1] || 1) - 1, parts[2] || 1));
+function shortDate(key: string) {
+  return fromDayKey(key).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" });
 }
 
-function shortDate(value: string) {
-  return dateFromKey(value).toLocaleDateString("ru-RU", { day: "2-digit", month: "short", timeZone: "UTC" });
+function longDate(key: string) {
+  return fromDayKey(key).toLocaleDateString("ru-RU", { day: "2-digit", month: "long", weekday: "short" });
 }
 
-function longDate(value: string) {
-  return dateFromKey(value).toLocaleDateString("ru-RU", { day: "2-digit", month: "long", weekday: "short", timeZone: "UTC" });
+function rangeLabel(from: string, to: string) {
+  const start = fromDayKey(from);
+  const end = fromDayKey(to);
+  const sameYear = start.getFullYear() === end.getFullYear();
+  const startText = start.toLocaleDateString("ru-RU", { day: "numeric", month: "long", ...(sameYear ? {} : { year: "numeric" }) });
+  const endText = end.toLocaleDateString("ru-RU", { day: "numeric", month: "long", year: "numeric" });
+  return from === to ? endText : `${startText} — ${endText}`;
 }
 
 function compactMoney(value: number) {
@@ -114,18 +143,37 @@ function formatSyncedAt(value: string | null | undefined) {
   return Number.isNaN(parsed.getTime()) ? "ещё не загружались" : parsed.toLocaleString("ru-RU");
 }
 
+function presetRanges(today: Date) {
+  const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+  const lastMonthEnd = new Date(today.getFullYear(), today.getMonth(), 0);
+  const lastMonthStart = new Date(lastMonthEnd.getFullYear(), lastMonthEnd.getMonth(), 1);
+  return [
+    { label: "7 дней", from: addDays(today, -6), to: today },
+    { label: "30 дней", from: addDays(today, -29), to: today },
+    { label: "Этот месяц", from: startOfMonth, to: today },
+    { label: "Прошлый месяц", from: lastMonthStart, to: lastMonthEnd },
+  ];
+}
+
 export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
   const [marketplace, setMarketplace] = useState("ozon");
-  const [period, setPeriod] = useState("30");
+  const today = useMemo(() => new Date(), []);
+  const [range, setRange] = useState<DateRange | undefined>(() => ({ from: addDays(new Date(), -29), to: new Date() }));
+  const [pickerOpen, setPickerOpen] = useState(false);
   const [data, setData] = useState<Dashboard | null>(null);
   const [loading, setLoading] = useState(true);
   const [syncing, setSyncing] = useState(false);
   const autoSynced = useRef<Set<string>>(new Set());
 
-  const load = useCallback(async (id: string, days: string) => {
+  const fromKey = range?.from ? toDayKey(range.from) : toDayKey(addDays(today, -29));
+  const toKey = range?.to ? toDayKey(range.to) : fromKey;
+  // Синхронизация всегда тянет период от начала выбранного диапазона до сегодня.
+  const syncDays = Math.max(7, Math.min(370, Math.ceil((today.getTime() - fromDayKey(fromKey).getTime()) / 86_400_000) + 2));
+
+  const load = useCallback(async (id: string, from: string, to: string) => {
     setLoading(true);
     try {
-      const response = await fetch(`/api/dashboard?marketplace=${id}&days=${days}`, { cache: "no-store" });
+      const response = await fetch(`/api/dashboard?marketplace=${id}&from=${from}&to=${to}`, { cache: "no-store" });
       const payload = await response.json() as Dashboard & { error?: string };
       if (!response.ok) throw new Error(payload.error ?? "Не удалось загрузить дашборд.");
       setData(payload);
@@ -137,10 +185,10 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
   }, []);
 
   useEffect(() => {
-    void Promise.resolve().then(() => load(marketplace, period));
-  }, [load, marketplace, period]);
+    void Promise.resolve().then(() => load(marketplace, fromKey, toKey));
+  }, [load, marketplace, fromKey, toKey]);
 
-  // Выкупы подтягиваются фоном при открытии вкладки. На сервере стоит защита от
+  // Данные подтягиваются фоном при открытии вкладки. На сервере стоит защита от
   // частых запусков, поэтому открытая страница не создаёт нагрузки на площадку.
   useEffect(() => {
     if (!canSync) return;
@@ -149,9 +197,9 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
     void fetch("/api/finance/sync", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ marketplace, days: 90, force: false }),
-    }).then(() => load(marketplace, period)).catch(() => undefined);
-  }, [canSync, load, marketplace, period]);
+      body: JSON.stringify({ marketplace, days: syncDays, force: false }),
+    }).then(() => load(marketplace, fromKey, toKey)).catch(() => undefined);
+  }, [canSync, load, marketplace, fromKey, toKey, syncDays]);
 
   async function refresh() {
     setSyncing(true);
@@ -159,7 +207,7 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
       const response = await fetch("/api/finance/sync", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ marketplace, days: 90, force: true }),
+        body: JSON.stringify({ marketplace, days: syncDays, force: true }),
       });
       const payload = await response.json() as { errors?: Array<{ marketplace: string; message: string }>; error?: string };
       if (!response.ok && response.status !== 207) {
@@ -168,14 +216,19 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
       if (payload.errors?.length) {
         toast.warning("Часть данных не обновилась", { description: payload.errors.map((item) => item.message).join(" ") });
       } else {
-        toast.success("Выкупы обновлены");
+        toast.success("Данные обновлены");
       }
-      await load(marketplace, period);
+      await load(marketplace, fromKey, toKey);
     } catch (error) {
-      toast.error("Выкупы не обновлены", { description: error instanceof Error ? error.message : "Повторите попытку." });
+      toast.error("Данные не обновлены", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSyncing(false);
     }
+  }
+
+  function applyRange(next: DateRange | undefined) {
+    setRange(next);
+    if (next?.from && next?.to) setPickerOpen(false);
   }
 
   const totals = data?.totals;
@@ -237,23 +290,45 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
               {MARKETPLACES.map((item) => <TabsTrigger key={item.id} value={item.id}>{item.name}</TabsTrigger>)}
             </TabsList>
             <p className="mt-2 max-w-xl text-xs text-muted-foreground">
-              Все суммы — по цене, которую установил продавец: у заказов это цена в момент заказа,
-              у выкупов — стоимость товаров из финансовых данных площадки.
+              Все суммы — по цене, которую установил продавец, и по всем схемам продаж, включая склад площадки.
             </p>
           </div>
-          <div className="flex shrink-0 gap-2">
-            <Select value={period} onValueChange={setPeriod}>
-              <SelectTrigger className="w-32"><SelectValue /></SelectTrigger>
-              <SelectContent>
-                <SelectItem value="7">7 дней</SelectItem>
-                <SelectItem value="30">30 дней</SelectItem>
-                <SelectItem value="90">90 дней</SelectItem>
-              </SelectContent>
-            </Select>
+          <div className="flex shrink-0 flex-wrap gap-2">
+            <Popover open={pickerOpen} onOpenChange={setPickerOpen}>
+              <PopoverTrigger asChild>
+                <Button variant="outline" className="justify-start font-normal">
+                  <CalendarRange />
+                  {rangeLabel(fromKey, toKey)}
+                </Button>
+              </PopoverTrigger>
+              <PopoverContent align="end" className="w-auto p-0">
+                <div className="flex flex-wrap gap-1 border-b p-2">
+                  {presetRanges(today).map((preset) => (
+                    <Button
+                      key={preset.label}
+                      variant="ghost"
+                      size="sm"
+                      onClick={() => applyRange({ from: preset.from, to: preset.to })}
+                    >
+                      {preset.label}
+                    </Button>
+                  ))}
+                </div>
+                <Calendar
+                  mode="range"
+                  locale={ru}
+                  defaultMonth={range?.from ?? today}
+                  selected={range}
+                  onSelect={applyRange}
+                  numberOfMonths={2}
+                  disabled={{ after: today }}
+                />
+              </PopoverContent>
+            </Popover>
             {canSync ? (
               <Button variant="outline" onClick={() => void refresh()} disabled={syncing}>
                 {syncing ? <Loader2 className="animate-spin" /> : <RefreshCw />}
-                {syncing ? "Обновляем…" : "Обновить выкупы"}
+                {syncing ? "Обновляем…" : "Обновить"}
               </Button>
             ) : null}
           </div>
@@ -267,6 +342,13 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
               </div>
             ) : (
               <>
+                {data?.ordersSource === "fbs" ? (
+                  <p className="rounded-xl border border-dashed px-4 py-3 text-xs text-muted-foreground">
+                    Заказы пока показаны только по своему складу — полные данные по всем схемам появятся после
+                    первой загрузки. Нажмите «Обновить».
+                  </p>
+                ) : null}
+
                 <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
                   {cards.map((card) => (
                     <Card key={card.label} className="gap-0 py-5">
@@ -322,8 +404,7 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
                       </ChartContainer>
                     ) : (
                       <div className="grid h-[320px] place-items-center px-6 text-center text-sm text-muted-foreground">
-                        Данных за период пока нет. Заказы подтягиваются на странице «Заказы»,
-                        выкупы — кнопкой «Обновить выкупы».
+                        За выбранные дни данных нет. Выберите другой период или нажмите «Обновить».
                       </div>
                     )}
                   </CardContent>
@@ -332,7 +413,7 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
                 {data && !data.financeReady ? (
                   <p className="rounded-xl border border-dashed px-4 py-3 text-xs text-muted-foreground">
                     Выкупы за период не загружены. {item.id === "ozon"
-                      ? "Ozon отдаёт их в финансовых операциях — у API-ключа должен быть доступ к разделу «Финансы и отчёты»."
+                      ? "Ozon отдаёт их в начислениях по отправлениям — у API-ключа должен быть доступ к разделу «Финансы и отчёты»."
                       : "Wildberries отдаёт их в отчёте «Продажи» — у ключа должна быть категория «Статистика»."}
                   </p>
                 ) : null}
@@ -373,7 +454,7 @@ export function MarketplaceDashboard({ canSync }: { canSync: boolean }) {
                 </Card>
 
                 <p className="text-xs text-muted-foreground">
-                  Заказы обновлены: {formatSyncedAt(data?.lastSync.orders)}. Выкупы обновлены: {formatSyncedAt(data?.lastSync.finance)}.
+                  Данные обновлены: {formatSyncedAt(data?.lastSync.finance)}. Заказы своего склада: {formatSyncedAt(data?.lastSync.orders)}.
                 </p>
               </>
             )}

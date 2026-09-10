@@ -441,78 +441,132 @@ export async function getOzonStocksByWarehouse(
 }
 
 /**
- * Финансовые операции Ozon за период.
+ * Отправления FBO — заказы со склада площадки.
  *
- * Зачем это нужно отдельно от списка отправлений: в `/v4/posting/fbs/list`
- * нет даты вручения покупателю. Статус «доставлено» там появляется, а когда
- * именно товар выкупили — нет. Финансовый отчёт отдаёт операцию «Доставка
- * покупателю» с точной датой и полем `accruals_for_sale` — стоимостью товаров
- * по цене продавца (с учётом его скидок, но без скидок и комиссий площадки).
- * Именно она нужна для вопроса «на какую сумму выкупили в этот день».
+ * Остатками мы управляем только на своём складе, поэтому в таблицу orders
+ * такие отправления не попадают: они не создают резерва. Но на дашборде
+ * продавец сравнивает суммы с кабинетом, где FBO учтён, — значит для
+ * аналитики их надо получать отдельно.
  */
-export type OzonFinanceOperation = {
-  operationDate: string;
-  operationType: string;
-  /** Группа операции: orders — продажа, returns — возврат. */
-  group: string;
-  postingNumber: string;
-  /** Схема продажи: FBS, RFBS, FBO, Crossborder. */
-  deliverySchema: string;
-  accrualsForSale: number;
-  itemCount: number;
+const OZON_FBO_PAGE_SIZE = 100;
+const OZON_FBO_MAX_PAGES = 500;
+
+export type OzonFboPosting = {
+  posting_number: string;
+  status: string;
+  created_at?: string;
+  in_process_at?: string;
+  cancellation?: { cancel_reason_id?: number; cancel_reason?: string } | null;
+  products?: OzonPostingProduct[];
 };
 
-const OZON_FINANCE_PAGE_SIZE = 1000;
-const OZON_FINANCE_MAX_PAGES = 200;
+export async function getOzonFboPostings(clientId: string, apiKey: string, days: number) {
+  const postings: OzonFboPosting[] = [];
+  let cursor = "";
+  const since = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+  const to = new Date().toISOString();
 
-export async function getOzonFinanceOperations(
-  clientId: string,
-  apiKey: string,
-  from: string,
-  to: string,
-): Promise<OzonFinanceOperation[]> {
-  const operations: OzonFinanceOperation[] = [];
-
-  for (let page = 1; page <= OZON_FINANCE_MAX_PAGES; page += 1) {
-    const payload = await ozonRequest<Record<string, unknown>>(
-      "/v3/finance/transaction/list",
+  for (let page = 0; page < OZON_FBO_MAX_PAGES; page += 1) {
+    const payload = await ozonRequest<{ postings?: OzonFboPosting[]; cursor?: string; has_next?: boolean }>(
+      "/v3/posting/fbo/list",
       clientId,
       apiKey,
       {
-        filter: {
-          date: { from, to },
-          operation_type: [],
-          posting_number: "",
-          transaction_type: "all",
-        },
-        page,
-        page_size: OZON_FINANCE_PAGE_SIZE,
+        cursor,
+        filter: { since, to },
+        limit: OZON_FBO_PAGE_SIZE,
+        sort_dir: "ASC",
+        translit: false,
+        with: { analytics_data: false, financial_data: false, legal_info: false },
       },
     );
-    const result = asObject(payload.result) ?? payload;
-    const rows = Array.isArray(result.operations) ? result.operations : [];
-    for (const row of rows) {
-      const item = asObject(row);
-      if (!item) continue;
-      const operationDate = typeof item.operation_date === "string" ? item.operation_date : "";
-      if (!operationDate) continue;
-      const posting = asObject(item.posting);
-      const items = Array.isArray(item.items) ? item.items : [];
-      operations.push({
-        operationDate,
-        operationType: typeof item.operation_type === "string" ? item.operation_type : "",
-        group: typeof item.type === "string" ? item.type : "",
-        postingNumber: typeof posting?.posting_number === "string" ? posting.posting_number : "",
-        deliverySchema: typeof posting?.delivery_schema === "string" ? posting.delivery_schema : "",
-        accrualsForSale: asNumber(item.accruals_for_sale) ?? 0,
-        itemCount: items.length,
-      });
-    }
-
-    const pageCount = asNumber(result.page_count) ?? 0;
-    if (rows.length < OZON_FINANCE_PAGE_SIZE) break;
-    if (pageCount > 0 && page >= pageCount) break;
+    const rows = Array.isArray(payload.postings) ? payload.postings : [];
+    postings.push(...rows.filter((posting) => posting && typeof posting.posting_number === "string"));
+    if (payload.has_next !== true || typeof payload.cursor !== "string" || !payload.cursor || payload.cursor === cursor) break;
+    cursor = payload.cursor;
   }
 
-  return operations;
+  return [...new Map(postings.map((posting) => [posting.posting_number, posting])).values()];
+}
+
+/**
+ * Начисления Ozon по отправлениям.
+ *
+ * Раньше здесь был /v3/finance/transaction/list — Ozon отключил его 6 июля
+ * 2026 года, метод отвечает «obsolete method cannot be used». Пришедшие ему на
+ * замену начисления привязаны к отправлению и содержат ровно то, что нужно
+ * дашборду: дату начисления (то есть день, когда товар дошёл до покупателя или
+ * вернулся) и seller_price — цену, которую установил продавец.
+ */
+export type OzonAccrualType = { id: number; name: string; description: string };
+
+export type OzonAccrual = {
+  postingNumber: string;
+  accrualDate: string;
+  sellerPrice: number;
+  accrued: number;
+  quantity: number;
+  typeId: number;
+};
+
+export async function getOzonAccrualTypes(clientId: string, apiKey: string): Promise<OzonAccrualType[]> {
+  const payload = await ozonRequest<Record<string, unknown>>("/v1/finance/accrual/types", clientId, apiKey, {});
+  const rows = Array.isArray(payload.accrual_types) ? payload.accrual_types : [];
+  return rows.map((row) => {
+    const item = asObject(row);
+    return {
+      id: asNumber(item?.id) ?? 0,
+      name: typeof item?.name === "string" ? item.name : "",
+      description: typeof item?.description === "string" ? item.description : "",
+    };
+  }).filter((type) => type.id > 0);
+}
+
+/** Сумма в формате Ozon: {amount: "1234.5600", currency: "RUB"}. */
+function moneyValue(value: unknown) {
+  const item = asObject(value);
+  const parsed = Number(item?.amount ?? value ?? 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+const OZON_ACCRUAL_BATCH = 200;
+
+export async function getOzonPostingAccruals(
+  clientId: string,
+  apiKey: string,
+  postingNumbers: string[],
+): Promise<OzonAccrual[]> {
+  const accruals: OzonAccrual[] = [];
+  const unique = [...new Set(postingNumbers.filter(Boolean))];
+
+  for (let start = 0; start < unique.length; start += OZON_ACCRUAL_BATCH) {
+    const payload = await ozonRequest<Record<string, unknown>>(
+      "/v1/finance/accrual/postings",
+      clientId,
+      apiKey,
+      { posting_numbers: unique.slice(start, start + OZON_ACCRUAL_BATCH) },
+    );
+    const groups = Array.isArray(payload.posting_accruals) ? payload.posting_accruals : [];
+    for (const group of groups) {
+      const item = asObject(group);
+      const postingNumber = typeof item?.posting_number === "string" ? item.posting_number : "";
+      const rows = Array.isArray(item?.accruals) ? item.accruals : [];
+      for (const row of rows) {
+        const accrual = asObject(row);
+        if (!accrual) continue;
+        const accrualDate = typeof accrual.accrual_date === "string" ? accrual.accrual_date : "";
+        if (!accrualDate) continue;
+        accruals.push({
+          postingNumber,
+          accrualDate,
+          sellerPrice: moneyValue(accrual.seller_price),
+          accrued: moneyValue(accrual.accrued),
+          quantity: asNumber(accrual.quantity) ?? 0,
+          typeId: asNumber(accrual.type_id) ?? 0,
+        });
+      }
+    }
+  }
+
+  return accruals;
 }
