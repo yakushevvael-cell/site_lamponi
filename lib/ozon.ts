@@ -570,3 +570,248 @@ export async function getOzonPostingAccruals(
 
   return accruals;
 }
+
+/* ============================================================
+   Сборка отправления FBS и этикетка (ТЗ, п. 5).
+
+   Цепочка ровно та, что работала в Google-таблице:
+     exemplar/create-or-get → exemplar/set → exemplar/status
+     → posting/fbs/ship → package-label
+
+   Версии методов важны: Ozon отключает старые. На сентябрь 2026
+   рабочие — v6 для экземпляров, v5 для статуса, v4 для сборки,
+   v2 для этикетки.
+   ============================================================ */
+
+/** Экземпляры отправления: их id нужны, чтобы передать УИН. */
+export async function ozonExemplarCreateOrGet(clientId: string, apiKey: string, postingNumber: string) {
+  return ozonRequest<Record<string, unknown>>(
+    "/v6/fbs/posting/product/exemplar/create-or-get",
+    clientId,
+    apiKey,
+    { posting_number: postingNumber },
+  );
+}
+
+/** Передача УИН. Payload собирает lib/ozon-exemplars.mjs. */
+export async function ozonExemplarSet(clientId: string, apiKey: string, payload: Record<string, unknown>) {
+  return ozonRequest<Record<string, unknown>>(
+    "/v6/fbs/posting/product/exemplar/set",
+    clientId,
+    apiKey,
+    payload,
+  );
+}
+
+/** Проверка УИН на стороне Ozon: ship_available / ship_not_available. */
+export async function ozonExemplarStatus(clientId: string, apiKey: string, postingNumber: string) {
+  return ozonRequest<{ status?: string; products?: unknown[] }>(
+    "/v5/fbs/posting/product/exemplar/status",
+    clientId,
+    apiKey,
+    { posting_number: postingNumber },
+  );
+}
+
+/** Перевод отправления в сборку. */
+export async function ozonShipPosting(
+  clientId: string,
+  apiKey: string,
+  postingNumber: string,
+  products: Array<{ product_id: number; quantity: number }>,
+) {
+  return ozonRequest<{ result?: unknown }>(
+    "/v4/posting/fbs/ship",
+    clientId,
+    apiKey,
+    { posting_number: postingNumber, packages: [{ products }], with: { additional_data: false } },
+  );
+}
+
+/** Текущий статус отправления — нужен, когда ship вернул ошибку после сбоя связи. */
+export async function ozonPostingStatus(clientId: string, apiKey: string, postingNumber: string) {
+  const payload = await ozonRequest<{ result?: { status?: string }; status?: string }>(
+    "/v3/posting/fbs/get",
+    clientId,
+    apiKey,
+    {
+      posting_number: postingNumber,
+      with: {
+        analytics_data: false,
+        barcodes: false,
+        financial_data: false,
+        legal_info: false,
+        product_exemplars: false,
+        related_postings: false,
+        translit: false,
+      },
+    },
+  );
+  return String(payload.result?.status ?? payload.status ?? "");
+}
+
+/**
+ * Этикетка отправлений одним PDF.
+ *
+ * Отдельный запрос, а не ozonRequest: тут приходит не JSON, а файл. Ozon на
+ * «ещё не готово» отвечает то 409, то 400 — считать 400 фатальным нельзя,
+ * именно на этом ломалась печать в таблице.
+ */
+export async function ozonPackageLabel(
+  clientId: string,
+  apiKey: string,
+  postingNumbers: string[],
+): Promise<{ ok: true; pdf: Uint8Array } | { ok: false; notReady: boolean; message: string }> {
+  await pace("ozon", OZON_MIN_INTERVAL_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${OZON_API_BASE}/v2/posting/fbs/package-label`, {
+      method: "POST",
+      headers: {
+        Accept: "application/pdf",
+        "Content-Type": "application/json",
+        "Client-Id": clientId,
+        "Api-Key": apiKey,
+      },
+      body: JSON.stringify({ posting_number: postingNumbers }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch (error) {
+    const timeout = error instanceof Error && error.name === "TimeoutError";
+    return {
+      ok: false,
+      notReady: true,
+      message: timeout ? "Ozon не отдал этикетку за 30 секунд." : "Не удалось связаться с Ozon.",
+    };
+  }
+
+  if (response.ok) {
+    const buffer = new Uint8Array(await response.arrayBuffer());
+    // Иногда вместо PDF приходит JSON с ошибкой и кодом 200.
+    const looksLikePdf = buffer.length > 4 && buffer[0] === 0x25 && buffer[1] === 0x50;
+    if (looksLikePdf) return { ok: true, pdf: buffer };
+    return { ok: false, notReady: true, message: "Ozon вернул не PDF — этикетка ещё не готова." };
+  }
+
+  const text = await response.text().catch(() => "");
+  const notReady = response.status === 409
+    || response.status === 400
+    || response.status === 404
+    || response.status === 429
+    || response.status >= 500
+    || /not ready|aren't ready|не готов/i.test(text);
+  return {
+    ok: false,
+    notReady,
+    message: `Ozon: HTTP ${response.status}${text ? ` — ${text.slice(0, 200)}` : ""}`,
+  };
+}
+
+/* ============================================================
+   Перевозка и акт приёма-передачи Ozon (ТЗ, п. 6).
+
+   Акт готовится не мгновенно: create → check-status → get-pdf.
+   ============================================================ */
+
+/** Метод доставки отправления — он же точка сдачи для акта. */
+export async function ozonPostingDeliveryMethod(clientId: string, apiKey: string, postingNumber: string) {
+  const payload = await ozonRequest<{
+    result?: { delivery_method?: { id?: number; name?: string; warehouse_id?: number; warehouse?: string } };
+  }>(
+    "/v3/posting/fbs/get",
+    clientId,
+    apiKey,
+    {
+      posting_number: postingNumber,
+      with: {
+        analytics_data: false,
+        barcodes: false,
+        financial_data: false,
+        legal_info: false,
+        product_exemplars: false,
+        related_postings: false,
+        translit: false,
+      },
+    },
+  );
+  const method = payload.result?.delivery_method ?? {};
+  return {
+    id: Number(method.id ?? 0) || null,
+    name: String(method.name ?? ""),
+    warehouseId: method.warehouse_id ? String(method.warehouse_id) : null,
+    warehouseName: String(method.warehouse ?? ""),
+  };
+}
+
+/** Создание акта приёма-передачи (перевозки). */
+export async function createOzonAct(
+  clientId: string,
+  apiKey: string,
+  input: { deliveryMethodId: number; departureDate?: string | null; containersCount?: number | null },
+) {
+  const body: Record<string, unknown> = { delivery_method_id: input.deliveryMethodId };
+  if (input.departureDate) body.departure_date = input.departureDate;
+  if (input.containersCount && input.containersCount > 0) body.containers_count = input.containersCount;
+  const payload = await ozonRequest<{ result?: { id?: number }; id?: number }>(
+    "/v2/posting/fbs/act/create",
+    clientId,
+    apiKey,
+    body,
+  );
+  const id = Number(payload.result?.id ?? payload.id ?? 0);
+  if (!id) throw new OzonApiError(502, "Ozon не вернул номер акта.");
+  return id;
+}
+
+/** Статус акта: пока не ready, PDF запрашивать нельзя. */
+export async function checkOzonActStatus(clientId: string, apiKey: string, actId: number) {
+  const payload = await ozonRequest<{ result?: { status?: string }; status?: string }>(
+    "/v2/posting/fbs/act/check-status",
+    clientId,
+    apiKey,
+    { id: actId },
+  );
+  return String(payload.result?.status ?? payload.status ?? "");
+}
+
+/** Файл акта или штрихкода отгрузки. */
+export async function getOzonActFile(
+  clientId: string,
+  apiKey: string,
+  actId: number,
+  kind: "act" | "barcode",
+): Promise<{ ok: true; bytes: Uint8Array; contentType: string } | { ok: false; notReady: boolean; message: string }> {
+  const path = kind === "act" ? "/v2/posting/fbs/act/get-pdf" : "/v2/posting/fbs/act/get-barcode";
+  await pace("ozon", OZON_MIN_INTERVAL_MS);
+  let response: Response;
+  try {
+    response = await fetch(`${OZON_API_BASE}${path}`, {
+      method: "POST",
+      headers: {
+        Accept: "application/pdf",
+        "Content-Type": "application/json",
+        "Client-Id": clientId,
+        "Api-Key": apiKey,
+      },
+      body: JSON.stringify({ id: actId }),
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    return { ok: false, notReady: true, message: "Не удалось связаться с Ozon." };
+  }
+
+  if (response.ok) {
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (bytes.length > 4 && bytes[0] === 0x25 && bytes[1] === 0x50) {
+      return { ok: true, bytes, contentType: "application/pdf" };
+    }
+    if (bytes.length > 8 && bytes[0] === 0x89 && bytes[1] === 0x50) {
+      return { ok: true, bytes, contentType: "image/png" };
+    }
+    return { ok: false, notReady: true, message: "Ozon ещё готовит документ." };
+  }
+
+  const text = await response.text().catch(() => "");
+  const notReady = response.status === 409 || response.status === 400 || response.status >= 500;
+  return { ok: false, notReady, message: `Ozon: HTTP ${response.status}${text ? ` — ${text.slice(0, 200)}` : ""}` };
+}

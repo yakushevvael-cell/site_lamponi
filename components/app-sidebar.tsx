@@ -9,6 +9,7 @@ import {
   Boxes,
   Building2,
   ChevronRight,
+  ClipboardCheck,
   ClipboardList,
   DatabaseZap,
   LayoutGrid,
@@ -16,9 +17,11 @@ import {
   LineChart,
   LogOut,
   PackageCheck,
+  Scale,
   ScanLine,
   ScrollText,
   Settings2,
+  Truck,
   UploadCloud,
   Users,
 } from "lucide-react";
@@ -52,9 +55,12 @@ type NavItem = {
 
 const navigation: NavItem[] = [
   { href: "/", label: "Обзор", icon: BarChart3 },
-  { href: "/warehouse/my", label: "Моё задание", icon: ScanLine, permission: "warehouse.pick" },
+  { href: "/warehouse/my", label: "Моё задание", icon: ClipboardCheck, permission: "warehouse.pick" },
   { href: "/warehouse", label: "Сборка и задания", icon: PackageCheck, permission: "warehouse.tasks" },
+  { href: "/warehouse/scan", label: "Сканирование и этикетки", icon: ScanLine, permission: "warehouse.scan" },
   { href: "/warehouse/problems", label: "Проблемные товары", icon: AlertTriangle, permission: "warehouse.problems" },
+  { href: "/warehouse/supplies", label: "Поставки", icon: Truck, permission: "warehouse.supply" },
+  { href: "/warehouse/discrepancies", label: "Расхождения", icon: Scale, permission: "warehouse.problems.release" },
   { href: "/warehouse/cells", label: "Ячейки и раскладка", icon: LayoutGrid, permission: "warehouse.cells" },
   { href: "/stocks", label: "Остатки", icon: Boxes },
   { href: "/upload", label: "Загрузка ОСВ", icon: UploadCloud, permission: "warehouse.osv" },

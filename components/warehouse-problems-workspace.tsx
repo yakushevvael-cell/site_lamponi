@@ -11,7 +11,7 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, History, Loader2, Unlock } from "lucide-react";
+import { AlertTriangle, Ban, History, Loader2, Unlock } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -43,6 +43,7 @@ type Problem = {
   shipmentDeadline: string | null;
   blockedBy: string | null;
   blockedAt: string;
+  cancelledOnMarketplaceAt?: string | null;
   releasedBy: string | null;
   releasedAt: string | null;
   comment: string | null;
@@ -70,6 +71,7 @@ const ACTION_LABEL: Record<string, string> = {
   blocked: "заблокирован",
   repeat: "не найден повторно",
   released: "блокировка снята",
+  wb_cancelled: "отменено задание WB",
 };
 
 export function WarehouseProblemsWorkspace() {
@@ -207,6 +209,21 @@ export function WarehouseProblemsWorkspace() {
                         )}
                       </TableCell>
                       <TableCell className="pr-5 text-right">
+                        {item.state === "blocked" && item.marketplaceId === "wildberries" && item.externalOrderId ? (
+                          item.cancelledOnMarketplaceAt ? (
+                            <Badge variant="outline" className="mr-2 text-[10px]">задание WB отменено</Badge>
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="mr-2 text-destructive hover:text-destructive"
+                              disabled={busy !== null}
+                              onClick={() => void post({ action: "cancel_wb", id: item.id }, "Сборочное задание WB отменено")}
+                            >
+                              <Ban className="size-4" /> Отменить задание WB
+                            </Button>
+                          )
+                        ) : null}
                         {item.state === "blocked" && canRelease ? (
                           <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => { setReleaseTarget(item); setComment(""); }}>
                             <Unlock className="size-4" /> Снять блокировку

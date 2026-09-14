@@ -594,3 +594,119 @@ export const warehouseEvents = sqliteTable(
     index("warehouse_event_task_idx").on(table.taskId),
   ],
 );
+
+/** Загрузка УПД: из неё берутся пары «артикул + УИН». */
+export const updUploads = sqliteTable("upd_uploads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  fileName: text("file_name").notNull(),
+  itemCount: integer("item_count").notNull().default(0),
+  newCount: integer("new_count").notNull().default(0),
+  uploadedBy: text("uploaded_by"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+/**
+ * УИН → артикул.
+ *
+ * Связь «УИН → артикул → отправление» собирается из двух источников: заказы
+ * дают «отправление ↔ артикул», УПД — «артикул ↔ УИН». Второй скан на столе
+ * нужен не для ввода данных, а чтобы найти нужную этикетку среди сотен.
+ */
+export const uinItems = sqliteTable(
+  "uin_items",
+  {
+    uin: text("uin").primaryKey(),
+    article: text("article").notNull(),
+    size: text("size"),
+    description: text("description"),
+    uploadId: integer("upload_id"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    usedMarketplaceId: text("used_marketplace_id"),
+    usedExternalOrderId: text("used_external_order_id"),
+    usedTaskId: integer("used_task_id"),
+    usedAt: text("used_at"),
+    usedBy: text("used_by"),
+  },
+  (table) => [
+    index("uin_item_article_idx").on(table.article, table.size),
+    index("uin_item_used_idx").on(table.usedExternalOrderId),
+  ],
+);
+
+/**
+ * Этикетка отправления.
+ *
+ * Готовится фоном заранее, до того как товар дойдёт до стола: Ozon отдаёт до
+ * 20 отправлений за запрос, и ждать API в момент скана нельзя. Файл лежит на
+ * диске рядом с ОСВ, в базе — только ключ.
+ */
+export const shipmentLabels = sqliteTable(
+  "shipment_labels",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    marketplaceId: text("marketplace_id").notNull(),
+    externalOrderId: text("external_order_id").notNull(),
+    taskId: integer("task_id"),
+    article: text("article"),
+    size: text("size"),
+    uin: text("uin"),
+    status: text("status", { enum: ["pending", "ready", "error"] }).notNull().default("pending"),
+    contentType: text("content_type"),
+    storageKey: text("storage_key"),
+    error: text("error"),
+    attempts: integer("attempts").notNull().default(0),
+    preparedAt: text("prepared_at"),
+    printedAt: text("printed_at"),
+    printCount: integer("print_count").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("shipment_label_posting_unique").on(table.marketplaceId, table.externalOrderId),
+    index("shipment_label_status_idx").on(table.status, table.createdAt),
+  ],
+);
+
+/** Точки сдачи поставок: склады приёмки WB и методы доставки Ozon. */
+export const dropoffPoints = sqliteTable(
+  "dropoff_points",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    marketplaceId: text("marketplace_id").notNull(),
+    externalId: text("external_id").notNull(),
+    name: text("name").notNull(),
+    address: text("address"),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    /** Последний выбор запоминается: на складе возят в одну и ту же точку. */
+    lastUsedAt: text("last_used_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex("dropoff_point_unique").on(table.marketplaceId, table.externalId)],
+);
+
+/**
+ * Поставка на склад площадки.
+ *
+ * Создаётся после того, как всё собрано и отсканировано. Документы (QR
+ * поставки, стикеры коробов, акт) лежат файлами на диске, в базе — их список.
+ */
+export const supplies = sqliteTable(
+  "supplies",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    marketplaceId: text("marketplace_id").notNull(),
+    taskId: integer("task_id"),
+    externalId: text("external_id"),
+    name: text("name"),
+    status: text("status", { enum: ["created", "closed", "error"] }).notNull().default("created"),
+    boxCount: integer("box_count").notNull().default(1),
+    postingCount: integer("posting_count").notNull().default(0),
+    dropoffPointId: integer("dropoff_point_id"),
+    dropoffName: text("dropoff_name"),
+    documentsJson: text("documents_json").notNull().default("[]"),
+    error: text("error"),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    closedAt: text("closed_at"),
+  },
+  (table) => [index("supply_task_idx").on(table.taskId), index("supply_created_idx").on(table.createdAt)],
+);

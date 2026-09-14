@@ -353,3 +353,160 @@ export async function getWildberriesStatOrders(token: string, dateFrom: string):
   }
   return payload.filter((row): row is WildberriesStatOrder => Boolean(row) && typeof row === "object" && typeof (row as WildberriesStatOrder).date === "string");
 }
+
+/* ============================================================
+   Сборочные задания FBS: отмена, УИН и стикеры (ТЗ, п. 4 и 5).
+   ============================================================ */
+
+/**
+ * Отмена сборочного задания.
+ *
+ * Нужна, когда изделия физически нет: без УИН поставку не закрыть, и задание
+ * придётся отменять. Раньше это делалось руками в кабинете.
+ */
+export async function cancelWildberriesOrder(token: string, orderId: string | number) {
+  await wildberriesRequest<null>(
+    `https://marketplace-api.wildberries.ru/api/v3/orders/${encodeURIComponent(String(orderId))}/cancel`,
+    token,
+    { method: "PATCH" },
+  );
+  return true;
+}
+
+/**
+ * Передача УИН (SGTIN) по сборочному заданию.
+ *
+ * Для ювелирных изделий Wildberries ждёт номера экземпляров до отгрузки.
+ * Ошибку не глотаем: на складе должно быть видно, что УИН не принят.
+ */
+export async function setWildberriesSgtin(token: string, orderId: string | number, sgtins: string[]) {
+  await wildberriesRequest<null>(
+    `https://marketplace-api.wildberries.ru/api/v3/orders/${encodeURIComponent(String(orderId))}/meta/sgtin`,
+    token,
+    { method: "PUT", body: JSON.stringify({ sgtins }) },
+  );
+  return true;
+}
+
+export type WildberriesSticker = {
+  orderId: number;
+  partA?: number;
+  partB?: number;
+  barcode?: string;
+  file?: string;
+};
+
+/**
+ * Стикеры сборочных заданий: картинка в base64.
+ *
+ * Размер 58×40 — стандартный термоярлык WB. Это заменяет выгрузку PDF из
+ * кабинета и разбор QR-кодов из него.
+ */
+export async function getWildberriesStickers(
+  token: string,
+  orderIds: Array<string | number>,
+  options: { type?: "png" | "svg"; width?: number; height?: number } = {},
+) {
+  const type = options.type ?? "png";
+  const width = options.width ?? 58;
+  const height = options.height ?? 40;
+  const stickers: WildberriesSticker[] = [];
+  for (let start = 0; start < orderIds.length; start += 100) {
+    const chunk = orderIds.slice(start, start + 100).map((id) => Number(id)).filter((id) => Number.isFinite(id));
+    if (chunk.length === 0) continue;
+    const url = new URL("https://marketplace-api.wildberries.ru/api/v3/orders/stickers");
+    url.searchParams.set("type", type);
+    url.searchParams.set("width", String(width));
+    url.searchParams.set("height", String(height));
+    const payload = await wildberriesRequest<{ stickers?: WildberriesSticker[] }>(
+      url.toString(),
+      token,
+      { method: "POST", body: JSON.stringify({ orders: chunk }) },
+    );
+    if (Array.isArray(payload.stickers)) stickers.push(...payload.stickers);
+  }
+  return stickers;
+}
+
+/* ============================================================
+   Поставки FBS (ТЗ, п. 6): один склад = одна поставка.
+   ============================================================ */
+
+const WB_MARKETPLACE_BASE = "https://marketplace-api.wildberries.ru/api/v3";
+
+export type WildberriesOffice = { id: number; name: string; address?: string; city?: string; selected?: boolean };
+
+/** Склады приёмки Wildberries — справочник точек сдачи. */
+export async function getWildberriesOffices(token: string) {
+  const payload = await wildberriesRequest<WildberriesOffice[]>(`${WB_MARKETPLACE_BASE}/offices`, token);
+  return Array.isArray(payload) ? payload : [];
+}
+
+/** Создание поставки. Возвращает её идентификатор WB-XXXXXXX. */
+export async function createWildberriesSupply(token: string, name: string) {
+  const payload = await wildberriesRequest<{ id?: string }>(
+    `${WB_MARKETPLACE_BASE}/supplies`,
+    token,
+    { method: "POST", body: JSON.stringify({ name: name.slice(0, 128) }) },
+  );
+  const id = String(payload.id ?? "");
+  if (!id) throw new WildberriesApiError(502, "Wildberries не вернул номер поставки.");
+  return id;
+}
+
+/** Добавление сборочного задания в поставку. */
+export async function addOrderToWildberriesSupply(token: string, supplyId: string, orderId: string | number) {
+  await wildberriesRequest<null>(
+    `${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/orders/${encodeURIComponent(String(orderId))}`,
+    token,
+    { method: "PATCH" },
+  );
+}
+
+/** Закрытие поставки — «передать в доставку». После этого состав не меняется. */
+export async function deliverWildberriesSupply(token: string, supplyId: string) {
+  await wildberriesRequest<null>(
+    `${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/deliver`,
+    token,
+    { method: "PATCH" },
+  );
+}
+
+/** QR поставки: картинка, которую клеят на груз. */
+export async function getWildberriesSupplyBarcode(token: string, supplyId: string, type: "png" | "svg" = "png") {
+  const url = new URL(`${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/barcode`);
+  url.searchParams.set("type", type);
+  const payload = await wildberriesRequest<{ barcode?: string; file?: string }>(url.toString(), token);
+  const file = payload.file ?? payload.barcode ?? "";
+  if (!file) throw new WildberriesApiError(502, "Wildberries не отдал QR поставки.");
+  return file;
+}
+
+/** Короба поставки: сколько заявлено — столько и печатается стикеров. */
+export async function addWildberriesSupplyBoxes(token: string, supplyId: string, amount: number) {
+  const payload = await wildberriesRequest<{ trbxIds?: string[] }>(
+    `${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/trbx`,
+    token,
+    { method: "POST", body: JSON.stringify({ amount: Math.max(1, Math.trunc(amount)) }) },
+  );
+  return Array.isArray(payload.trbxIds) ? payload.trbxIds : [];
+}
+
+export type WildberriesBoxSticker = { trbxId?: string; file?: string; barcode?: string };
+
+/** Стикеры коробов. */
+export async function getWildberriesBoxStickers(
+  token: string,
+  supplyId: string,
+  trbxIds: string[],
+  type: "png" | "svg" = "png",
+) {
+  const url = new URL(`${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/trbx/stickers`);
+  url.searchParams.set("type", type);
+  const payload = await wildberriesRequest<{ stickers?: WildberriesBoxSticker[] }>(
+    url.toString(),
+    token,
+    { method: "POST", body: JSON.stringify({ trbxIds }) },
+  );
+  return Array.isArray(payload.stickers) ? payload.stickers : [];
+}

@@ -22,6 +22,7 @@ import {
   PackageCheck,
   Printer,
   RefreshCw,
+  Truck,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -171,6 +172,16 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
             {manages ? (
               <Button asChild size="sm" variant="outline">
                 <a href={`/print/pick-sheet?task=${task.id}`} target="_blank" rel="noreferrer"><Printer className="size-4" /> Лист подбора</a>
+              </Button>
+            ) : null}
+            {manages && task.status === "picked" ? (
+              <Button asChild size="sm">
+                <Link href={`/warehouse/supplies?task=${task.id}`}><Truck className="size-4" /> Оформить поставку</Link>
+              </Button>
+            ) : null}
+            {manages && task.status === "picked" ? (
+              <Button asChild size="sm" variant="outline">
+                <Link href={`/warehouse/scan?task=${task.id}`}>Стол сканирования</Link>
               </Button>
             ) : null}
             {!closed && !task.assigneeEmail ? (
