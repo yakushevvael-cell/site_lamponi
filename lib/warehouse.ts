@@ -13,7 +13,6 @@ import {
   attachCells,
   buildTaskNumber,
   cellSortOrder,
-  countCells,
   groupByPosting,
   normalizeBatchSize,
   placementKey,
