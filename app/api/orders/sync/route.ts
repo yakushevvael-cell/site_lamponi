@@ -40,6 +40,8 @@ type NormalizedOrder = {
   region: string | null;
   city: string | null;
   warehouseExternalId: string | null;
+  /** Плановая дата отгрузки: дедлайн, по которому на складе видно, что горит. */
+  shipmentDeadline: string | null;
   final: boolean;
   items: NormalizedItem[];
 };
@@ -106,8 +108,8 @@ async function persistOrders(
     `INSERT INTO orders
        (marketplace_id, external_order_id, status, amount, ordered_at, shipped_at, delivered_at,
         buyout_at, canceled_at, cancellation_source, seller_cancelled, region, city,
-        warehouse_external_id, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        warehouse_external_id, shipment_deadline, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(marketplace_id, external_order_id) DO UPDATE SET
        status = excluded.status,
        amount = excluded.amount,
@@ -120,6 +122,7 @@ async function persistOrders(
        region = COALESCE(excluded.region, orders.region),
        city = COALESCE(excluded.city, orders.city),
        warehouse_external_id = COALESCE(excluded.warehouse_external_id, orders.warehouse_external_id),
+       shipment_deadline = COALESCE(excluded.shipment_deadline, orders.shipment_deadline),
        updated_at = CURRENT_TIMESTAMP`,
   ).bind(
     marketplaceId,
@@ -136,6 +139,7 @@ async function persistOrders(
     order.region,
     order.city,
     order.warehouseExternalId,
+    order.shipmentDeadline,
   )));
 
   const orderRows = await db.prepare(
@@ -231,6 +235,9 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
       region: null,
       city: order.address?.fullAddress ?? null,
       warehouseExternalId: order.warehouseId ? String(order.warehouseId) : null,
+      // Wildberries в списке сборочных заданий дедлайн не отдаёт — считаем по
+      // дате заказа на экране склада, а поле оставляем пустым.
+      shipmentDeadline: null,
       final: info.bought || info.canceled,
       items: [{
         externalSku,
@@ -301,6 +308,7 @@ async function syncOzon(db: D1Database, runtime: ReturnType<typeof getRuntimeEnv
       region: posting.analytics_data?.region ?? null,
       city: posting.analytics_data?.city ?? null,
       warehouseExternalId: posting.delivery_method?.warehouse_id ? String(posting.delivery_method.warehouse_id) : null,
+      shipmentDeadline: posting.shipment_date ?? null,
       final: bought || canceled,
       items,
     };

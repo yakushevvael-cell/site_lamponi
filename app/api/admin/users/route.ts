@@ -1,5 +1,7 @@
 import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
 import { generateTemporaryPassword, hashPassword } from "@/lib/password.mjs";
+import { isPermissionCode, type PermissionCode } from "@/lib/permission-codes";
+import { writeGrantedPermissions } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { destroyAllSessions } from "@/lib/session";
 
@@ -18,8 +20,20 @@ export async function GET() {
             locked_until AS lockedUntil
      FROM app_users
      ORDER BY CASE status WHEN 'pending' THEN 0 WHEN 'active' THEN 1 ELSE 2 END, created_at DESC`,
-  ).all();
-  return Response.json({ users: rows.results });
+  ).all<{ email: string }>();
+  // Галочки прав отдаются вместе со списком: отдельный запрос на каждого
+  // сотрудника превратил бы открытие страницы в десяток обращений к базе.
+  const grants = await runtime.DB.prepare("SELECT email, code FROM user_permissions").all<{ email: string; code: string }>();
+  const byEmail = new Map<string, string[]>();
+  for (const row of grants.results) {
+    if (!isPermissionCode(row.code)) continue;
+    const list = byEmail.get(row.email) ?? [];
+    list.push(row.code);
+    byEmail.set(row.email, list);
+  }
+  return Response.json({
+    users: rows.results.map((user) => ({ ...user, permissions: byEmail.get(user.email) ?? [] })),
+  });
 }
 
 export async function POST(request: Request) {
@@ -28,16 +42,36 @@ export async function POST(request: Request) {
   if (!hasManagerAccess(auth.user)) return Response.json({ error: "Требуется полный доступ." }, { status: 403 });
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
-  const body = await request.json().catch(() => null) as { email?: unknown; action?: unknown; accessLevel?: unknown } | null;
+  const body = await request.json().catch(() => null) as {
+    email?: unknown;
+    action?: unknown;
+    accessLevel?: unknown;
+    permissions?: unknown;
+  } | null;
   const email = typeof body?.email === "string" ? body.email.trim().toLowerCase() : "";
   const action = body?.action;
   const accessLevel = body?.accessLevel;
-  if (!email || !["approve", "block", "set_role", "reset_password"].includes(String(action))) return Response.json({ error: "Некорректное действие." }, { status: 400 });
+  if (!email || !["approve", "block", "set_role", "reset_password", "set_permissions"].includes(String(action))) return Response.json({ error: "Некорректное действие." }, { status: 400 });
   if (action === "set_role" && accessLevel !== "simple" && accessLevel !== "full") return Response.json({ error: "Выберите уровень доступа." }, { status: 400 });
   if (email === auth.user.email && (action === "block" || action === "set_role")) return Response.json({ error: "Нельзя изменить права или заблокировать собственный аккаунт." }, { status: 400 });
 
   const target = await runtime.DB.prepare("SELECT role, status FROM app_users WHERE email = ?").bind(email).first<{ role: string; status: string }>();
   if (!target) return Response.json({ error: "Пользователь не найден." }, { status: 404 });
+
+  if (action === "set_permissions") {
+    // Владельцу и полному доступу права уже даны уровнем: галочки им не нужны
+    // и, что важнее, не должны создавать ощущение, что доступ урезан.
+    if (target.role !== "user") {
+      return Response.json({ error: "У полного доступа и владельца все права уже есть — галочки нужны простому уровню." }, { status: 400 });
+    }
+    const raw = Array.isArray(body?.permissions) ? body.permissions : [];
+    const codes = raw.filter(isPermissionCode) as PermissionCode[];
+    const saved = await writeGrantedPermissions(runtime.DB, email, codes, auth.user.email);
+    // Права меняются на сервере при каждом запросе, но пока сотрудник открыт
+    // на складском терминале, страница у него старая — сессию не рвём: сервер
+    // всё равно откажет в том, чего больше нет.
+    return Response.json({ ok: true, email, permissions: saved });
+  }
   // Сброс пароля разрешён и для владельца: иначе забытый пароль админа
   // означал бы потерю доступа ко всей системе.
   if (target.role === "admin" && action !== "reset_password") {

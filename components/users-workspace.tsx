@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Copy, Crown, KeyRound, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
+import { Check, ChevronDown, Copy, Crown, KeyRound, ListChecks, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -27,7 +27,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { PERMISSIONS, PERMISSION_PRESETS, type PermissionCode } from "@/lib/permission-codes";
 
 type UserRole = "admin" | "manager" | "user";
 type AccessLevel = "simple" | "full" | "owner";
@@ -38,6 +48,8 @@ type UserRow = {
   status: "pending" | "active" | "blocked";
   createdAt: string;
   approvedAt: string | null;
+  /** Галочки обязанностей. У полного доступа и владельца права даёт уровень. */
+  permissions?: string[];
 };
 
 const statusLabel = { pending: "Ожидает", active: "Активен", blocked: "Заблокирован" } as const;
@@ -67,6 +79,8 @@ export function UsersWorkspace() {
   const [ownerTarget, setOwnerTarget] = useState<UserRow | null>(null);
   const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
+  const [dutiesTarget, setDutiesTarget] = useState<UserRow | null>(null);
+  const [draftDuties, setDraftDuties] = useState<PermissionCode[]>([]);
 
   const load = useCallback(async () => {
     try {
@@ -132,6 +146,31 @@ export function UsersWorkspace() {
     setFullAccessTarget(user);
   }
 
+  function openDuties(user: UserRow) {
+    setDraftDuties((user.permissions ?? []).filter((code): code is PermissionCode => PERMISSIONS.some((item) => item.code === code)));
+    setDutiesTarget(user);
+  }
+
+  async function saveDuties(email: string, codes: PermissionCode[]) {
+    setBusyEmail(email);
+    try {
+      const response = await fetch("/api/admin/users", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ email, action: "set_permissions", permissions: codes }),
+      });
+      const result = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(result.error ?? "Не удалось сохранить обязанности.");
+      toast.success(codes.length ? "Обязанности сохранены" : "Все обязанности сняты");
+      setDutiesTarget(null);
+      await load();
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Не удалось сохранить обязанности.");
+    } finally {
+      setBusyEmail(null);
+    }
+  }
+
   function RightsMenu({ user }: { user: UserRow }) {
     const value: AccessLevel = user.role === "admin" ? "owner" : user.role === "manager" ? "full" : "simple";
     return (
@@ -154,7 +193,7 @@ export function UsersWorkspace() {
               else void update(user.email, "set_role", "Установлен простой доступ", "simple");
             }}
           >
-            <DropdownMenuRadioItem value="simple">Простой — ОСВ, просмотр, обнуление</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="simple">Простой — просмотр плюс галочки обязанностей</DropdownMenuRadioItem>
             <DropdownMenuRadioItem value="full">Полный — все права администратора</DropdownMenuRadioItem>
             <DropdownMenuRadioItem value="owner">Владелец — полный доступ, нельзя заблокировать</DropdownMenuRadioItem>
           </DropdownMenuRadioGroup>
@@ -174,7 +213,7 @@ export function UsersWorkspace() {
           <div className="grid gap-3 md:grid-cols-2">
             <div className="rounded-xl border bg-muted/35 p-4">
               <p className="flex items-center gap-2 text-sm font-semibold"><Shield className="size-4" /> Простой доступ</p>
-              <p className="mt-1 text-xs leading-5 text-muted-foreground">Просмотр данных, загрузка ОСВ, ручное обнуление и снятие обнуления выбранных остатков.</p>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">Просмотр остатков и ручное обнуление. Складские экраны, загрузка ОСВ и суммы — отдельными галочками в «Обязанностях».</p>
             </div>
             <div className="rounded-xl border border-violet-200 bg-violet-50/60 p-4">
               <p className="flex items-center gap-2 text-sm font-semibold text-violet-950"><ShieldCheck className="size-4" /> Полный доступ</p>
@@ -216,6 +255,11 @@ export function UsersWorkspace() {
                             </>
                           ) : null}
                           {user.role !== "admin" && user.status !== "pending" ? <RightsMenu user={user} /> : null}
+                          {user.role === "user" && user.status === "active" ? (
+                            <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => openDuties(user)}>
+                              <ListChecks className="size-4" /> Обязанности{(user.permissions ?? []).length ? `: ${(user.permissions ?? []).length}` : ""}
+                            </Button>
+                          ) : null}
                           {user.role !== "admin" && user.status === "blocked" ? (
                             <Button size="sm" disabled={busyEmail === user.email} onClick={() => void update(user.email, "approve", "Доступ восстановлен")}>
                               {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />} Разблокировать
@@ -244,6 +288,63 @@ export function UsersWorkspace() {
           )}
         </CardContent>
       </Card>
+
+      <Dialog open={Boolean(dutiesTarget)} onOpenChange={(open) => { if (!open) setDutiesTarget(null); }}>
+        <DialogContent className="max-h-[85svh] overflow-y-auto sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle>Обязанности: {dutiesTarget ? displayName(dutiesTarget) : ""}</DialogTitle>
+            <DialogDescription>
+              Простой уровень доступа сам по себе не даёт складских экранов. Отметьте, что человек делает на складе, —
+              каждое право проверяется на сервере, а не скрытием вкладок.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="flex flex-wrap gap-2">
+            {PERMISSION_PRESETS.map((preset) => (
+              <Button key={preset.id} size="sm" variant="secondary" onClick={() => setDraftDuties([...preset.codes])} title={preset.hint}>
+                {preset.label}
+              </Button>
+            ))}
+            <Button size="sm" variant="ghost" onClick={() => setDraftDuties([])}>Снять все</Button>
+          </div>
+          <div className="space-y-1">
+            {PERMISSIONS.map((permission) => {
+              const checked = draftDuties.includes(permission.code);
+              return (
+                <label
+                  key={permission.code}
+                  className="flex cursor-pointer items-start gap-3 rounded-lg border border-transparent p-2.5 hover:border-border hover:bg-muted/40"
+                >
+                  <Checkbox
+                    className="mt-0.5"
+                    checked={checked}
+                    onCheckedChange={(value) => {
+                      setDraftDuties((current) => value === true
+                        ? [...new Set([...current, permission.code])]
+                        : current.filter((code) => code !== permission.code));
+                    }}
+                  />
+                  <span className="min-w-0">
+                    <span className="flex flex-wrap items-center gap-2 text-sm font-medium">
+                      {permission.label}
+                      {permission.upcoming ? <Badge variant="secondary" className="text-[10px]">этап впереди</Badge> : null}
+                    </span>
+                    <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{permission.hint}</span>
+                  </span>
+                </label>
+              );
+            })}
+          </div>
+          <DialogFooter>
+            <Button variant="outline" onClick={() => setDutiesTarget(null)}>Отмена</Button>
+            <Button
+              disabled={busyEmail === dutiesTarget?.email}
+              onClick={() => { if (dutiesTarget) void saveDuties(dutiesTarget.email, draftDuties); }}
+            >
+              {busyEmail === dutiesTarget?.email ? <Loader2 className="size-4 animate-spin" /> : null} Сохранить
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
 
       <AlertDialog open={Boolean(fullAccessTarget)} onOpenChange={(open) => { if (!open) setFullAccessTarget(null); }}>
         <AlertDialogContent>

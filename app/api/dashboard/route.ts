@@ -6,7 +6,7 @@
  * своего склада, поэтому суммы получаются меньше кабинета; об этом
  * предупреждает поле ordersSource.
  */
-import { authorizeApi } from "@/lib/app-auth";
+import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { marketplaceDay, readDailyFinance, readDailyOrders } from "@/lib/daily-finance";
 
@@ -64,7 +64,8 @@ function daysBetween(from: string, to: string) {
 }
 
 export async function GET(request: Request) {
-  const auth = await authorizeApi();
+  // Дашборд — это суммы: доступен только тем, кому разрешено видеть деньги.
+  const auth = await authorizePermission("money.view");
   if ("response" in auth) return auth.response;
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });

@@ -1,5 +1,6 @@
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { authorizeApi } from "@/lib/app-auth";
+import { readEffectivePermissions } from "@/lib/permissions";
 
 type OrderRow = {
   id: number;
@@ -183,10 +184,15 @@ export async function GET(request: Request) {
      FROM sync_events WHERE kind = 'orders' AND status = 'success' GROUP BY marketplace_id`,
   ).all<{ marketplaceId: string; lastSyncAt: string | null }>();
 
+  // ТЗ, п. 2: цены и суммы — только полному доступу и владельцу. Складским
+  // сотрудникам страница обзора нужна, а суммы в ней — нет, поэтому деньги
+  // вырезаются на сервере, а не скрываются в интерфейсе.
+  const showMoney = (await readEffectivePermissions(auth.user)).includes("money.view");
   return Response.json({
     days,
-    summary,
-    marketplaces,
+    showMoney,
+    summary: showMoney ? summary : { ...summary, orderAmount: 0 },
+    marketplaces: showMoney ? marketplaces : marketplaces.map((row) => ({ ...row, amount: 0 })),
     trend,
     productRatings,
     geography,
@@ -195,7 +201,7 @@ export async function GET(request: Request) {
       marketplaceId: order.marketplaceId,
       marketplace: marketplaceName(order.marketplaceId),
       city: order.city || order.region || "—",
-      amount: Number(order.amount),
+      amount: showMoney ? Number(order.amount) : 0,
       status: order.buyoutAt ? "Выкуп" : order.canceledAt ? (order.sellerCancelled ? "Отмена продавцом" : "Отмена") : order.status,
       orderedAt: order.orderedAt,
       sellerCancelled: Boolean(order.sellerCancelled),

@@ -143,6 +143,8 @@ export const orders = sqliteTable(
     region: text("region"),
     city: text("city"),
     warehouseExternalId: text("warehouse_external_id"),
+    /** Плановая дата отгрузки отправления — дедлайн, по которому видно, что горит. */
+    shipmentDeadline: text("shipment_deadline"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
@@ -386,5 +388,209 @@ export const marketplaceDailyOrders = sqliteTable(
   (table) => [
     primaryKey({ columns: [table.marketplaceId, table.date] }),
     index("daily_orders_date_idx").on(table.date),
+  ],
+);
+
+/**
+ * Права набором галочек.
+ *
+ * Уровни доступа («простой», «полный», «владелец») остаются, но складские
+ * обязанности лестницей уровней не описываются: сборщик видит только своё
+ * задание, начальник склада снимает блокировки, а суммы не показываем ни
+ * тому, ни другому. Поэтому право — отдельная строка, а не ступень уровня.
+ */
+export const userPermissions = sqliteTable(
+  "user_permissions",
+  {
+    email: text("email").notNull(),
+    code: text("code").notNull(),
+    grantedBy: text("granted_by"),
+    grantedAt: text("granted_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [primaryKey({ columns: [table.email, table.code] })],
+);
+
+/** Ячейки адресного склада. Сортировка задаёт маршрут сборщика по складу. */
+export const warehouseCells = sqliteTable(
+  "warehouse_cells",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    code: text("code").notNull(),
+    zone: text("zone"),
+    sortOrder: integer("sort_order").notNull().default(0),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("warehouse_cell_code_unique").on(table.code),
+    index("warehouse_cell_sort_idx").on(table.sortOrder, table.code),
+  ],
+);
+
+/** Раскладка «артикул (и размер) → ячейка». Один артикул лежит в одной ячейке. */
+export const cellPlacements = sqliteTable(
+  "cell_placements",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    article: text("article").notNull(),
+    size: text("size"),
+    cellId: integer("cell_id").notNull().references(() => warehouseCells.id, { onDelete: "cascade" }),
+    updatedBy: text("updated_by"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("cell_placement_cell_idx").on(table.cellId)],
+);
+
+/**
+ * Задание на сборку.
+ *
+ * Всегда одна площадка, а для Wildberries — ещё и один региональный склад:
+ * сортировка идёт уже на сборке, смешивание приводит к пересорту.
+ */
+export const pickTasks = sqliteTable(
+  "pick_tasks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** Номер вида 2026-09-14-OZ-03 или 2026-09-14-WB-КАЗАНЬ. */
+    number: text("number").notNull(),
+    marketplaceId: text("marketplace_id").notNull(),
+    warehouseExternalId: text("warehouse_external_id"),
+    warehouseName: text("warehouse_name"),
+    status: text("status", { enum: ["created", "issued", "picked", "shipped", "cancelled"] })
+      .notNull()
+      .default("created"),
+    assigneeEmail: text("assignee_email"),
+    orderCount: integer("order_count").notNull().default(0),
+    itemCount: integer("item_count").notNull().default(0),
+    unitCount: real("unit_count").notNull().default(0),
+    pickedCount: integer("picked_count").notNull().default(0),
+    notFoundCount: integer("not_found_count").notNull().default(0),
+    cellCount: integer("cell_count").notNull().default(0),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    issuedAt: text("issued_at"),
+    pickedAt: text("picked_at"),
+    shippedAt: text("shipped_at"),
+    cancelledAt: text("cancelled_at"),
+    printedAt: text("printed_at"),
+    comment: text("comment"),
+  },
+  (table) => [
+    uniqueIndex("pick_task_number_unique").on(table.number),
+    index("pick_task_status_idx").on(table.status, table.createdAt),
+    index("pick_task_assignee_idx").on(table.assigneeEmail, table.status),
+  ],
+);
+
+/**
+ * Строка задания: конкретный товар конкретного отправления.
+ *
+ * Ключ — площадка, номер отправления и внешний SKU, а не id строки заказа:
+ * загрузка заказов пересобирает order_items заново, и ссылка на них рвётся.
+ */
+export const pickTaskItems = sqliteTable(
+  "pick_task_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    taskId: integer("task_id").notNull().references(() => pickTasks.id, { onDelete: "cascade" }),
+    marketplaceId: text("marketplace_id").notNull(),
+    externalOrderId: text("external_order_id").notNull(),
+    externalSku: text("external_sku").notNull(),
+    productSku: text("product_sku"),
+    article: text("article").notNull(),
+    size: text("size"),
+    quantity: real("quantity").notNull().default(1),
+    cellCode: text("cell_code"),
+    cellSort: integer("cell_sort"),
+    status: text("status", { enum: ["pending", "picked", "not_found"] }).notNull().default("pending"),
+    orderedAt: text("ordered_at"),
+    shipmentDeadline: text("shipment_deadline"),
+    resolvedBy: text("resolved_by"),
+    resolvedAt: text("resolved_at"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("pick_task_item_posting_unique").on(table.marketplaceId, table.externalOrderId, table.externalSku),
+    index("pick_task_item_task_idx").on(table.taskId, table.cellSort),
+    index("pick_task_item_article_idx").on(table.article, table.size),
+  ],
+);
+
+/**
+ * Проблемный товар: в учёте есть, физически нет.
+ *
+ * Блокировка — это нулевой остаток на обеих площадках плюс игнорирование
+ * артикула при загрузке ОСВ. Снимается только вручную и только с комментарием.
+ */
+export const problemArticles = sqliteTable(
+  "problem_articles",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    article: text("article").notNull(),
+    size: text("size"),
+    productSku: text("product_sku"),
+    state: text("state", { enum: ["blocked", "released"] }).notNull().default("blocked"),
+    status: text("status", { enum: ["searching", "requested", "cancelling", "arrived"] })
+      .notNull()
+      .default("searching"),
+    osvQtyAtBlock: real("osv_qty_at_block").notNull().default(0),
+    failedOrderCount: integer("failed_order_count").notNull().default(0),
+    taskId: integer("task_id"),
+    taskNumber: text("task_number"),
+    marketplaceId: text("marketplace_id"),
+    externalOrderId: text("external_order_id"),
+    shipmentDeadline: text("shipment_deadline"),
+    blockedBy: text("blocked_by"),
+    blockedAt: text("blocked_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    releasedBy: text("released_by"),
+    releasedAt: text("released_at"),
+    comment: text("comment"),
+  },
+  (table) => [index("problem_article_state_idx").on(table.state, table.blockedAt)],
+);
+
+/** Журнал блокировок и снятий. Строки не удаляются и не правятся. */
+export const problemArticleLog = sqliteTable(
+  "problem_article_log",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    article: text("article").notNull(),
+    size: text("size"),
+    action: text("action").notNull(),
+    actorEmail: text("actor_email"),
+    comment: text("comment"),
+    taskNumber: text("task_number"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [index("problem_article_log_article_idx").on(table.article, table.createdAt)],
+);
+
+/**
+ * Журнал событий процесса — основа хронометража.
+ *
+ * Пишется с первого этапа, ещё до появления отчётов: вся аналитика считается
+ * из него задним числом, и к моменту первых отчётов нужна история.
+ */
+export const warehouseEvents = sqliteTable(
+  "warehouse_events",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    kind: text("kind").notNull(),
+    taskId: integer("task_id"),
+    taskNumber: text("task_number"),
+    marketplaceId: text("marketplace_id"),
+    externalOrderId: text("external_order_id"),
+    article: text("article"),
+    size: text("size"),
+    quantity: real("quantity"),
+    actorEmail: text("actor_email"),
+    payloadJson: text("payload_json").notNull().default("{}"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("warehouse_event_created_idx").on(table.createdAt),
+    index("warehouse_event_kind_idx").on(table.kind, table.createdAt),
+    index("warehouse_event_task_idx").on(table.taskId),
   ],
 );

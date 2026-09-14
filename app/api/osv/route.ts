@@ -2,7 +2,8 @@ import { desc } from "drizzle-orm";
 
 import { getDb } from "@/db";
 import { osvUploads } from "@/db/schema";
-import { authorizeApi } from "@/lib/app-auth";
+import { authorizeApi, hasAdminAccess } from "@/lib/app-auth";
+import { readEffectivePermissions } from "@/lib/permissions";
 import { parseOsvWorkbook } from "@/lib/osv-parser";
 import { rebuildReservations } from "@/lib/reservations";
 import { getRuntimeEnv } from "@/lib/runtime-env";
@@ -42,11 +43,18 @@ export async function GET() {
 
 export async function POST(request: Request) {
   // Предпросмотр доступен всем, у кого есть доступ к сервису; применение ОСВ
-  // меняет остатки и запускает выгрузку, поэтому это действие администратора.
+  // меняет остатки и запускает выгрузку — это владелец либо сотрудник с правом
+  // «Загрузка ОСВ» (ТЗ, п. 2: ОСВ грузит начальник склада, а не кладовщик).
   const formData = await request.formData();
   const mode = formData.get("mode") === "apply" ? "apply" : "preview";
-  const auth = await authorizeApi(mode === "apply");
+  const auth = await authorizeApi();
   if ("response" in auth) return auth.response;
+  if (mode === "apply" && !hasAdminAccess(auth.user)) {
+    const permissions = await readEffectivePermissions(auth.user);
+    if (!permissions.includes("warehouse.osv")) {
+      return Response.json({ error: "Загружать ОСВ может владелец или сотрудник с правом «Загрузка ОСВ»." }, { status: 403 });
+    }
+  }
   try {
     const file = formData.get("file");
     const acceptBlockers = formData.get("acceptBlockers") === "1";

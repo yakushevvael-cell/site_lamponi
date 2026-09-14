@@ -4,20 +4,26 @@ import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import type { LucideIcon } from "lucide-react";
 import {
+  AlertTriangle,
   BarChart3,
   Boxes,
   Building2,
   ChevronRight,
   ClipboardList,
   DatabaseZap,
+  LayoutGrid,
   KeyRound,
   LineChart,
   LogOut,
+  PackageCheck,
+  ScanLine,
   ScrollText,
   Settings2,
   UploadCloud,
   Users,
 } from "lucide-react";
+
+import type { PermissionCode } from "@/lib/permission-codes";
 
 import {
   Sidebar,
@@ -40,22 +46,36 @@ type NavItem = {
   adminOnly?: boolean;
   /** Пункт только для владельца. */
   ownerOnly?: boolean;
+  /** Пункт видно только с этим правом. Доступ всё равно проверяет сервер. */
+  permission?: PermissionCode;
 };
 
 const navigation: NavItem[] = [
   { href: "/", label: "Обзор", icon: BarChart3 },
+  { href: "/warehouse/my", label: "Моё задание", icon: ScanLine, permission: "warehouse.pick" },
+  { href: "/warehouse", label: "Сборка и задания", icon: PackageCheck, permission: "warehouse.tasks" },
+  { href: "/warehouse/problems", label: "Проблемные товары", icon: AlertTriangle, permission: "warehouse.problems" },
+  { href: "/warehouse/cells", label: "Ячейки и раскладка", icon: LayoutGrid, permission: "warehouse.cells" },
   { href: "/stocks", label: "Остатки", icon: Boxes },
-  { href: "/upload", label: "Загрузка ОСВ", icon: UploadCloud },
-  { href: "/orders", label: "Заказы", icon: ClipboardList },
-  { href: "/dashboards", label: "Дашборды", icon: LineChart },
-  { href: "/warehouses", label: "Склады", icon: Building2 },
+  { href: "/upload", label: "Загрузка ОСВ", icon: UploadCloud, permission: "warehouse.osv" },
+  { href: "/orders", label: "Заказы", icon: ClipboardList, permission: "money.view" },
+  { href: "/dashboards", label: "Дашборды", icon: LineChart, permission: "money.view" },
+  { href: "/warehouses", label: "Склады площадок", icon: Building2 },
   { href: "/logs", label: "Журнал выгрузки", icon: ScrollText },
   { href: "/password", label: "Смена пароля", icon: KeyRound },
   { href: "/settings", label: "Подключения", icon: Settings2, ownerOnly: true },
   { href: "/users", label: "Пользователи", icon: Users, adminOnly: true },
 ];
 
-export function AppSidebar({ fullAccess, owner }: { fullAccess: boolean; owner: boolean }) {
+export function AppSidebar({
+  fullAccess,
+  owner,
+  permissions,
+}: {
+  fullAccess: boolean;
+  owner: boolean;
+  permissions: string[];
+}) {
   const pathname = usePathname();
   const router = useRouter();
 
@@ -85,8 +105,16 @@ export function AppSidebar({ fullAccess, owner }: { fullAccess: boolean; owner: 
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
-              {navigation.filter((item) => (!item.adminOnly || fullAccess) && (!item.ownerOnly || owner)).map((item) => {
-                const active = item.href === "/" ? pathname === "/" : pathname.startsWith(item.href);
+              {navigation
+                .filter((item) => (!item.adminOnly || fullAccess) && (!item.ownerOnly || owner))
+                .filter((item) => !item.permission || permissions.includes(item.permission))
+                .map((item) => {
+                // «Сборка и задания» не должна подсвечиваться, когда открыто «Моё задание».
+                const active = item.href === "/"
+                  ? pathname === "/"
+                  : item.href === "/warehouse"
+                    ? pathname === "/warehouse" || pathname.startsWith("/warehouse/task")
+                    : pathname.startsWith(item.href);
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={active} tooltip={item.label} className="h-10">
