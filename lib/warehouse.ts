@@ -736,14 +736,86 @@ export async function cancelTask(db: D1Database, taskId: number, actorEmail: str
 /** Ячейки справочника вместе с количеством закреплённых артикулов. */
 export async function readCells(db: D1Database) {
   const rows = await db.prepare(
-    `SELECT c.id, c.code, c.zone, c.sort_order AS sortOrder, c.active,
+    `SELECT c.id, c.code, c.sort_order AS sortOrder, c.active,
             COUNT(cp.id) AS placementCount
      FROM warehouse_cells c
      LEFT JOIN cell_placements cp ON cp.cell_id = c.id
      GROUP BY c.id
      ORDER BY c.sort_order, c.code`,
-  ).all<{ id: number; code: string; zone: string | null; sortOrder: number; active: number; placementCount: number }>();
+  ).all<{ id: number; code: string; sortOrder: number; active: number; placementCount: number }>();
   return rows.results;
+}
+
+export type PlacementHit = {
+  id: number;
+  article: string;
+  size: string | null;
+  cellCode: string;
+  sortOrder: number;
+  updatedBy: string | null;
+  updatedAt: string;
+};
+
+const PLACEMENT_COLUMNS = `SELECT cp.id, cp.article, cp.size, c.code AS cellCode, c.sort_order AS sortOrder,
+          cp.updated_by AS updatedBy, cp.updated_at AS updatedAt
+   FROM cell_placements cp
+   JOIN warehouse_cells c ON c.id = cp.cell_id`;
+
+/** Раскладка — это несколько тысяч строк, она читается целиком и фильтруется в JS. */
+const PLACEMENT_HARD_LIMIT = 100000;
+
+export async function readAllPlacements(db: D1Database) {
+  const rows = await db.prepare(
+    `${PLACEMENT_COLUMNS} ORDER BY c.sort_order, c.code, cp.article, cp.size LIMIT ${PLACEMENT_HARD_LIMIT}`,
+  ).all<PlacementHit>();
+  return rows.results;
+}
+
+/**
+ * Поиск и фильтрация идут в JS, а не в SQL, потому что UPPER и LIKE в SQLite
+ * не знают русских букв: «кольцо-10» в базе не находит «Кольцо-10». Собрать
+ * отдельную колонку с верхним регистром можно, но её пришлось бы поддерживать
+ * во всех путях записи, а раскладка целиком — это тысячи строк, их дешевле
+ * прочитать и сравнить здесь.
+ */
+function upper(value: string | null | undefined) {
+  return String(value ?? "").trim().toUpperCase();
+}
+
+/**
+ * Поиск адреса по артикулу — то, зачем кладовщик открывает страницу чаще
+ * всего: ввёл артикул, увидел номер ячейки.
+ *
+ * Сначала точное совпадение, и только если его нет — вхождение части строки:
+ * иначе на артикул «10» вывалится весь склад, а нужен ровно он.
+ */
+export async function findPlacementsByArticle(db: D1Database, query: string) {
+  const needle = upper(query);
+  if (!needle) return { matches: [] as PlacementHit[], exact: false };
+  const all = await readAllPlacements(db);
+  const exact = all.filter((row) => upper(row.article) === needle);
+  if (exact.length > 0) return { matches: exact.slice(0, 50), exact: true };
+  const partial = all.filter((row) => upper(row.article).includes(needle));
+  partial.sort((left, right) => left.article.length - right.article.length);
+  return { matches: partial.slice(0, 50), exact: false };
+}
+
+/** Что лежит в ячейке — обратный вопрос: пришёл к полке, хочет список. */
+export async function readCellContents(db: D1Database, code: string) {
+  const needle = upper(code);
+  if (!needle) return [] as PlacementHit[];
+  const all = await readAllPlacements(db);
+  return all.filter((row) => upper(row.cellCode) === needle).slice(0, 500);
+}
+
+/** Список раскладки с фильтром по артикулу или номеру ячейки. */
+export async function readPlacementList(db: D1Database, search: string, limit: number) {
+  const all = await readAllPlacements(db);
+  const needle = upper(search);
+  const filtered = needle
+    ? all.filter((row) => upper(row.article).includes(needle) || upper(row.cellCode).includes(needle))
+    : all;
+  return { rows: filtered.slice(0, limit), matched: filtered.length, total: all.length };
 }
 
 /**

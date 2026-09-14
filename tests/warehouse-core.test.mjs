@@ -9,6 +9,9 @@ import {
   groupByPosting,
   normalizeBatchSize,
   parsePlacementTable,
+  parsePlacementRows,
+  splitArticleField,
+  splitTable,
   sortByRoute,
   sortByWaiting,
   splitIntoBatches,
@@ -140,4 +143,68 @@ test("вставленная из таблицы раскладка разбир
   const broken = parsePlacementTable("ART-1;\n;A-01-01\nART-2;A-02-02");
   assert.equal(broken.rows.length, 1);
   assert.equal(broken.errors.length, 2);
+});
+
+test("номер ячейки, написанный один раз на группу, протягивается вниз", () => {
+  // Так выглядит выгрузка с объединённой ячейкой: номер стоит у первой строки
+  // группы, у остальных поле пустое. Без протягивания группа теряет адрес —
+  // это и есть «загрузилось до 59-й ячейки и всё».
+  const table = "Артикул;Ячейка\nART-1;1\nART-2;\nART-3;\nART-4;2\nART-5;";
+  const carried = parsePlacementTable(table);
+  assert.deepEqual(carried.rows, [
+    { article: "ART-1", size: null, cell: "1" },
+    { article: "ART-2", size: null, cell: "1" },
+    { article: "ART-3", size: null, cell: "1" },
+    { article: "ART-4", size: null, cell: "2" },
+    { article: "ART-5", size: null, cell: "2" },
+  ]);
+  assert.equal(carried.carried, 3);
+
+  const strict = parsePlacementTable(table, { carryCellDown: false });
+  assert.equal(strict.rows.length, 2);
+  assert.equal(strict.skipped.noCell, 3);
+});
+
+test("несколько артикулов в одном поле дают несколько адресов", () => {
+  const byNewline = splitArticleField("ART-1\nART-2\nART-1");
+  assert.deepEqual(byNewline, ["ART-1", "ART-2"]);
+  assert.deepEqual(splitArticleField("ART-1, ART-2"), ["ART-1", "ART-2"]);
+  // По запятой делим только похожее на артикулы: иначе название с запятой
+  // развалится на два несуществующих артикула.
+  assert.deepEqual(splitArticleField("Кольцо, большое"), ["Кольцо, большое"]);
+  assert.deepEqual(splitArticleField("3010-1, 3010-2"), ["3010-1", "3010-2"]);
+
+  const parsed = parsePlacementRows([["Артикул", "Ячейка"], ["ART-1\nART-2", "7"]]);
+  assert.deepEqual(parsed.rows, [
+    { article: "ART-1", size: null, cell: "7" },
+    { article: "ART-2", size: null, cell: "7" },
+  ]);
+  assert.equal(parsed.split, 1);
+});
+
+test("поле в кавычках с переносом строки не рвёт остаток файла", () => {
+  const body = 'Артикул;Ячейка\n"ART-1\nART-2";7\nART-3;8';
+  const rows = splitTable(body, ";");
+  assert.equal(rows.length, 3);
+  assert.equal(rows[1][0], "ART-1\nART-2");
+  const parsed = parsePlacementTable(body);
+  assert.equal(parsed.rows.length, 3);
+  assert.equal(parsed.rows.at(-1).cell, "8");
+});
+
+test("заголовок ищется не только в первой строке", () => {
+  const parsed = parsePlacementTable("Раскладка склада\n\nАртикул;Ячейка\nART-1;1");
+  assert.equal(parsed.skippedHeader, true);
+  assert.equal(parsed.headerRow, 3);
+  assert.deepEqual(parsed.rows, [{ article: "ART-1", size: null, cell: "1" }]);
+});
+
+test("столбцы в обратном порядке берутся по заголовку", () => {
+  const parsed = parsePlacementTable("Ячейка;Артикул\n12;ART-1");
+  assert.deepEqual(parsed.rows, [{ article: "ART-1", size: null, cell: "12" }]);
+});
+
+test("неразрывные пробелы и регистр ячейки чистятся", () => {
+  const parsed = parsePlacementTable("Артикул;Ячейка\n\u00a0ART-1 ;\u00a0a-01 ");
+  assert.deepEqual(parsed.rows, [{ article: "ART-1", size: null, cell: "A-01" }]);
 });

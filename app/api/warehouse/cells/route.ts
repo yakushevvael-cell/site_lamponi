@@ -7,9 +7,15 @@
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { cellSortOrder } from "@/lib/warehouse-core.mjs";
-import { logWarehouseEvent, readCells } from "@/lib/warehouse";
+import {
+  findPlacementsByArticle,
+  logWarehouseEvent,
+  readCellContents,
+  readCells,
+  readPlacementList,
+} from "@/lib/warehouse";
 
-const MAX_PLACEMENTS_PAGE = 300;
+const MAX_PLACEMENTS_PAGE = 5000;
 
 export async function GET(request: Request) {
   const auth = await authorizePermission(["warehouse.cells", "warehouse.tasks"]);
@@ -20,27 +26,37 @@ export async function GET(request: Request) {
 
   const url = new URL(request.url);
   const search = (url.searchParams.get("search") ?? "").trim();
+  const lookup = (url.searchParams.get("lookup") ?? "").trim();
+  const cellCode = (url.searchParams.get("cell") ?? "").trim();
   const limitRaw = Number(url.searchParams.get("limit"));
-  const limit = Number.isFinite(limitRaw) ? Math.min(MAX_PLACEMENTS_PAGE, Math.max(10, Math.trunc(limitRaw))) : 100;
+  const limit = Number.isFinite(limitRaw) ? Math.min(MAX_PLACEMENTS_PAGE, Math.max(10, Math.trunc(limitRaw))) : 500;
+
+  // Поиск ячейки по артикулу — отдельный ответ: он нужен без остальной страницы.
+  // Одно поле на оба вопроса: если по артикулу ничего нет, строка проверяется
+  // как номер ячейки — кладовщик не должен помнить, какое поле для чего.
+  if (lookup) {
+    const result = await findPlacementsByArticle(db, lookup);
+    if (result.matches.length === 0) {
+      const inCell = await readCellContents(db, lookup);
+      if (inCell.length > 0) {
+        return Response.json({ lookup: { query: lookup, exact: true, byCell: true, matches: inCell } });
+      }
+    }
+    return Response.json({ lookup: { query: lookup, byCell: false, ...result } });
+  }
+  if (cellCode) {
+    return Response.json({ cell: { code: cellCode, placements: await readCellContents(db, cellCode) } });
+  }
 
   const cells = await readCells(db);
-  const like = `%${search.toUpperCase()}%`;
-  const placementsQuery = `SELECT cp.id, cp.article, cp.size, c.code AS cellCode, c.sort_order AS sortOrder,
-            cp.updated_by AS updatedBy, cp.updated_at AS updatedAt
-     FROM cell_placements cp
-     JOIN warehouse_cells c ON c.id = cp.cell_id
-     ${search ? "WHERE UPPER(cp.article) LIKE ? OR UPPER(c.code) LIKE ?" : ""}
-     ORDER BY c.sort_order, c.code, cp.article
-     LIMIT ${limit}`;
-  const placements = search
-    ? await db.prepare(placementsQuery).bind(like, like).all()
-    : await db.prepare(placementsQuery).all();
-  const total = await db.prepare("SELECT COUNT(*) AS count FROM cell_placements").first<{ count: number }>();
+  const list = await readPlacementList(db, search, limit);
 
   return Response.json({
     cells,
-    placements: placements.results,
-    total: Number(total?.count ?? 0),
+    placements: list.rows,
+    total: list.total,
+    matched: list.matched,
+    limit,
     canManage: auth.permissions.includes("warehouse.cells"),
   });
 }
@@ -56,7 +72,6 @@ export async function POST(request: Request) {
     action?: unknown;
     id?: unknown;
     code?: unknown;
-    zone?: unknown;
     sortOrder?: unknown;
     active?: unknown;
     article?: unknown;
@@ -68,18 +83,17 @@ export async function POST(request: Request) {
 
   if (action === "upsert_cell") {
     const code = text(body?.code, 40).toUpperCase();
-    if (!code) return Response.json({ error: "Укажите код ячейки." }, { status: 400 });
-    const zone = text(body?.zone, 40) || null;
+    if (!code) return Response.json({ error: "Укажите номер ячейки." }, { status: 400 });
     const sortOrderRaw = Number(body?.sortOrder);
     // Порядок по умолчанию считается из кода: маршрут идёт по складу, а не по алфавиту.
     const sortOrder = Number.isFinite(sortOrderRaw) && sortOrderRaw > 0 ? Math.trunc(sortOrderRaw) : cellSortOrder(code);
     const active = body?.active === false ? 0 : 1;
     await db.prepare(
-      `INSERT INTO warehouse_cells (code, zone, sort_order, active, created_by)
-       VALUES (?, ?, ?, ?, ?)
-       ON CONFLICT(code) DO UPDATE SET zone = excluded.zone, sort_order = excluded.sort_order, active = excluded.active`,
-    ).bind(code, zone, sortOrder, active, auth.user.email).run();
-    await logWarehouseEvent(db, { kind: "cell_saved", actorEmail: auth.user.email, payload: { code, zone, sortOrder, active: Boolean(active) } });
+      `INSERT INTO warehouse_cells (code, sort_order, active, created_by)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(code) DO UPDATE SET sort_order = excluded.sort_order, active = excluded.active`,
+    ).bind(code, sortOrder, active, auth.user.email).run();
+    await logWarehouseEvent(db, { kind: "cell_saved", actorEmail: auth.user.email, payload: { code, sortOrder, active: Boolean(active) } });
     return Response.json({ ok: true, cells: await readCells(db) });
   }
 
@@ -100,13 +114,14 @@ export async function POST(request: Request) {
     const article = text(body?.article, 80);
     const size = text(body?.size, 40) || null;
     const code = text(body?.cell, 40).toUpperCase();
-    if (!article || !code) return Response.json({ error: "Укажите артикул и ячейку." }, { status: 400 });
-    let cell = await db.prepare("SELECT id FROM warehouse_cells WHERE UPPER(code) = ?").bind(code).first<{ id: number }>();
+    if (!article || !code) return Response.json({ error: "Укажите артикул и номер ячейки." }, { status: 400 });
+    // Регистр уже приведён в JS: UPPER в SQLite не знает русских букв.
+    let cell = await db.prepare("SELECT id FROM warehouse_cells WHERE code = ? OR UPPER(code) = ?").bind(code, code).first<{ id: number }>();
     if (!cell) {
       await db.prepare(
         "INSERT INTO warehouse_cells (code, sort_order, active, created_by) VALUES (?, ?, 1, ?) ON CONFLICT(code) DO NOTHING",
       ).bind(code, cellSortOrder(code), auth.user.email).run();
-      cell = await db.prepare("SELECT id FROM warehouse_cells WHERE UPPER(code) = ?").bind(code).first<{ id: number }>();
+      cell = await db.prepare("SELECT id FROM warehouse_cells WHERE code = ? OR UPPER(code) = ?").bind(code, code).first<{ id: number }>();
     }
     if (!cell) return Response.json({ error: "Не удалось создать ячейку." }, { status: 500 });
     await db.prepare(
