@@ -11,11 +11,18 @@
  *   — повторный скан: жёлтый экран и двойной звук;
  *   — УИН не найден: жёлтый экран, печати нет;
  *   — изделие из чужого задания: красный экран, печати нет.
+ *
+ * Два исхода требуют действия, а не только внимания:
+ *   — в отправлении несколько изделий: синий экран с номером ячейки
+ *     комплектации, печать — из окна отправлений, когда собрано всё;
+ *   — на Wildberries размер у заказа есть, а в УПД его нет: поле ввода
+ *     блокируется, пока человек не подтвердит или не отклонит.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Boxes,
   CheckCircle2,
   Loader2,
   Printer,
@@ -47,9 +54,27 @@ type Summary = {
   items: number;
   scanned: number;
   postings: number;
+  multiPostings: number;
+  multiComplete: number;
+  preparable: number;
   labelsReady: number;
   labelsError: number;
   labelsPending: number;
+};
+
+type BoardItem = { itemId: number; article: string; size: string | null; uin: string | null; scannedAt: string | null };
+
+type BoardRow = {
+  marketplaceId: string;
+  externalOrderId: string;
+  slot: number | null;
+  total: number;
+  scanned: number;
+  labelStatus: string | null;
+  labelError: string | null;
+  printedAt: string | null;
+  printCount: number;
+  items: BoardItem[];
 };
 
 type LabelError = { id: number; externalOrderId: string; article: string | null; error: string | null };
@@ -66,6 +91,8 @@ type ScanItem = {
 
 type Outcome =
   | { status: "ok"; item: ScanItem; label: { marketplaceId: string; externalOrderId: string; contentType: string } }
+  | { status: "grouped"; uin: string; item: ScanItem; slot: number | null; scanned: number; total: number; complete: boolean }
+  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string }
   | { status: "uin_unknown"; uin: string }
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
@@ -101,6 +128,8 @@ function beep(kind: "ok" | "warn" | "error") {
 
 const OUTCOME_TEXT: Record<Outcome["status"], string> = {
   ok: "Этикетка отправлена на печать",
+  grouped: "В ячейку комплектации, отправление из нескольких изделий",
+  size_confirm: "Нужно подтвердить размер",
   repeat: "Этот УИН уже сканировали",
   uin_unknown: "УИН не найден в УПД",
   foreign_task: "Изделие из другого задания",
@@ -113,6 +142,8 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
   const [taskId, setTaskId] = useState<number | null>(initialTaskId);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [labelErrors, setLabelErrors] = useState<LabelError[]>([]);
+  const [board, setBoard] = useState<BoardRow[]>([]);
+  const [pendingSize, setPendingSize] = useState<{ uin: string; item: ScanItem; orderSize: string } | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [value, setValue] = useState("");
@@ -145,10 +176,11 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
 
   const loadLabels = useCallback(async (id: number) => {
     const response = await fetch(`/api/warehouse/labels?task=${id}`, { cache: "no-store" });
-    const data = await response.json() as { summary?: Summary; errors?: LabelError[]; error?: string };
+    const data = await response.json() as { summary?: Summary; errors?: LabelError[]; board?: BoardRow[]; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Состояние этикеток не загрузилось.");
     setSummary(data.summary ?? null);
     setLabelErrors(data.errors ?? []);
+    setBoard(data.board ?? []);
   }, []);
 
   useEffect(() => {
@@ -165,10 +197,13 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
   // Поле не должно терять фокус: сканер печатает «в никуда», если фокус ушёл.
   useEffect(() => {
     const timer = setInterval(() => {
+      // Пока ждём подтверждения размера, поле выключено: случайный скан не
+      // должен проскочить мимо вопроса.
+      if (pendingSize) return;
       if (document.activeElement !== inputRef.current && !busy) inputRef.current?.focus();
     }, 1200);
     return () => clearInterval(timer);
-  }, [busy]);
+  }, [busy, pendingSize]);
 
   useEffect(() => {
     const online = () => setOffline(false);
@@ -191,11 +226,13 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
         body: JSON.stringify({ taskId: id, limit }),
       });
       const data = await response.json() as {
-        prepared?: number; failed?: number; summary?: Summary; errors?: LabelError[]; messages?: string[]; error?: string;
+        prepared?: number; failed?: number; waiting?: number; summary?: Summary;
+        errors?: LabelError[]; board?: BoardRow[]; messages?: string[]; error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Подготовка не прошла.");
       setSummary(data.summary ?? null);
       setLabelErrors(data.errors ?? []);
+      setBoard(data.board ?? []);
       for (const message of data.messages ?? []) toast.warning(message);
       return data;
     } finally {
@@ -207,7 +244,9 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
   // подтягивает их пачками сам, чтобы на столе не ждали API площадки.
   useEffect(() => {
     if (!taskId || !summary || preparing || offline) return;
-    const left = summary.postings - summary.labelsReady - summary.labelsError;
+    // Отправление из нескольких изделий готовится только после того, как
+    // отсканировано целиком: пока не собрано, дёргать площадку нечем.
+    const left = summary.preparable - summary.labelsReady - summary.labelsError;
     if (left <= 0) return;
     const timer = setTimeout(() => {
       void prepare(taskId).catch(() => undefined);
@@ -230,7 +269,7 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     };
   }
 
-  async function submitScan(raw: string) {
+  async function submitScan(raw: string, confirmSize = false) {
     const uin = raw.trim();
     if (!uin || !taskId) return;
     setBusy(true);
@@ -238,23 +277,38 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
       const response = await fetch("/api/warehouse/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uin, taskId }),
+        body: JSON.stringify({ uin, taskId, confirmSize }),
       });
-      const data = await response.json() as { outcome?: Outcome; summary?: Summary; error?: string };
+      const data = await response.json() as {
+        outcome?: Outcome; summary?: Summary; board?: BoardRow[]; error?: string;
+      };
       if (!response.ok) throw new Error(data.error ?? "Скан не обработан.");
       const result = data.outcome;
       if (!result) throw new Error("Пустой ответ сервера.");
 
       setOutcome(result);
       setSummary(data.summary ?? null);
+      if (data.board) setBoard(data.board);
       setHistory((current) => [
         { at: new Date().toISOString(), uin, status: result.status, text: OUTCOME_TEXT[result.status] },
         ...current,
       ].slice(0, 40));
 
+      if (result.status === "size_confirm") {
+        // Ничего не записано: ждём ответа человека и держим скан у себя.
+        setPendingSize({ uin: result.uin, item: result.item, orderSize: result.orderSize });
+        beep("warn");
+        return;
+      }
+      setPendingSize(null);
+
       if (result.status === "ok") {
         beep("ok");
         printLabel(result.label.marketplaceId, result.label.externalOrderId);
+      } else if (result.status === "grouped") {
+        beep("ok");
+        // Этикетка печатается из окна отправлений, когда собрано всё.
+        if (result.complete && taskId) void prepare(taskId, 4).catch(() => undefined);
       } else if (result.status === "foreign_task") {
         beep("error");
       } else {
@@ -266,8 +320,21 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     } finally {
       setValue("");
       setBusy(false);
-      inputRef.current?.focus();
+      if (!pendingSize) inputRef.current?.focus();
     }
+  }
+
+  function rejectSize() {
+    const pending = pendingSize;
+    setPendingSize(null);
+    setOutcome(null);
+    if (pending) {
+      setHistory((current) => [
+        { at: new Date().toISOString(), uin: pending.uin, status: "size_confirm", text: "Размер не подтверждён, изделие отложено" },
+        ...current,
+      ].slice(0, 40));
+    }
+    inputRef.current?.focus();
   }
 
   async function uploadUpd(file: File) {
@@ -299,11 +366,13 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
   const task = tasks.find((item) => item.id === taskId) ?? null;
   const banner = outcome?.status === "ok"
     ? "border-emerald-300 bg-emerald-50 text-emerald-950"
-    : outcome?.status === "foreign_task"
-      ? "border-red-400 bg-red-100 text-red-950"
-      : outcome
-        ? "border-amber-300 bg-amber-50 text-amber-950"
-        : "border-dashed bg-muted/40 text-muted-foreground";
+    : outcome?.status === "grouped"
+      ? "border-sky-400 bg-sky-50 text-sky-950"
+      : outcome?.status === "foreign_task"
+        ? "border-red-400 bg-red-100 text-red-950"
+        : outcome
+          ? "border-amber-300 bg-amber-50 text-amber-950"
+          : "border-dashed bg-muted/40 text-muted-foreground";
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-5 p-4 md:p-7">
@@ -370,10 +439,10 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
               ref={inputRef}
               autoFocus
               inputMode="numeric"
-              placeholder="Сканируйте УИН"
+              placeholder={pendingSize ? "Ответьте на вопрос ниже" : "Сканируйте УИН"}
               className="h-16 flex-1 min-w-64 text-center font-mono text-2xl"
               value={value}
-              disabled={!taskId || busy}
+              disabled={!taskId || busy || pendingSize !== null}
               onChange={(event) => setValue(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -386,6 +455,11 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
               <div className="flex gap-4 text-sm">
                 <span><b className="text-lg">{summary.scanned}</b> / {summary.items} отсканировано</span>
                 <span><b className="text-lg">{summary.labelsReady}</b> / {summary.postings} этикеток готово</span>
+                {summary.multiPostings > 0 ? (
+                  <span className="text-sky-700">
+                    сборных отправлений: <b>{summary.multiComplete}</b> / {summary.multiPostings}
+                  </span>
+                ) : null}
                 {summary.labelsError > 0 ? <span className="text-destructive">{summary.labelsError} с ошибкой</span> : null}
               </div>
             ) : null}
@@ -410,6 +484,45 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
                 >
                   <Printer className="size-4" /> Напечатать ещё раз
                 </Button>
+              </div>
+            ) : outcome.status === "grouped" ? (
+              <div className="space-y-1">
+                <p className="flex items-center gap-2 text-xl font-bold"><Boxes className="size-6" /> В отправлении несколько изделий</p>
+                <p className="font-mono text-2xl font-bold">{outcome.item.article}{outcome.item.size ? ` / ${outcome.item.size}` : ""}</p>
+                <p className="text-lg">
+                  Отложите в ячейку комплектации{" "}
+                  <span className="rounded bg-sky-200 px-2 font-mono text-3xl font-bold">{outcome.slot ?? "—"}</span>
+                </p>
+                <p className="text-sm">
+                  Отправление <span className="font-mono">{outcome.item.externalOrderId}</span> · отсканировано{" "}
+                  <b>{outcome.scanned}</b> из <b>{outcome.total}</b>.{" "}
+                  {outcome.complete
+                    ? "Отправление собрано — этикетка готовится, напечатайте её в списке ниже."
+                    : "Этикетка напечатается, когда отсканируете остальные изделия этого отправления."}
+                </p>
+              </div>
+            ) : outcome.status === "size_confirm" ? (
+              <div className="space-y-2">
+                <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Подтвердите размер</p>
+                <p className="font-mono text-2xl font-bold">{outcome.item.article}</p>
+                <p className="text-lg">
+                  На Wildberries заказан размер{" "}
+                  <span className="rounded bg-amber-200 px-2 font-mono font-bold">{outcome.orderSize}</span>, а в УПД
+                  размер не указан.
+                </p>
+                <p className="text-sm">Проверьте изделие в руках. Подтверждаете, что это тот самый размер?</p>
+                <div className="flex flex-wrap gap-2 pt-1">
+                  <Button
+                    size="lg"
+                    disabled={busy}
+                    onClick={() => { const pending = pendingSize; if (pending) void submitScan(pending.uin, true); }}
+                  >
+                    <CheckCircle2 className="size-5" /> Да, размер тот
+                  </Button>
+                  <Button size="lg" variant="outline" disabled={busy} onClick={rejectSize}>
+                    Нет, отложить изделие
+                  </Button>
+                </div>
               </div>
             ) : outcome.status === "foreign_task" ? (
               <div className="space-y-1">
@@ -460,6 +573,74 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
           </div>
         </CardContent>
       </Card>
+
+      {board.length > 0 ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Boxes className="size-4" /> Отправления из нескольких изделий
+            </CardTitle>
+            <CardDescription>
+              Каждое такое отправление собирается в своей ячейке комплектации. Когда отсканированы все изделия,
+              нажмите на номер отправления — этикетка уйдёт на печать.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-3 px-5 md:grid-cols-2">
+            {board.map((row) => {
+              const complete = row.scanned >= row.total;
+              const ready = row.labelStatus === "ready";
+              return (
+                <div
+                  key={`${row.marketplaceId}-${row.externalOrderId}`}
+                  className={`rounded-xl border px-4 py-3 ${complete ? "border-sky-400 bg-sky-50" : "bg-muted/30"}`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="flex items-center gap-2">
+                      <span className="grid size-10 place-items-center rounded-lg bg-sky-200 font-mono text-xl font-bold text-sky-950">
+                        {row.slot ?? "—"}
+                      </span>
+                      <div>
+                        <button
+                          type="button"
+                          disabled={!complete || !ready}
+                          className="font-mono text-base font-bold underline-offset-2 hover:underline disabled:no-underline disabled:opacity-60"
+                          onClick={() => printLabel(row.marketplaceId, row.externalOrderId)}
+                        >
+                          {row.externalOrderId}
+                        </button>
+                        <p className="text-xs text-muted-foreground">
+                          {row.marketplaceId === "ozon" ? "Ozon" : "Wildberries"} · отсканировано {row.scanned} из {row.total}
+                          {row.printCount > 0 ? ` · печаталась ${row.printCount} раз` : ""}
+                        </p>
+                      </div>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant={complete && ready ? "default" : "outline"}
+                      disabled={!complete || !ready}
+                      onClick={() => printLabel(row.marketplaceId, row.externalOrderId)}
+                    >
+                      <Printer className="size-4" /> {ready ? "Печать" : complete ? "Готовится…" : "Не собрано"}
+                    </Button>
+                  </div>
+                  <ul className="mt-2 space-y-1 text-sm">
+                    {row.items.map((item) => (
+                      <li key={item.itemId} className="flex items-center gap-2">
+                        {item.scannedAt
+                          ? <CheckCircle2 className="size-4 shrink-0 text-emerald-600" />
+                          : <span className="inline-block size-4 shrink-0 rounded-full border border-muted-foreground/40" />}
+                        <span className="font-mono">{item.article}{item.size ? ` / ${item.size}` : ""}</span>
+                        {item.uin ? <span className="font-mono text-xs text-muted-foreground">{item.uin}</span> : null}
+                      </li>
+                    ))}
+                  </ul>
+                  {row.labelError ? <p className="mt-2 text-xs text-destructive">{row.labelError}</p> : null}
+                </div>
+              );
+            })}
+          </CardContent>
+        </Card>
+      ) : null}
 
       {labelErrors.length > 0 ? (
         <Card>

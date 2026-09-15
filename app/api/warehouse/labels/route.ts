@@ -1,5 +1,5 @@
 /** Этикетки задания: состояние подготовки и запуск фоновой подготовки. */
-import { prepareLabelsForTask, readLabelErrors, readScanSummary } from "@/lib/labels";
+import { prepareLabelsForTask, readLabelErrors, readPostingBoard, readScanSummary } from "@/lib/labels";
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { readTask } from "@/lib/warehouse";
@@ -24,6 +24,7 @@ export async function GET(request: Request) {
     task,
     summary: await readScanSummary(runtime.DB, taskId),
     errors: await readLabelErrors(runtime.DB, taskId),
+    board: await readPostingBoard(runtime.DB, taskId),
   });
 }
 
@@ -54,5 +55,6 @@ export async function POST(request: Request) {
     ...result,
     summary: await readScanSummary(runtime.DB, taskId),
     errors: await readLabelErrors(runtime.DB, taskId),
+    board: await readPostingBoard(runtime.DB, taskId),
   });
 }

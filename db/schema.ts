@@ -508,6 +508,14 @@ export const pickTaskItems = sqliteTable(
     shipmentDeadline: text("shipment_deadline"),
     resolvedBy: text("resolved_by"),
     resolvedAt: text("resolved_at"),
+    // Стол сканирования (миграция 0013) и подтверждение размера WB (0015).
+    uin: text("uin"),
+    scannedAt: text("scanned_at"),
+    scannedBy: text("scanned_by"),
+    labelPrintedAt: text("label_printed_at"),
+    sizeConfirmedAt: text("size_confirmed_at"),
+    sizeConfirmedBy: text("size_confirmed_by"),
+    sizeConfirmedValue: text("size_confirmed_value"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
@@ -709,4 +717,29 @@ export const supplies = sqliteTable(
     closedAt: text("closed_at"),
   },
   (table) => [index("supply_task_idx").on(table.taskId), index("supply_created_idx").on(table.createdAt)],
+);
+
+/**
+ * Ячейка комплектации под отправление с несколькими товарами.
+ *
+ * Изделия одного отправления Ozon должны уехать в одной посылке, а приходят
+ * на стол в разное время. Пока отправление не отсканировано целиком, изделия
+ * лежат в своей ячейке: один номер отправления — одна ячейка.
+ */
+export const postingSlots = sqliteTable(
+  "posting_slots",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    taskId: integer("task_id").notNull(),
+    marketplaceId: text("marketplace_id").notNull(),
+    externalOrderId: text("external_order_id").notNull(),
+    slot: integer("slot").notNull(),
+    itemsTotal: integer("items_total").notNull().default(0),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    uniqueIndex("posting_slot_posting_unique").on(table.taskId, table.marketplaceId, table.externalOrderId),
+    uniqueIndex("posting_slot_number_unique").on(table.taskId, table.slot),
+  ],
 );

@@ -14,6 +14,7 @@ import {
   buildExemplarSetPayload,
   buildShipProducts,
   countExemplars,
+  neededUinCount,
   exemplarStatusErrors,
   normalizeLabelPostings,
 } from "../lib/ozon-exemplars.mjs";
@@ -147,4 +148,70 @@ test("ошибки проверки УИН читаются человеком",
   });
   assert.ok(message.includes("jw_uin"));
   assert.ok(exemplarStatusErrors({}).includes("не назвал"));
+});
+
+// Отправление из трёх изделий: два одного товара и одно другого.
+const createdMulti = {
+  result: {
+    multi_box_qty: 0,
+    products: [
+      {
+        product_id: 555,
+        offer_id: "с-3005р",
+        quantity: 2,
+        is_jw_uin_needed: true,
+        exemplars: [{ exemplar_id: 1 }, { exemplar_id: 2 }],
+      },
+      {
+        product_id: 777,
+        offer_id: "Б-1316",
+        quantity: 1,
+        is_jw_uin_needed: true,
+        exemplars: [{ exemplar_id: 3 }],
+      },
+    ],
+  },
+};
+
+test("в отправлении с несколькими товарами каждому изделию уходит свой УИН", () => {
+  assert.equal(neededUinCount(createdMulti), 3);
+  assert.equal(countExemplars(createdMulti), 3);
+
+  const { mustSet, payload, problems, marks } = buildExemplarSetPayload("1111-0002-1", createdMulti, {
+    byProduct: { 555: ["6431", "6432"], 777: ["6433"] },
+    pool: ["6431", "6432", "6433"],
+  });
+  assert.equal(mustSet, true);
+  assert.deepEqual(problems, []);
+  assert.equal(marks, 3);
+  const [first, second] = payload.products;
+  assert.deepEqual(first.exemplars.map((row) => row.marks[0].mark), ["6431", "6432"]);
+  assert.deepEqual(second.exemplars.map((row) => row.marks[0].mark), ["6433"]);
+  // Один УИН не может уехать дважды.
+  const all = payload.products.flatMap((product) => product.exemplars.map((row) => row.marks[0].mark));
+  assert.equal(new Set(all).size, all.length);
+});
+
+test("УИН находится и по offer_id, когда product_id не совпал", () => {
+  const { payload, problems } = buildExemplarSetPayload("1111-0002-1", createdMulti, {
+    byProduct: { "с-3005р": ["6431", "6432"], "Б-1316": ["6433"] },
+    pool: ["6431", "6432", "6433"],
+  });
+  assert.deepEqual(problems, []);
+  assert.equal(payload.products[1].exemplars[0].marks[0].mark, "6433");
+});
+
+test("нехватка УИН на отправление названа до обращения к Ozon", () => {
+  const { problems, mustSet } = buildExemplarSetPayload("1111-0002-1", createdMulti, {
+    byProduct: { 555: ["6431"] },
+    pool: ["6431"],
+  });
+  assert.equal(mustSet, true);
+  assert.ok(problems.some((message) => message.includes("Не хватает УИН")));
+});
+
+test("одиночный УИН строкой по-прежнему работает", () => {
+  const { payload, marks } = buildExemplarSetPayload("1111-0001-1", created, "6431111111111111");
+  assert.equal(marks, 1);
+  assert.equal(payload.products[0].exemplars[0].marks.at(-1).mark, "6431111111111111");
 });
