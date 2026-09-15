@@ -10,6 +10,7 @@ import {
   normalizeBatchSize,
   parsePlacementTable,
   parsePlacementRows,
+  confusableArticle,
   splitArticleField,
   splitTable,
   sortByRoute,
@@ -207,4 +208,55 @@ test("столбцы в обратном порядке берутся по за
 test("неразрывные пробелы и регистр ячейки чистятся", () => {
   const parsed = parsePlacementTable("Артикул;Ячейка\n\u00a0ART-1 ;\u00a0a-01 ");
   assert.deepEqual(parsed.rows, [{ article: "ART-1", size: null, cell: "A-01" }]);
+});
+
+test("раскладка из рабочей таблицы: номер ячейки в первом столбце", () => {
+  // Так выглядит «Адресный склад FBS»: у первого столбца заголовка нет, во
+  // втором «Артикул», номер ячейки повторяется на каждой строке группы.
+  const table = [
+    "\tАртикул",
+    "1\tс-3005р",
+    "1\tс-3260р",
+    "1\tC-2293з",
+    "2\tБ-1316",
+    "2\tсп-3014р001",
+    "422\tс-3249зр",
+  ].join("\n");
+  // Заголовок назвал только артикул — ячейкой становится второй столбец,
+  // переставлять ничего не нужно.
+  const parsed = parsePlacementTable(table);
+  assert.equal(parsed.skippedHeader, true);
+  assert.equal(parsed.swapped, false);
+  assert.deepEqual(parsed.columns, { article: 1, size: null, cell: 0 });
+  assert.deepEqual(parsed.rows.at(0), { article: "с-3005р", size: null, cell: "1" });
+  assert.deepEqual(parsed.rows.at(-1), { article: "с-3249зр", size: null, cell: "422" });
+  assert.equal(parsed.rows.length, 6);
+
+  // Без строки заголовка порядок столбцов определяется по данным.
+  const noHeader = parsePlacementTable("1\tс-3005р\n1\tс-3260р\n2\tБ-1316");
+  assert.equal(noHeader.swapped, true);
+  assert.deepEqual(noHeader.rows.at(0), { article: "с-3005р", size: null, cell: "1" });
+});
+
+test("столбцы не переставляются, когда и артикулы — числа", () => {
+  const parsed = parsePlacementTable("Артикул;Ячейка\n3005;1\n3260;1\n1316;2");
+  assert.equal(parsed.swapped, false);
+  assert.deepEqual(parsed.rows.at(0), { article: "3005", size: null, cell: "1" });
+});
+
+test("русские буквы, похожие на латинские, ищутся как латинские", () => {
+  assert.equal(confusableArticle("с-3005р"), "C-3005P");
+  assert.equal(confusableArticle("C-3005P"), "C-3005P");
+  // «З» не становится тройкой: иначе «С-2293з» слиплось бы с «С-22933».
+  assert.notEqual(confusableArticle("С-2293з"), confusableArticle("С-22933"));
+
+  const items = [
+    { article: "c-3005p", size: null },
+    { article: "Б-1316", size: null },
+  ];
+  const placements = [
+    { article: "с-3005р", size: null, cellCode: "1", sortOrder: 1 },
+    { article: "Б-1316", size: null, cellCode: "2", sortOrder: 2 },
+  ];
+  assert.deepEqual(attachCells(items, placements).map((item) => item.cellCode), ["1", "2"]);
 });

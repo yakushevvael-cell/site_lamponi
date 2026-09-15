@@ -13,6 +13,7 @@ import {
   attachCells,
   buildTaskNumber,
   cellSortOrder,
+  confusableArticle,
   groupByPosting,
   normalizeBatchSize,
   placementKey,
@@ -783,19 +784,34 @@ function upper(value: string | null | undefined) {
 }
 
 /**
+ * Ключ «как выглядит»: русские буквы, неотличимые от латинских, приводятся к
+ * латинским. В раскладке рядом живут «с-3005р» и «c-3005p», набранные в
+ * разных раскладках клавиатуры, и искать надо по виду, а не по кодам букв.
+ */
+function looks(value: string | null | undefined): string {
+  return confusableArticle(value);
+}
+
+/**
  * Поиск адреса по артикулу — то, зачем кладовщик открывает страницу чаще
  * всего: ввёл артикул, увидел номер ячейки.
  *
- * Сначала точное совпадение, и только если его нет — вхождение части строки:
- * иначе на артикул «10» вывалится весь склад, а нужен ровно он.
+ * Сначала точное совпадение, потом похожее по виду, и только потом вхождение
+ * части строки: иначе на артикул «10» вывалится весь склад, а нужен ровно он.
  */
 export async function findPlacementsByArticle(db: D1Database, query: string) {
   const needle = upper(query);
   if (!needle) return { matches: [] as PlacementHit[], exact: false };
   const all = await readAllPlacements(db);
+
   const exact = all.filter((row) => upper(row.article) === needle);
   if (exact.length > 0) return { matches: exact.slice(0, 50), exact: true };
-  const partial = all.filter((row) => upper(row.article).includes(needle));
+
+  const shape = looks(query);
+  const sameShape = all.filter((row) => looks(row.article) === shape);
+  if (sameShape.length > 0) return { matches: sameShape.slice(0, 50), exact: true };
+
+  const partial = all.filter((row) => looks(row.article).includes(shape));
   partial.sort((left, right) => left.article.length - right.article.length);
   return { matches: partial.slice(0, 50), exact: false };
 }
@@ -811,9 +827,9 @@ export async function readCellContents(db: D1Database, code: string) {
 /** Список раскладки с фильтром по артикулу или номеру ячейки. */
 export async function readPlacementList(db: D1Database, search: string, limit: number) {
   const all = await readAllPlacements(db);
-  const needle = upper(search);
+  const needle = looks(search);
   const filtered = needle
-    ? all.filter((row) => upper(row.article).includes(needle) || upper(row.cellCode).includes(needle))
+    ? all.filter((row) => looks(row.article).includes(needle) || upper(row.cellCode).includes(upper(search)))
     : all;
   return { rows: filtered.slice(0, limit), matched: filtered.length, total: all.length };
 }

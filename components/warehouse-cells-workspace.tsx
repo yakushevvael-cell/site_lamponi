@@ -47,6 +47,7 @@ type Report = {
   split: number;
   merged: number;
   duplicates: number;
+  swapped?: boolean;
   skipped: { noArticle: number; noCell: number; empty: number };
   errors: Array<{ line: number; message: string }>;
   newCells: number;
@@ -61,6 +62,7 @@ export function WarehouseCellsWorkspace({ canManage }: { canManage: boolean }) {
   const [cells, setCells] = useState<Cell[]>([]);
   const [placements, setPlacements] = useState<Placement[]>([]);
   const [total, setTotal] = useState(0);
+  const [matched, setMatched] = useState(0);
   const [search, setSearch] = useState("");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -79,11 +81,12 @@ export function WarehouseCellsWorkspace({ canManage }: { canManage: boolean }) {
 
   const load = useCallback(async (value: string) => {
     const response = await fetch(`/api/warehouse/cells?search=${encodeURIComponent(value)}&limit=2000`, { cache: "no-store" });
-    const data = await response.json() as { cells?: Cell[]; placements?: Placement[]; total?: number; error?: string };
+    const data = await response.json() as { cells?: Cell[]; placements?: Placement[]; total?: number; matched?: number; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить раскладку.");
     setCells(data.cells ?? []);
     setPlacements(data.placements ?? []);
     setTotal(data.total ?? 0);
+    setMatched(data.matched ?? data.placements?.length ?? 0);
   }, []);
 
   useEffect(() => {
@@ -332,7 +335,12 @@ export function WarehouseCellsWorkspace({ canManage }: { canManage: boolean }) {
                 <p>
                   Прочитано строк: <b>{report.readRows}</b>, получилось адресов: <b>{report.parsed}</b>, ячеек в них: <b>{report.newCells}</b>
                   {report.source ? ` (${SOURCE_LABEL[report.source] ?? report.source})` : ""}
-                  {report.skippedHeader ? `, заголовок в строке ${report.headerRow}` : ", заголовка нет: первый столбец — артикул, второй — ячейка"}
+                  {report.skippedHeader ? `, заголовок в строке ${report.headerRow}` : ", заголовка нет"}
+                </p>
+                <p className="text-muted-foreground">
+                  {report.swapped
+                    ? "Столбцы определены по данным: первый — номер ячейки, второй — артикул."
+                    : "Столбцы: артикул и номер ячейки — как в заголовке."}
                 </p>
                 {report.merged > 0 ? <p className="text-muted-foreground">Объединённых ячеек развёрнуто: {report.merged}</p> : null}
                 {report.carried > 0 ? <p className="text-muted-foreground">Номер ячейки взят из строки выше: {report.carried} строк</p> : null}
@@ -386,140 +394,128 @@ export function WarehouseCellsWorkspace({ canManage }: { canManage: boolean }) {
         </Card>
       ) : null}
 
-      <section className="grid gap-4 xl:grid-cols-[1fr_1.6fr]">
-        <Card className="gap-0 overflow-hidden py-0">
-          <div className="flex items-center justify-between gap-2 border-b px-5 py-4">
-            <p className="flex items-center gap-2 font-semibold"><LayoutGrid className="size-4" /> Ячейки</p>
-            <Badge variant="secondary">{cells.length}</Badge>
-          </div>
-          <div className="max-h-[520px] overflow-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="pl-5">Номер</TableHead>
-                  <TableHead className="text-right">Артикулов</TableHead>
-                  {canManage ? <TableHead className="pr-5" /> : null}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {cells.map((cell) => (
-                  <TableRow key={cell.id} className="cursor-pointer" onClick={() => { setQuery(cell.code); void runLookup(cell.code); }}>
-                    <TableCell className="pl-5 font-mono text-sm font-semibold">
-                      {cell.code}
-                      {cell.active ? null : <Badge variant="outline" className="ml-2 text-[10px]">выключена</Badge>}
-                    </TableCell>
-                    <TableCell className="text-right text-sm">{cell.placementCount}</TableCell>
-                    {canManage ? (
-                      <TableCell className="pr-5 text-right">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive hover:text-destructive"
-                          onClick={(event) => { event.stopPropagation(); setDeleteCellTarget(cell); }}
-                        >
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </TableCell>
-                    ) : null}
-                  </TableRow>
-                ))}
-                {cells.length === 0 ? (
-                  <TableRow><TableCell colSpan={canManage ? 3 : 2} className="h-24 text-center text-muted-foreground">Ячеек пока нет.</TableCell></TableRow>
-                ) : null}
-              </TableBody>
-            </Table>
-          </div>
-        </Card>
-
-        <Card className="gap-0 overflow-hidden py-0">
-          <div className="space-y-3 border-b px-5 py-4">
-            <div className="flex items-center justify-between gap-2">
-              <p className="font-semibold">Раскладка</p>
-              <Badge variant="secondary">{total} привязок</Badge>
+      <Card className="gap-0 overflow-hidden py-0">
+        <div className="space-y-3 border-b px-5 py-4">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="flex items-center gap-2 font-semibold"><LayoutGrid className="size-4" /> Справочник ячеек и артикулов</p>
+            <div className="flex items-center gap-2">
+              <Badge variant="secondary">ячеек: {cells.length}</Badge>
+              <Badge variant="secondary">строк: {total}</Badge>
             </div>
-            <div className="flex gap-2">
-              <Input
-                placeholder="Фильтр: артикул или номер ячейки"
-                value={search}
-                onChange={(event) => setSearch(event.target.value)}
-                onKeyDown={(event) => { if (event.key === "Enter") void runSearch(search); }}
-              />
-              <Button variant="outline" disabled={busy !== null} onClick={() => void runSearch(search)}>
-                {busy === "search" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
-              </Button>
-            </div>
-            {canManage ? (
-              <div className="flex flex-wrap items-end gap-2">
-                <div className="space-y-1">
-                  <Label className="text-xs">Артикул</Label>
-                  <Input className="w-40" value={newArticle} onChange={(event) => setNewArticle(event.target.value)} />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Размер</Label>
-                  <Input className="w-24" value={newSize} onChange={(event) => setNewSize(event.target.value)} placeholder="не важен" />
-                </div>
-                <div className="space-y-1">
-                  <Label className="text-xs">Ячейка</Label>
-                  <Input className="w-28" value={newCell} onChange={(event) => setNewCell(event.target.value)} />
-                </div>
-                <Button
-                  variant="outline"
-                  disabled={busy !== null || !newArticle.trim() || !newCell.trim()}
-                  onClick={() => {
-                    void post(
-                      { action: "set_placement", article: newArticle.trim(), size: newSize.trim() || null, cell: newCell.trim() },
-                      "Адрес сохранён",
-                    ).then(() => { setNewArticle(""); setNewSize(""); setNewCell(""); });
-                  }}
-                >
-                  <Plus className="size-4" /> Добавить
-                </Button>
-              </div>
+          </div>
+          <div className="flex gap-2">
+            <Input
+              placeholder="Фильтр: артикул или номер ячейки"
+              value={search}
+              onChange={(event) => setSearch(event.target.value)}
+              onKeyDown={(event) => { if (event.key === "Enter") void runSearch(search); }}
+            />
+            <Button variant="outline" disabled={busy !== null} onClick={() => void runSearch(search)}>
+              {busy === "search" ? <Loader2 className="size-4 animate-spin" /> : <Search className="size-4" />}
+            </Button>
+            {search ? (
+              <Button variant="ghost" onClick={() => { setSearch(""); void runSearch(""); }}>Сбросить</Button>
             ) : null}
           </div>
-          <div className="max-h-[520px] overflow-auto">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead className="pl-5">Артикул</TableHead>
-                  <TableHead>Размер</TableHead>
-                  <TableHead>Ячейка</TableHead>
-                  <TableHead>Изменено</TableHead>
-                  {canManage ? <TableHead className="pr-5" /> : null}
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {placements.map((placement) => (
-                  <TableRow key={placement.id}>
-                    <TableCell className="pl-5 font-mono text-sm">{placement.article}</TableCell>
-                    <TableCell className="text-sm">{placement.size ?? "—"}</TableCell>
-                    <TableCell className="font-mono text-sm font-semibold">{placement.cellCode}</TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {formatMoment(placement.updatedAt)}
-                      {placement.updatedBy ? <span className="block">{placement.updatedBy}</span> : null}
+          {canManage ? (
+            <div className="flex flex-wrap items-end gap-2">
+              <div className="space-y-1">
+                <Label className="text-xs">Ячейка</Label>
+                <Input className="w-24" value={newCell} onChange={(event) => setNewCell(event.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Артикул</Label>
+                <Input className="w-44 font-mono" value={newArticle} onChange={(event) => setNewArticle(event.target.value)} />
+              </div>
+              <div className="space-y-1">
+                <Label className="text-xs">Размер</Label>
+                <Input className="w-24" value={newSize} onChange={(event) => setNewSize(event.target.value)} placeholder="не важен" />
+              </div>
+              <Button
+                variant="outline"
+                disabled={busy !== null || !newArticle.trim() || !newCell.trim()}
+                onClick={() => {
+                  void post(
+                    { action: "set_placement", article: newArticle.trim(), size: newSize.trim() || null, cell: newCell.trim() },
+                    "Адрес сохранён",
+                  ).then(() => { setNewArticle(""); setNewSize(""); setNewCell(""); });
+                }}
+              >
+                <Plus className="size-4" /> Добавить
+              </Button>
+            </div>
+          ) : null}
+          {matched > placements.length ? (
+            <p className="text-xs text-muted-foreground">Показано {placements.length} строк из {matched}. Уточните фильтр, чтобы увидеть остальные.</p>
+          ) : null}
+        </div>
+        <div className="max-h-[70vh] overflow-auto">
+          <Table>
+            <TableHeader className="sticky top-0 bg-background">
+              <TableRow>
+                <TableHead className="w-24 pl-5">Ячейка</TableHead>
+                <TableHead>Артикул</TableHead>
+                {canManage ? <TableHead className="w-12 pr-5" /> : null}
+              </TableRow>
+            </TableHeader>
+            <TableBody>
+              {placements.map((placement) => (
+                <TableRow key={placement.id}>
+                  <TableCell className="pl-5 font-mono text-sm font-semibold">{placement.cellCode}</TableCell>
+                  <TableCell className="font-mono text-sm">
+                    {placement.article}
+                    {placement.size ? <span className="ml-2 text-xs text-muted-foreground">размер {placement.size}</span> : null}
+                  </TableCell>
+                  {canManage ? (
+                    <TableCell className="pr-5 text-right">
+                      <Button
+                        size="sm"
+                        variant="ghost"
+                        className="text-destructive hover:text-destructive"
+                        onClick={() => void post({ action: "delete_placement", id: placement.id }, "Строка удалена")}
+                      >
+                        <Trash2 className="size-4" />
+                      </Button>
                     </TableCell>
-                    {canManage ? (
-                      <TableCell className="pr-5 text-right">
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          className="text-destructive hover:text-destructive"
-                          onClick={() => void post({ action: "delete_placement", id: placement.id }, "Привязка удалена")}
-                        >
-                          <Trash2 className="size-4" />
-                        </Button>
-                      </TableCell>
-                    ) : null}
-                  </TableRow>
-                ))}
-                {placements.length === 0 ? (
-                  <TableRow><TableCell colSpan={canManage ? 5 : 4} className="h-24 text-center text-muted-foreground">Ничего не найдено.</TableCell></TableRow>
-                ) : null}
-              </TableBody>
-            </Table>
+                  ) : null}
+                </TableRow>
+              ))}
+              {placements.length === 0 ? (
+                <TableRow><TableCell colSpan={canManage ? 3 : 2} className="h-24 text-center text-muted-foreground">Ничего не найдено.</TableCell></TableRow>
+              ) : null}
+            </TableBody>
+          </Table>
+        </div>
+      </Card>
+
+      {canManage && cells.length > 0 ? (
+        <details className="rounded-xl border bg-card px-5 py-4 text-sm">
+          <summary className="cursor-pointer font-semibold">Список ячеек и сколько в каждой артикулов</summary>
+          <div className="mt-3 flex flex-wrap gap-2">
+            {cells.map((cell) => (
+              <span key={cell.id} className="inline-flex items-center gap-2 rounded border px-2 py-1">
+                <button
+                  type="button"
+                  className="font-mono font-semibold hover:underline"
+                  onClick={() => { setQuery(cell.code); void runLookup(cell.code); }}
+                >
+                  {cell.code}
+                </button>
+                <span className="text-xs text-muted-foreground">{cell.placementCount}</span>
+                <button
+                  type="button"
+                  className="text-destructive"
+                  title="Удалить ячейку"
+                  onClick={() => setDeleteCellTarget(cell)}
+                >
+                  <Trash2 className="size-3" />
+                </button>
+              </span>
+            ))}
           </div>
-        </Card>
-      </section>
+        </details>
+      ) : null}
+
 
       <AlertDialog open={Boolean(deleteCellTarget)} onOpenChange={(open) => { if (!open) setDeleteCellTarget(null); }}>
         <AlertDialogContent>
