@@ -454,6 +454,15 @@ export async function createWildberriesSupply(token: string, name: string) {
   return id;
 }
 
+/** Удаление пустой поставки. WB позволяет удалить только поставку без заданий. */
+export async function deleteWildberriesSupply(token: string, supplyId: string) {
+  await wildberriesRequest<null>(
+    `${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}`,
+    token,
+    { method: "DELETE" },
+  );
+}
+
 /** Добавление сборочного задания в поставку. */
 export async function addOrderToWildberriesSupply(token: string, supplyId: string, orderId: string | number) {
   await wildberriesRequest<null>(

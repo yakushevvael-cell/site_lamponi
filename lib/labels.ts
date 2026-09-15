@@ -33,8 +33,9 @@ import {
   normalizeLabelPostings,
 } from "@/lib/ozon-exemplars.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
+import { ensureWildberriesSupply } from "@/lib/supplies";
 import { articleKey } from "@/lib/upd-parse-core.mjs";
-import { getWildberriesStickers, setWildberriesSgtin } from "@/lib/wildberries";
+import { addOrderToWildberriesSupply, getWildberriesStickers, setWildberriesSgtin } from "@/lib/wildberries";
 import { logWarehouseEvent } from "@/lib/warehouse";
 
 export type LabelRow = {
@@ -234,6 +235,10 @@ export async function prepareLabelsForTask(
 
   const freeUins = await readFreeUins(db);
   const claimed = new Set<string>();
+  // Номер задания нужен как имя поставки Wildberries.
+  const taskRow = await db.prepare("SELECT number FROM pick_tasks WHERE id = ?")
+    .bind(input.taskId).first<{ number: string }>();
+  const taskNumber = taskRow?.number ?? String(input.taskId);
 
   // Отправление — единица подготовки: этикетка выдаётся на отправление, а не на строку.
   const postings = new Map<string, TaskItemRow[]>();
@@ -329,6 +334,9 @@ export async function prepareLabelsForTask(
         const { storageKey, warning } = await prepareWildberriesLabel(db, runtime, {
           orderId: first.externalOrderId,
           uins: taken.map((entry) => entry.uin),
+          taskId: input.taskId,
+          taskNumber,
+          actorEmail: input.actorEmail,
         });
         if (warning) messages.push(warning);
         await upsertLabel(db, {
@@ -472,7 +480,7 @@ async function prepareOzonLabel(
 async function prepareWildberriesLabel(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { orderId: string; uins: string[] },
+  input: { orderId: string; uins: string[]; taskId: number; taskNumber: string; actorEmail: string },
 ) {
   const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
   if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
@@ -486,9 +494,32 @@ async function prepareWildberriesLabel(
     warning = `Wildberries не принял УИН по заданию ${input.orderId}: ${error instanceof Error ? error.message : "неизвестная ошибка"}`;
   }
 
+  // Стикер существует только у задания, попавшего в поставку: у задания в
+  // статусе new Wildberries отдаёт пустой список, без ошибки. Поэтому сначала
+  // поставка, потом стикер.
+  const supply = await ensureWildberriesSupply(db, runtime, {
+    taskId: input.taskId,
+    taskNumber: input.taskNumber,
+    actorEmail: input.actorEmail,
+  });
+
+  let addError: string | null = null;
+  try {
+    await addOrderToWildberriesSupply(token, supply.externalId, input.orderId);
+  } catch (error) {
+    // Задание уже в этой поставке — обычное дело при повторной подготовке.
+    // Настоящую причину покажет запрос стикера, поэтому ошибку запоминаем.
+    addError = error instanceof Error ? error.message : "не удалось добавить задание в поставку";
+  }
+
   const stickers = await getWildberriesStickers(token, [input.orderId]);
   const sticker = stickers.find((row) => String(row.orderId) === String(input.orderId)) ?? stickers[0];
-  if (!sticker?.file) throw new Error("Wildberries не отдал стикер по этому заданию.");
+  if (!sticker?.file) {
+    throw new Error(
+      `Wildberries не отдал стикер по заданию ${input.orderId} (поставка ${supply.externalId}).`
+      + (addError ? ` Задание не добавилось в поставку: ${addError}` : " Повторите подготовку этикеток через минуту."),
+    );
+  }
   const bytes = Uint8Array.from(Buffer.from(sticker.file, "base64"));
   const storageKey = await storeLabelFile(runtime, "wildberries", input.orderId, bytes, "png");
   return { storageKey, warning };

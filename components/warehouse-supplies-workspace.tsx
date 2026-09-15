@@ -48,7 +48,7 @@ type Supply = {
   taskId: number | null;
   externalId: string | null;
   name: string | null;
-  status: "created" | "closed" | "error";
+  status: "open" | "created" | "closed" | "error";
   boxCount: number;
   postingCount: number;
   dropoffName: string | null;
@@ -276,6 +276,7 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
                   </p>
                 </div>
                 <div className="flex items-center gap-2">
+                  {supply.status === "open" ? <Badge className="bg-sky-100 text-sky-900 hover:bg-sky-100">открыта, идёт упаковка</Badge> : null}
                   {supply.status === "error" ? <Badge variant="destructive">ошибка</Badge> : null}
                   {supply.status === "closed" ? <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">закрыта</Badge> : null}
                   {supply.marketplaceId === "ozon" ? (

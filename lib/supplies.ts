@@ -22,6 +22,7 @@ import {
   addOrderToWildberriesSupply,
   addWildberriesSupplyBoxes,
   createWildberriesSupply,
+  deleteWildberriesSupply,
   deliverWildberriesSupply,
   getWildberriesBoxStickers,
   getWildberriesOffices,
@@ -42,7 +43,7 @@ export type SupplyRow = {
   taskId: number | null;
   externalId: string | null;
   name: string | null;
-  status: "created" | "closed" | "error";
+  status: "open" | "created" | "closed" | "error";
   boxCount: number;
   postingCount: number;
   dropoffPointId: number | null;
@@ -171,6 +172,65 @@ export async function checkSupplyReadiness(db: D1Database, taskId: number): Prom
   return null;
 }
 
+/**
+ * Открытая поставка Wildberries под задание.
+ *
+ * WB отдаёт стикер сборочного задания только после того, как задание попало в
+ * поставку: у задания в статусе new этикетки не существует. Поэтому поставка
+ * заводится не в конце дня, а при первой подготовке этикетки, и задания
+ * добавляются в неё по мере упаковки. «Оформить поставку» эту же поставку
+ * закрывает — второй не создаёт.
+ *
+ * Открытая поставка у задания одна: запрет стоит в базе (partial unique
+ * index), потому что этикетки может готовить не один стол.
+ */
+export async function ensureWildberriesSupply(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { taskId: number; taskNumber: string; actorEmail: string },
+): Promise<{ supplyId: number; externalId: string }> {
+  const openSupply = async () => db.prepare(
+    `SELECT id, external_id AS externalId FROM supplies
+     WHERE task_id = ? AND marketplace_id = 'wildberries' AND status = 'open' AND external_id IS NOT NULL
+     ORDER BY id DESC LIMIT 1`,
+  ).bind(input.taskId).first<{ id: number; externalId: string }>();
+
+  const existing = await openSupply();
+  if (existing?.externalId) return { supplyId: Number(existing.id), externalId: existing.externalId };
+
+  const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
+  if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
+  const token = credentials.WB_API_TOKEN;
+  const externalId = await createWildberriesSupply(token, input.taskNumber);
+
+  try {
+    const insert = await db.prepare(
+      `INSERT INTO supplies (marketplace_id, task_id, external_id, name, status, posting_count, created_by)
+       VALUES ('wildberries', ?, ?, ?, 'open', 0, ?)`,
+    ).bind(input.taskId, externalId, input.taskNumber, input.actorEmail).run();
+    const supplyId = Number(insert.meta.last_row_id ?? 0);
+    await db.prepare("UPDATE pick_tasks SET supply_id = ? WHERE id = ?").bind(supplyId, input.taskId).run();
+    await logWarehouseEvent(db, {
+      kind: "supply_opened",
+      taskId: input.taskId,
+      taskNumber: input.taskNumber,
+      marketplaceId: "wildberries",
+      actorEmail: input.actorEmail,
+      payload: { supplyId, externalId },
+    });
+    return { supplyId, externalId };
+  } catch (error) {
+    // Соседний стол успел открыть поставку первым. Свою пустую убираем, чтобы
+    // она не мешалась в кабинете WB, и работаем с той, что уже открыта.
+    const other = await openSupply();
+    if (other?.externalId) {
+      await deleteWildberriesSupply(token, externalId).catch(() => undefined);
+      return { supplyId: Number(other.id), externalId: other.externalId };
+    }
+    throw error;
+  }
+}
+
 export type CreateSupplyInput = {
   taskId: number;
   boxCount: number;
@@ -205,20 +265,41 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
       .bind(input.dropoffPointId).first<{ id: number; name: string; externalId: string }>()
     : null;
 
-  const insert = await db.prepare(
-    `INSERT INTO supplies (marketplace_id, task_id, name, status, box_count, posting_count, dropoff_point_id, dropoff_name, created_by)
-     VALUES (?, ?, ?, 'created', ?, ?, ?, ?, ?)`,
-  ).bind(
-    task.marketplaceId,
-    input.taskId,
-    `${task.number}`,
-    Math.max(1, Math.trunc(input.boxCount || 1)),
-    postings.results.length,
-    dropoff?.id ?? null,
-    dropoff?.name ?? null,
-    input.actorEmail,
-  ).run();
-  const supplyId = Number(insert.meta.last_row_id ?? 0);
+  const boxCount = Math.max(1, Math.trunc(input.boxCount || 1));
+
+  // Wildberries: поставка уже открыта на упаковке — без неё не было бы
+  // стикеров. Её и закрываем; вторая поставка разорвала бы состав пополам.
+  const openWb = task.marketplaceId === "wildberries"
+    ? await db.prepare(
+      `SELECT id, external_id AS externalId FROM supplies
+       WHERE task_id = ? AND marketplace_id = 'wildberries' AND status = 'open'
+       ORDER BY id DESC LIMIT 1`,
+    ).bind(input.taskId).first<{ id: number; externalId: string | null }>()
+    : null;
+
+  let supplyId: number;
+  if (openWb) {
+    supplyId = Number(openWb.id);
+    await db.prepare(
+      `UPDATE supplies SET box_count = ?, posting_count = ?, dropoff_point_id = ?, dropoff_name = ?, error = NULL
+       WHERE id = ?`,
+    ).bind(boxCount, postings.results.length, dropoff?.id ?? null, dropoff?.name ?? null, supplyId).run();
+  } else {
+    const insert = await db.prepare(
+      `INSERT INTO supplies (marketplace_id, task_id, name, status, box_count, posting_count, dropoff_point_id, dropoff_name, created_by)
+       VALUES (?, ?, ?, 'created', ?, ?, ?, ?, ?)`,
+    ).bind(
+      task.marketplaceId,
+      input.taskId,
+      `${task.number}`,
+      boxCount,
+      postings.results.length,
+      dropoff?.id ?? null,
+      dropoff?.name ?? null,
+      input.actorEmail,
+    ).run();
+    supplyId = Number(insert.meta.last_row_id ?? 0);
+  }
   if (!supplyId) return { ok: false as const, blocker: { reason: "Не удалось создать поставку.", details: [] } };
 
   try {
@@ -226,8 +307,9 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
       await createWildberriesSupplyFlow(db, runtime, {
         supplyId,
         taskNumber: task.number,
+        externalId: openWb?.externalId ?? null,
         orderIds: postings.results.map((row) => row.externalOrderId),
-        boxCount: Math.max(1, Math.trunc(input.boxCount || 1)),
+        boxCount,
       });
     } else {
       await createOzonSupplyFlow(db, runtime, {
@@ -257,8 +339,11 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
     return { ok: true as const, supply: await readSupply(db, supplyId) };
   } catch (error) {
     const message = error instanceof Error ? error.message : "Площадка отклонила оформление поставки.";
-    await db.prepare("UPDATE supplies SET status = 'error', error = ? WHERE id = ?")
-      .bind(message.slice(0, 500), supplyId).run();
+    // Открытая поставка Wildberries остаётся открытой: в ней уже лежат
+    // задания, и закрывать её надо повторной попыткой, а не новой поставкой.
+    await db.prepare(
+      `UPDATE supplies SET status = CASE WHEN ? = 1 THEN 'open' ELSE 'error' END, error = ? WHERE id = ?`,
+    ).bind(openWb ? 1 : 0, message.slice(0, 500), supplyId).run();
     await logWarehouseEvent(db, {
       kind: "supply_failed",
       taskId: input.taskId,
@@ -274,17 +359,22 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
 async function createWildberriesSupplyFlow(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { supplyId: number; taskNumber: string; orderIds: string[]; boxCount: number },
+  input: { supplyId: number; taskNumber: string; externalId?: string | null; orderIds: string[]; boxCount: number },
 ) {
   const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
   if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
   const token = credentials.WB_API_TOKEN;
 
-  const externalId = await createWildberriesSupply(token, input.taskNumber);
-  await db.prepare("UPDATE supplies SET external_id = ? WHERE id = ?").bind(externalId, input.supplyId).run();
+  // Поставка уже открыта на упаковке — тогда работаем с ней.
+  const externalId = input.externalId ?? await createWildberriesSupply(token, input.taskNumber);
+  if (!input.externalId) {
+    await db.prepare("UPDATE supplies SET external_id = ? WHERE id = ?").bind(externalId, input.supplyId).run();
+  }
 
   for (const orderId of input.orderIds) {
-    await addOrderToWildberriesSupply(token, externalId, orderId);
+    // Большинство заданий попало в поставку ещё на упаковке: повторное
+    // добавление — не ошибка, и останавливать из-за него отгрузку нельзя.
+    await addOrderToWildberriesSupply(token, externalId, orderId).catch(() => undefined);
   }
 
   const documents: SupplyDocument[] = [];
