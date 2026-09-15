@@ -38,7 +38,15 @@ type Task = {
   itemCount: number;
 };
 
-type DropoffPoint = { id: number; marketplaceId: string; name: string; address: string | null; lastUsedAt: string | null };
+type DropoffPoint = {
+  id: number;
+  marketplaceId: string;
+  name: string;
+  address: string | null;
+  city: string | null;
+  officeType: string | null;
+  lastUsedAt: string | null;
+};
 
 type SupplyDocument = { kind: string; label: string; storageKey: string; contentType: string };
 
@@ -107,13 +115,23 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
   }, [taskId, loading, loadSupplies]);
 
   async function refreshPoints() {
+    // Город отгрузки — это склад из задания: WB отдаёт пункты только по городу.
+    const city = tasks.find((item) => item.id === taskId)?.warehouseName ?? "";
+    if (!city) {
+      toast.error("Выберите задание: город отгрузки берётся из названия склада в нём.");
+      return;
+    }
     setBusy("points");
     try {
-      const response = await fetch("/api/warehouse/dropoff", { method: "POST" });
-      const data = await response.json() as { points?: DropoffPoint[]; error?: string };
+      const response = await fetch("/api/warehouse/dropoff", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ city, cargoType: 1 }),
+      });
+      const data = await response.json() as { points?: DropoffPoint[]; found?: number; error?: string };
       if (!response.ok) throw new Error(data.error ?? "Не удалось обновить точки сдачи.");
       setPoints(data.points ?? []);
-      toast.success(`Точки сдачи обновлены: ${data.points?.length ?? 0}`);
+      toast.success(`Пункты отгрузки по «${city}»: ${data.found ?? 0}`);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "Не удалось обновить точки сдачи.");
     } finally {
@@ -216,7 +234,11 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
               >
                 <option value="">Не выбрана</option>
                 {marketplacePoints.map((point) => (
-                  <option key={point.id} value={point.id}>{point.name}</option>
+                  <option key={point.id} value={point.id}>
+                    {point.name}
+                    {point.address ? ` — ${point.address}` : ""}
+                    {point.officeType === "pp" ? " (ПВЗ)" : ""}
+                  </option>
                 ))}
               </NativeSelect>
             </div>

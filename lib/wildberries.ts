@@ -434,6 +434,15 @@ export async function getWildberriesStickers(
 
 const WB_MARKETPLACE_BASE = "https://marketplace-api.wildberries.ru/api/v3";
 
+/**
+ * Часть методов Маркетплейса WB переехала под префикс /api/marketplace/v3,
+ * а старые адреса остались работать — но не все. Проверено на живом API:
+ * добавление задания в поставку, состав поставки, пункты отгрузки и способ
+ * отгрузки отвечают только по новому префиксу, а по старому WB возвращает
+ * 404 «path not found», даже не намекая, что метод переехал.
+ */
+const WB_MARKETPLACE_NEW = "https://marketplace-api.wildberries.ru/api/marketplace/v3";
+
 export type WildberriesOffice = { id: number; name: string; address?: string; city?: string; selected?: boolean };
 
 /** Склады приёмки Wildberries — справочник точек сдачи. */
@@ -463,13 +472,109 @@ export async function deleteWildberriesSupply(token: string, supplyId: string) {
   );
 }
 
-/** Добавление сборочного задания в поставку. */
-export async function addOrderToWildberriesSupply(token: string, supplyId: string, orderId: string | number) {
-  await wildberriesRequest<null>(
-    `${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/orders/${encodeURIComponent(String(orderId))}`,
+/**
+ * Добавление сборочных заданий в поставку — до 100 за раз.
+ * Задания переходят в статус confirm: только после этого WB отдаёт стикеры и
+ * принимает УИН.
+ */
+export async function addOrdersToWildberriesSupply(
+  token: string,
+  supplyId: string,
+  orderIds: Array<string | number>,
+) {
+  const orders = orderIds.map((id) => Number(id)).filter((id) => Number.isFinite(id) && id > 0);
+  if (orders.length === 0) return;
+  for (let start = 0; start < orders.length; start += 100) {
+    await wildberriesRequest<null>(
+      `${WB_MARKETPLACE_NEW}/supplies/${encodeURIComponent(supplyId)}/orders`,
+      token,
+      { method: "PATCH", body: JSON.stringify({ orders: orders.slice(start, start + 100) }) },
+    );
+  }
+}
+
+/** Состав поставки: ID закреплённых за ней сборочных заданий. */
+export async function getWildberriesSupplyOrderIds(token: string, supplyId: string) {
+  const payload = await wildberriesRequest<{ orderIds?: number[] }>(
+    `${WB_MARKETPLACE_NEW}/supplies/${encodeURIComponent(supplyId)}/order-ids`,
     token,
-    { method: "PATCH" },
   );
+  return Array.isArray(payload.orderIds) ? payload.orderIds.map(String) : [];
+}
+
+/**
+ * УИН ювелирного изделия за сборочным заданием.
+ *
+ * Это не sgtin: sgtin — код Честного знака, у него другое поле и другой
+ * метод. Ювелирке WB ставит в requiredMeta именно uin, ровно 16 символов, и
+ * принимает его только у задания в статусе confirm.
+ */
+export async function setWildberriesUin(token: string, orderId: string | number, uin: string) {
+  await wildberriesRequest<null>(
+    `${WB_MARKETPLACE_BASE}/orders/${encodeURIComponent(String(orderId))}/meta/uin`,
+    token,
+    { method: "PUT", body: JSON.stringify({ uin }) },
+  );
+}
+
+export type WildberriesShippingPoint = {
+  id: number;
+  name?: string;
+  address?: string;
+  city?: string;
+  officeType?: string;
+  cargoTypes?: number[];
+  fulfillment?: boolean;
+};
+
+/**
+ * Пункты отгрузки поставок по городу.
+ *
+ * Именно из этого справочника берётся shippingPointId, без которого WB не
+ * закрывает поставку. Старые «офисы» из /api/v3/offices здесь не годятся:
+ * у них другие идентификаторы.
+ */
+export async function getWildberriesShippingPoints(token: string, city: string, cargoType = 1) {
+  const url = new URL(`${WB_MARKETPLACE_NEW}/fbs/shipping-points`);
+  url.searchParams.set("city", city);
+  url.searchParams.set("cargoType", String(cargoType));
+  const payload = await wildberriesRequest<{ shippingPoints?: WildberriesShippingPoint[] }>(url.toString(), token);
+  return Array.isArray(payload.shippingPoints) ? payload.shippingPoints : [];
+}
+
+/**
+ * Способ, дата и пункт отгрузки поставки.
+ *
+ * Без этих параметров «передать в доставку» возвращает 409. Ответ приходит по
+ * каждой поставке отдельно, поэтому ошибку надо читать из results, а не из
+ * кода ответа: HTTP 200 не означает, что поставка настроена.
+ */
+export async function setWildberriesShippingMethod(
+  token: string,
+  input: { supplyId: string; shippingPointId: number; shippingDate: string; shippingType?: "selfShipping" | "transportCompany" },
+) {
+  const payload = await wildberriesRequest<{
+    results?: Array<{ supplyId?: string; success?: boolean; error?: { detail?: string; code?: number } }>;
+  }>(
+    `${WB_MARKETPLACE_NEW}/fbs/supplies/shipping-method`,
+    token,
+    {
+      method: "PATCH",
+      body: JSON.stringify({
+        data: [{
+          supplyId: input.supplyId,
+          shippingType: input.shippingType ?? "selfShipping",
+          shippingDt: input.shippingDate,
+          shippingPointId: input.shippingPointId,
+        }],
+      }),
+    },
+  );
+  const result = (payload.results ?? []).find((row) => row.supplyId === input.supplyId) ?? (payload.results ?? [])[0];
+  if (result && result.success !== true) {
+    const detail = result.error?.detail ?? "Wildberries не принял параметры отгрузки.";
+    throw new WildberriesApiError(result.error?.code ?? 400, `Параметры отгрузки поставки: ${detail}`);
+  }
 }
 
 /** Закрытие поставки — «передать в доставку». После этого состав не меняется. */

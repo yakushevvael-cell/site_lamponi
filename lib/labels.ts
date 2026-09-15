@@ -35,7 +35,11 @@ import {
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import { ensureWildberriesSupply } from "@/lib/supplies";
 import { articleKey } from "@/lib/upd-parse-core.mjs";
-import { addOrderToWildberriesSupply, getWildberriesStickers, setWildberriesSgtin } from "@/lib/wildberries";
+import {
+  addOrdersToWildberriesSupply,
+  getWildberriesStickers,
+  setWildberriesUin,
+} from "@/lib/wildberries";
 import { logWarehouseEvent } from "@/lib/warehouse";
 
 export type LabelRow = {
@@ -486,17 +490,9 @@ async function prepareWildberriesLabel(
   if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
   const token = credentials.WB_API_TOKEN;
 
-  let warning: string | null = null;
-  try {
-    await setWildberriesSgtin(token, input.orderId, input.uins);
-  } catch (error) {
-    // УИН мог быть передан раньше, а бывает, что категория его не требует.
-    warning = `Wildberries не принял УИН по заданию ${input.orderId}: ${error instanceof Error ? error.message : "неизвестная ошибка"}`;
-  }
-
-  // Стикер существует только у задания, попавшего в поставку: у задания в
-  // статусе new Wildberries отдаёт пустой список, без ошибки. Поэтому сначала
-  // поставка, потом стикер.
+  // Порядок здесь не наш выбор, а требование WB:
+  //   поставка → задание в поставке (статус confirm) → УИН → стикер.
+  // У задания в статусе new стикера не существует, а УИН не принимается.
   const supply = await ensureWildberriesSupply(db, runtime, {
     taskId: input.taskId,
     taskNumber: input.taskNumber,
@@ -505,11 +501,26 @@ async function prepareWildberriesLabel(
 
   let addError: string | null = null;
   try {
-    await addOrderToWildberriesSupply(token, supply.externalId, input.orderId);
+    await addOrdersToWildberriesSupply(token, supply.externalId, [input.orderId]);
   } catch (error) {
     // Задание уже в этой поставке — обычное дело при повторной подготовке.
     // Настоящую причину покажет запрос стикера, поэтому ошибку запоминаем.
     addError = error instanceof Error ? error.message : "не удалось добавить задание в поставку";
+  }
+
+  let warning: string | null = null;
+  const uin = input.uins.find((value) => value.trim().length === 16) ?? input.uins[0] ?? "";
+  if (!uin) {
+    warning = `Нет УИН для задания ${input.orderId}: без него Wildberries не примет поставку.`;
+  } else if (uin.trim().length !== 16) {
+    warning = `УИН ${uin} не 16 символов — Wildberries такой не примет. Проверьте УПД.`;
+  } else {
+    try {
+      await setWildberriesUin(token, input.orderId, uin.trim());
+    } catch (error) {
+      // УИН мог быть закреплён раньше: повторная передача не нужна.
+      warning = `Wildberries не принял УИН по заданию ${input.orderId}: ${error instanceof Error ? error.message : "неизвестная ошибка"}`;
+    }
   }
 
   const stickers = await getWildberriesStickers(token, [input.orderId]);

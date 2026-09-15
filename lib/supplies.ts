@@ -19,14 +19,15 @@ import {
 } from "@/lib/ozon";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import {
-  addOrderToWildberriesSupply,
+  addOrdersToWildberriesSupply,
   addWildberriesSupplyBoxes,
   createWildberriesSupply,
   deleteWildberriesSupply,
   deliverWildberriesSupply,
   getWildberriesBoxStickers,
-  getWildberriesOffices,
+  getWildberriesShippingPoints,
   getWildberriesSupplyBarcode,
+  setWildberriesShippingMethod,
 } from "@/lib/wildberries";
 import { logWarehouseEvent, readTask } from "@/lib/warehouse";
 
@@ -48,6 +49,8 @@ export type SupplyRow = {
   postingCount: number;
   dropoffPointId: number | null;
   dropoffName: string | null;
+  shippingType: string | null;
+  shippingDate: string | null;
   documentsJson: string;
   error: string | null;
   createdBy: string | null;
@@ -58,7 +61,8 @@ export type SupplyRow = {
 const SUPPLY_COLUMNS = `
   id, marketplace_id AS marketplaceId, task_id AS taskId, external_id AS externalId, name, status,
   box_count AS boxCount, posting_count AS postingCount, dropoff_point_id AS dropoffPointId,
-  dropoff_name AS dropoffName, documents_json AS documentsJson, error, created_by AS createdBy,
+  dropoff_name AS dropoffName, shipping_type AS shippingType, shipping_date AS shippingDate,
+  documents_json AS documentsJson, error, created_by AS createdBy,
   created_at AS createdAt, closed_at AS closedAt
 `;
 
@@ -96,34 +100,58 @@ async function saveDocuments(db: D1Database, supplyId: number, documents: Supply
 }
 
 /** Точки сдачи: справочник обновляется из API площадки. */
-export async function refreshDropoffPoints(db: D1Database, runtime: AppRuntimeEnv) {
+/**
+ * Обновление справочника пунктов отгрузки по городу.
+ *
+ * Город берётся из задания: задание WB собирается на один региональный склад,
+ * и его название и есть город отгрузки. Идентификатор пункта (shippingPointId)
+ * нужен, чтобы закрыть поставку, — старые «офисы» WB для этого не годятся.
+ */
+export async function refreshDropoffPoints(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { city: string; cargoType?: number },
+) {
+  const city = input.city.trim();
+  if (!city) throw new Error("Укажите город отгрузки — WB отдаёт пункты только по городу.");
   const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
+  if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
+
+  const points = await getWildberriesShippingPoints(credentials.WB_API_TOKEN, city, input.cargoType ?? 1);
   let added = 0;
-  if (credentials.WB_API_TOKEN) {
-    const offices = await getWildberriesOffices(credentials.WB_API_TOKEN);
-    for (const office of offices) {
-      const result = await db.prepare(
-        `INSERT INTO dropoff_points (marketplace_id, external_id, name, address, active)
-         VALUES ('wildberries', ?, ?, ?, 1)
-         ON CONFLICT(marketplace_id, external_id) DO UPDATE SET name = excluded.name, address = excluded.address, active = 1`,
-      ).bind(String(office.id), office.name || `Склад ${office.id}`, office.address ?? office.city ?? null).run();
-      added += Number(result.meta.changes ?? 0);
-    }
+  for (const point of points) {
+    if (!point?.id) continue;
+    const result = await db.prepare(
+      `INSERT INTO dropoff_points (marketplace_id, external_id, name, address, city, office_type, cargo_types, active)
+       VALUES ('wildberries', ?, ?, ?, ?, ?, ?, 1)
+       ON CONFLICT(marketplace_id, external_id) DO UPDATE SET
+         name = excluded.name, address = excluded.address, city = excluded.city,
+         office_type = excluded.office_type, cargo_types = excluded.cargo_types, active = 1`,
+    ).bind(
+      String(point.id),
+      point.name || `Пункт ${point.id}`,
+      point.address ?? null,
+      point.city ?? city,
+      point.officeType ?? null,
+      JSON.stringify(point.cargoTypes ?? []),
+      // Порядок биндов: external_id, name, address, city, office_type, cargo_types
+    ).run();
+    added += Number(result.meta.changes ?? 0);
   }
-  return { added };
+  return { added, found: points.length, city };
 }
 
 export async function readDropoffPoints(db: D1Database, marketplaceId?: string) {
   const rows = marketplaceId
     ? await db.prepare(
       `SELECT id, marketplace_id AS marketplaceId, external_id AS externalId, name, address,
-              last_used_at AS lastUsedAt
+              city, office_type AS officeType, last_used_at AS lastUsedAt
        FROM dropoff_points WHERE active = 1 AND marketplace_id = ?
        ORDER BY CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END, last_used_at DESC, name`,
     ).bind(marketplaceId).all()
     : await db.prepare(
       `SELECT id, marketplace_id AS marketplaceId, external_id AS externalId, name, address,
-              last_used_at AS lastUsedAt
+              city, office_type AS officeType, last_used_at AS lastUsedAt
        FROM dropoff_points WHERE active = 1
        ORDER BY CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END, last_used_at DESC, name`,
     ).all();
@@ -261,8 +289,9 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
   }
 
   const dropoff = input.dropoffPointId
-    ? await db.prepare("SELECT id, name, external_id AS externalId FROM dropoff_points WHERE id = ?")
-      .bind(input.dropoffPointId).first<{ id: number; name: string; externalId: string }>()
+    ? await db.prepare(
+      "SELECT id, name, external_id AS externalId, office_type AS officeType FROM dropoff_points WHERE id = ?",
+    ).bind(input.dropoffPointId).first<{ id: number; name: string; externalId: string; officeType: string | null }>()
     : null;
 
   const boxCount = Math.max(1, Math.trunc(input.boxCount || 1));
@@ -310,6 +339,9 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
         externalId: openWb?.externalId ?? null,
         orderIds: postings.results.map((row) => row.externalOrderId),
         boxCount,
+        shippingPointId: dropoff ? Number(dropoff.externalId) : null,
+        shippingPointType: dropoff?.officeType ?? null,
+        shippingDate: input.departureDate ?? null,
       });
     } else {
       await createOzonSupplyFlow(db, runtime, {
@@ -359,7 +391,16 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
 async function createWildberriesSupplyFlow(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { supplyId: number; taskNumber: string; externalId?: string | null; orderIds: string[]; boxCount: number },
+  input: {
+    supplyId: number;
+    taskNumber: string;
+    externalId?: string | null;
+    orderIds: string[];
+    boxCount: number;
+    shippingPointId: number | null;
+    shippingPointType: string | null;
+    shippingDate: string | null;
+  },
 ) {
   const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
   if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
@@ -371,25 +412,42 @@ async function createWildberriesSupplyFlow(
     await db.prepare("UPDATE supplies SET external_id = ? WHERE id = ?").bind(externalId, input.supplyId).run();
   }
 
-  for (const orderId of input.orderIds) {
-    // Большинство заданий попало в поставку ещё на упаковке: повторное
-    // добавление — не ошибка, и останавливать из-за него отгрузку нельзя.
-    await addOrderToWildberriesSupply(token, externalId, orderId).catch(() => undefined);
-  }
+  // Большинство заданий попало в поставку ещё на упаковке: повторное
+  // добавление — не ошибка, и останавливать из-за него отгрузку нельзя.
+  await addOrdersToWildberriesSupply(token, externalId, input.orderIds).catch(() => undefined);
 
   const documents: SupplyDocument[] = [];
 
-  // Короба заводим до закрытия поставки: после «передать в доставку» состав не меняется.
+  // Без способа, даты и пункта отгрузки WB не закрывает поставку: отвечает
+  // 409 на «передать в доставку». Дата по умолчанию — сегодня.
+  if (!input.shippingPointId) {
+    throw new Error("Выберите пункт отгрузки: без него Wildberries не закроет поставку.");
+  }
+  const shippingDate = (input.shippingDate ?? new Date().toISOString().slice(0, 10)).slice(0, 10);
+  await setWildberriesShippingMethod(token, {
+    supplyId: externalId,
+    shippingPointId: input.shippingPointId,
+    shippingDate,
+    shippingType: "selfShipping",
+  });
+  await db.prepare("UPDATE supplies SET shipping_type = 'selfShipping', shipping_date = ? WHERE id = ?")
+    .bind(shippingDate, input.supplyId).run();
+
+  // Грузоместа WB требует только для поставок на ПВЗ (officeType = pp).
+  // На склад приёмки короба не заводятся, и попытка их создать — ошибка.
   let boxIds: string[] = [];
-  try {
-    boxIds = await addWildberriesSupplyBoxes(token, externalId, input.boxCount);
-  } catch (error) {
-    documents.push({
-      kind: "box_sticker",
-      label: `Короба не заведены: ${error instanceof Error ? error.message : "ошибка WB"}`,
-      storageKey: "",
-      contentType: "text/plain",
-    });
+  const needsBoxes = String(input.shippingPointType ?? "").toLowerCase() === "pp";
+  if (needsBoxes) {
+    try {
+      boxIds = await addWildberriesSupplyBoxes(token, externalId, input.boxCount);
+    } catch (error) {
+      documents.push({
+        kind: "box_sticker",
+        label: `Короба не заведены: ${error instanceof Error ? error.message : "ошибка WB"}`,
+        storageKey: "",
+        contentType: "text/plain",
+      });
+    }
   }
 
   await deliverWildberriesSupply(token, externalId);
