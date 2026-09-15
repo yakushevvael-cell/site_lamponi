@@ -330,7 +330,14 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     setOutcome(null);
     if (pending) {
       setHistory((current) => [
-        { at: new Date().toISOString(), uin: pending.uin, status: "size_confirm", text: "Размер не подтверждён, изделие отложено" },
+        {
+          at: new Date().toISOString(),
+          uin: pending.uin,
+          // as const: без него литерал расширяется до string, а история
+          // ждёт один из известных исходов.
+          status: "size_confirm" as const,
+          text: "Размер не подтверждён, изделие отложено",
+        },
         ...current,
       ].slice(0, 40));
     }
