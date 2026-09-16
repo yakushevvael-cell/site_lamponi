@@ -6,9 +6,10 @@
  * Один и тот же экран открывают сборщик и кладовщик — разница только в наборе
  * кнопок, и решает её сервер: он же отдаёт признаки manages и own.
  *
- * У сборщика в строке ровно две кнопки: «собрано» и «не найден». Всё
- * остальное — цифры, которые видно с расстояния вытянутой руки, потому что
- * экран стоит на складе, а не на столе.
+ * У сборщика в строке ровно две кнопки: «собрано» и «не найден». Быстрее
+ * всего так: «Собрано всё» одним нажатием, затем «Не найден» только на том,
+ * чего не оказалось в ячейке. Всё остальное — цифры, которые видно с
+ * расстояния вытянутой руки, потому что экран стоит на складе, а не на столе.
  */
 
 import { useCallback, useEffect, useState } from "react";
@@ -16,6 +17,7 @@ import Link from "next/link";
 import {
   ArrowLeft,
   Check,
+  CheckCheck,
   CircleSlash,
   Loader2,
   MapPin,
@@ -193,6 +195,22 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
         </CardContent>
       </Card>
 
+      {canWork && pending > 0 ? (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-emerald-200 bg-emerald-50 px-4 py-3">
+          <p className="text-sm text-emerald-950">
+            Собрали всё по листу? Отметьте все строки разом, а потом нажмите «Не найден» только у того, чего нет.
+          </p>
+          <Button
+            size="lg"
+            disabled={busy !== null}
+            onClick={() => void act("pick_all", {}, "Все строки отмечены собранными")}
+          >
+            {busy === "pick_all:" ? <Loader2 className="size-4 animate-spin" /> : <CheckCheck className="size-4" />}
+            Собрано всё · {pending}
+          </Button>
+        </div>
+      ) : null}
+
       <Card className="gap-0 overflow-hidden py-0">
         <div className="overflow-x-auto">
           <Table>
@@ -229,24 +247,29 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
                       {item.status === "not_found" ? <Badge variant="destructive">не найден</Badge> : null}
                       {canWork ? (
                         <>
-                          <Button
-                            size="sm"
-                            variant={item.status === "picked" ? "secondary" : "default"}
-                            disabled={busy !== null}
-                            onClick={() => void act("resolve", { itemId: item.id, status: "picked" })}
-                          >
-                            {busy === `resolve:${item.id}` ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
-                            Собрано
-                          </Button>
-                          <Button
-                            size="sm"
-                            variant="outline"
-                            className="text-destructive hover:text-destructive"
-                            disabled={busy !== null || item.status === "not_found"}
-                            onClick={() => setNotFoundTarget(item)}
-                          >
-                            <CircleSlash className="size-4" /> Не найден
-                          </Button>
+                          {/* Отмеченная строка показывает только обратное действие. */}
+                          {item.status !== "picked" ? (
+                            <Button
+                              size="sm"
+                              variant={item.status === "not_found" ? "outline" : "default"}
+                              disabled={busy !== null}
+                              onClick={() => void act("resolve", { itemId: item.id, status: "picked" })}
+                            >
+                              {busy === `resolve:${item.id}` ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />}
+                              Собрано
+                            </Button>
+                          ) : null}
+                          {item.status !== "not_found" ? (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              className="text-destructive hover:text-destructive"
+                              disabled={busy !== null}
+                              onClick={() => setNotFoundTarget(item)}
+                            >
+                              <CircleSlash className="size-4" /> Не найден
+                            </Button>
+                          ) : null}
                         </>
                       ) : null}
                     </div>

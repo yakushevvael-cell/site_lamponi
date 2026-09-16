@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CODE39, code39Svg, encodeCode39, sanitizeCode39, taskBarcodeValue } from "../lib/barcode39.mjs";
+import { CODE39, code39Svg, encodeCode39, parseTaskBarcode, sanitizeCode39, taskBarcodeValue } from "../lib/barcode39.mjs";
 
 /** Элементы символа: чередование чёрных и белых полос. */
 function elements(pattern) {
@@ -46,4 +46,15 @@ test("код задания для штрихкода — короткий и л
   assert.ok(svg.startsWith("<svg"));
   assert.ok(svg.includes("height=\"60\""));
   assert.ok(svg.includes("<rect"));
+});
+
+test("скан листа подбора читается при любой раскладке", () => {
+  assert.equal(parseTaskBarcode(taskBarcodeValue(42)), 42);
+  assert.equal(parseTaskBarcode("t42"), 42);
+  assert.equal(parseTaskBarcode("Е42"), 42); // T на русской раскладке
+  assert.equal(parseTaskBarcode("*T7*"), 7);
+  assert.equal(parseTaskBarcode(" T15 \n"), 15);
+  assert.equal(parseTaskBarcode("6432600987653957"), null); // УИН
+  assert.equal(parseTaskBarcode("T0"), null);
+  assert.equal(parseTaskBarcode("TX1"), null);
 });

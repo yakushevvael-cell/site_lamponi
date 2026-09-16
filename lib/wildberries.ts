@@ -608,6 +608,15 @@ export async function getWildberriesSupplyBarcode(token: string, supplyId: strin
   return file;
 }
 
+/** Грузоместа, уже заведённые в поставке, — чтобы повторная попытка не плодила новые. */
+export async function getWildberriesSupplyBoxIds(token: string, supplyId: string) {
+  const payload = await wildberriesRequest<{ trbxes?: Array<{ id?: string }> }>(
+    `${WB_MARKETPLACE_BASE}/supplies/${encodeURIComponent(supplyId)}/trbx`,
+    token,
+  );
+  return (payload?.trbxes ?? []).map((box) => String(box.id ?? "")).filter(Boolean);
+}
+
 /** Короба поставки: сколько заявлено — столько и печатается стикеров. */
 export async function addWildberriesSupplyBoxes(token: string, supplyId: string, amount: number) {
   const payload = await wildberriesRequest<{ trbxIds?: string[] }>(

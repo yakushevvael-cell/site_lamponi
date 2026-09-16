@@ -667,6 +667,87 @@ export async function resolveTaskItem(
 }
 
 /**
+ * «Собрано всё» одним нажатием.
+ *
+ * Сборщик отмечает все строки без отметки собранными, а потом меняет на «не
+ * найден» только то, чего не оказалось в ячейке. Уже отмеченные строки не
+ * трогаются: «не найден» не превращается обратно в «собрано».
+ */
+export async function markAllPicked(db: D1Database, taskId: number, actorEmail: string) {
+  const task = await readTask(db, taskId);
+  if (!task) return { ok: false as const, error: "Задание не найдено." };
+  if (task.status === "cancelled") return { ok: false as const, error: "Задание отменено." };
+  if (task.status === "shipped") return { ok: false as const, error: "По заданию уже оформлена поставка." };
+
+  const result = await db.prepare(
+    `UPDATE pick_task_items SET status = 'picked', resolved_by = ?, resolved_at = CURRENT_TIMESTAMP
+     WHERE task_id = ? AND status = 'pending'`,
+  ).bind(actorEmail, taskId).run();
+  const marked = Number(result.meta.changes ?? 0);
+  await refreshTaskCounters(db, taskId);
+
+  if (marked > 0) {
+    await logWarehouseEvent(db, {
+      kind: "items_picked_all",
+      taskId,
+      taskNumber: task.number,
+      marketplaceId: task.marketplaceId,
+      actorEmail,
+      payload: { marked },
+    });
+  }
+  return { ok: true as const, marked, task: await readTask(db, taskId) };
+}
+
+/**
+ * Приём собранного задания на упаковку по скану листа подбора.
+ *
+ * Сборщик приносит товар и лист, на столе упаковки сканируют штрихкод листа.
+ * Если сборщик не закрыл задание на экране, приём закрывает его так же, как
+ * кнопка «Задание собрано»: строки без отметки считаются собранными. Время
+ * приёма пишется в журнал — это граница между сборкой и упаковкой для
+ * хронометража.
+ */
+export async function receiveTaskForPacking(
+  db: D1Database,
+  taskId: number,
+  actorEmail: string,
+  options: { closeIfOpen?: boolean } = {},
+) {
+  const task = await readTask(db, taskId);
+  if (!task) return { ok: false as const, error: "Лист подбора не найден: такого задания нет." };
+  if (task.status === "cancelled") return { ok: false as const, error: `Задание ${task.number} отменено.` };
+  if (task.status === "shipped") return { ok: false as const, error: `По заданию ${task.number} уже оформлена поставка.` };
+
+  const pending = await db.prepare(
+    "SELECT COUNT(*) AS n FROM pick_task_items WHERE task_id = ? AND status = 'pending'",
+  ).bind(taskId).first<{ n: number }>();
+  const pendingCount = Number(pending?.n ?? 0);
+
+  let closed = false;
+  if (task.status !== "picked") {
+    // Не закрытое сборщиком задание принимаем только с явным согласием: без
+    // него строки без отметки молча стали бы «собрано».
+    if (!options.closeIfOpen) {
+      return { ok: true as const, needsConfirm: true as const, task, pendingCount };
+    }
+    const result = await closeTask(db, taskId, actorEmail);
+    if (!result.ok) return { ok: false as const, error: result.error };
+    closed = true;
+  }
+
+  await logWarehouseEvent(db, {
+    kind: "task_received",
+    taskId,
+    taskNumber: task.number,
+    marketplaceId: task.marketplaceId,
+    actorEmail,
+    payload: { closedOnReceive: closed, pendingAtReceive: pendingCount, picker: task.assigneeEmail },
+  });
+  return { ok: true as const, needsConfirm: false as const, task: await readTask(db, taskId), pendingCount, closed };
+}
+
+/**
  * Закрытие задания сборщиком — одна кнопка «Собрано».
  * Строки без отметки считаются собранными: отдельно отмечают только то, чего
  * не нашлось.

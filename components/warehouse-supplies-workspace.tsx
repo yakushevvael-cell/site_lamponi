@@ -8,7 +8,7 @@
  * Документы печатаются прямо из браузера и лежат на сервере.
  */
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   AlertTriangle,
   Boxes,
@@ -116,6 +116,22 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
   const [pointFilter, setPointFilter] = useState("");
   const [dropoffProblems, setDropoffProblems] = useState<string[]>([]);
   const [resolution, setResolution] = useState<DropoffResolution | null>(null);
+  const printFrame = useRef<HTMLIFrameElement>(null);
+
+  /**
+   * Этикетки печатаются через скрытое окно: страница печати сама открывает
+   * диалог, когда картинки догрузились, и со страницы «Поставки» уходить не надо.
+   */
+  function printLabels(supplyId: number, documentIndex?: number) {
+    const frame = printFrame.current;
+    const url = `/print/supply-labels?supply=${supplyId}${documentIndex === undefined ? "" : `&document=${documentIndex}`}`;
+    if (!frame) {
+      window.open(url, "_blank", "noopener");
+      return;
+    }
+    // Тот же адрес повторно не перезагрузится — добавляем метку времени.
+    frame.src = `${url}&t=${Date.now()}`;
+  }
 
   const loadTasks = useCallback(async () => {
     const response = await fetch("/api/warehouse/tasks", { cache: "no-store" });
@@ -298,6 +314,12 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-6 p-4 md:p-7">
+      <iframe
+        ref={printFrame}
+        title="Печать этикеток поставки"
+        aria-hidden="true"
+        style={{ position: "fixed", right: 0, bottom: 0, width: 1, height: 1, border: 0, opacity: 0, pointerEvents: "none" }}
+      />
       <Card>
         <CardHeader className="pb-3">
           <CardTitle className="flex items-center gap-2 text-base"><Truck className="size-4" /> Оформить поставку</CardTitle>
@@ -492,8 +514,18 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
               <div className="flex flex-wrap gap-2">
                 {supply.documents.length === 0 ? (
                   <p className="text-sm text-muted-foreground">Документов пока нет.</p>
-                ) : supply.documents.map((document, index) => (
-                  document.storageKey ? (
+                ) : null}
+                {supply.documents.filter((document) => document.storageKey && document.contentType.startsWith("image/")).length > 1 ? (
+                  <Button size="sm" onClick={() => printLabels(supply.id)}>
+                    <Printer className="size-4" /> Печать всех этикеток
+                  </Button>
+                ) : null}
+                {supply.documents.map((document, index) => (
+                  document.storageKey && document.contentType.startsWith("image/") ? (
+                    <Button key={`${document.kind}-${index}`} size="sm" variant="outline" onClick={() => printLabels(supply.id, index)}>
+                      <Printer className="size-4" /> {document.label}
+                    </Button>
+                  ) : document.storageKey ? (
                     <Button key={`${document.kind}-${index}`} asChild size="sm" variant="outline">
                       <a
                         href={`/api/warehouse/supplies/file?supply=${supply.id}&document=${index}`}

@@ -11,6 +11,7 @@ import {
   assignTask,
   cancelTask,
   closeTask,
+  markAllPicked,
   markTaskPrinted,
   readTask,
   readTaskItems,
@@ -103,6 +104,12 @@ export async function POST(request: Request) {
     const result = await closeTask(db, taskId, auth.user.email);
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ ok: true, task: result.task });
+  }
+
+  if (action === "pick_all") {
+    const result = await markAllPicked(db, taskId, auth.user.email);
+    if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
+    return Response.json({ ok: true, marked: result.marked, task: result.task });
   }
 
   if (action === "cancel") {

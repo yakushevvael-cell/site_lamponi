@@ -28,6 +28,7 @@ import {
   getWildberriesOffices,
   getWildberriesShippingPoints,
   getWildberriesSupplyBarcode,
+  getWildberriesSupplyBoxIds,
   getWildberriesWarehouses,
   setWildberriesShippingMethod,
   type WildberriesShippingPoint,
@@ -686,21 +687,41 @@ async function createWildberriesSupplyFlow(
   await db.prepare("UPDATE supplies SET shipping_type = 'selfShipping', shipping_date = ? WHERE id = ?")
     .bind(shippingDate, input.supplyId).run();
 
-  // Грузоместа WB требует только для поставок на ПВЗ (officeType = pp).
-  // На склад приёмки короба не заводятся, и попытка их создать — ошибка.
-  let boxIds: string[] = [];
+  // Грузоместа WB требует только для поставок на ПВЗ (officeType = pp): там
+  // коробки сдают по одной, и на каждой нужен свой QR грузоместа. На
+  // сортировочный центр и склад WB короба не заводятся — хватает QR поставки.
+  //
+  // Короба и их стикеры получаем ДО передачи в доставку: в закрытую поставку
+  // грузоместо уже не добавить. Любая ошибка здесь останавливает оформление,
+  // поставка остаётся открытой, и повторная попытка доделает начатое.
+  const boxStickers: Array<{ id: string; file: string }> = [];
   const needsBoxes = String(input.shippingPointType ?? "").toLowerCase() === "pp";
   if (needsBoxes) {
-    try {
-      boxIds = await addWildberriesSupplyBoxes(token, externalId, input.boxCount);
-    } catch (error) {
-      documents.push({
-        kind: "box_sticker",
-        label: `Короба не заведены: ${error instanceof Error ? error.message : "ошибка WB"}`,
-        storageKey: "",
-        contentType: "text/plain",
-      });
+    const wanted = Math.max(1, Math.trunc(input.boxCount || 1));
+    let boxIds = await getWildberriesSupplyBoxIds(token, externalId);
+    if (boxIds.length < wanted) {
+      try {
+        await addWildberriesSupplyBoxes(token, externalId, wanted - boxIds.length);
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : "ошибка WB";
+        throw new Error(
+          `Wildberries не завёл короба (${wanted} шт.) для ПВЗ: ${detail}. `
+          + "WB разрешает не больше одного короба на два отправления — уменьшите число коробов и оформите ещё раз.",
+        );
+      }
+      boxIds = await getWildberriesSupplyBoxIds(token, externalId);
     }
+    if (boxIds.length === 0) throw new Error("Wildberries не вернул короба поставки — повторите оформление.");
+
+    // В ответе нет ID грузоместа: стикеры идут в порядке запроса.
+    const stickers = await getWildberriesBoxStickers(token, externalId, boxIds);
+    const files = stickers.map((row) => row.file ?? "").filter(Boolean);
+    if (files.length < boxIds.length) {
+      throw new Error(
+        `Wildberries отдал ${files.length} стикеров коробов из ${boxIds.length} — повторите оформление, поставка ещё открыта.`,
+      );
+    }
+    boxIds.forEach((id, index) => boxStickers.push({ id, file: files[index] }));
   }
 
   await deliverWildberriesSupply(token, externalId);
@@ -713,27 +734,13 @@ async function createWildberriesSupplyFlow(
     contentType: "image/png",
   });
 
-  if (boxIds.length > 0) {
-    try {
-      const stickers = await getWildberriesBoxStickers(token, externalId, boxIds);
-      for (const [index, sticker] of stickers.entries()) {
-        const file = sticker.file ?? sticker.barcode ?? "";
-        if (!file) continue;
-        documents.push({
-          kind: "box_sticker",
-          label: `Короб ${index + 1} из ${stickers.length}`,
-          storageKey: await storeDocument(runtime, input.supplyId, "box_sticker", index + 1, file, "image/png"),
-          contentType: "image/png",
-        });
-      }
-    } catch (error) {
-      documents.push({
-        kind: "box_sticker",
-        label: `Стикеры коробов не получены: ${error instanceof Error ? error.message : "ошибка WB"}`,
-        storageKey: "",
-        contentType: "text/plain",
-      });
-    }
+  for (const [index, sticker] of boxStickers.entries()) {
+    documents.push({
+      kind: "box_sticker",
+      label: `Короб ${index + 1} из ${boxStickers.length}`,
+      storageKey: await storeDocument(runtime, input.supplyId, "box_sticker", index + 1, sticker.file, "image/png"),
+      contentType: "image/png",
+    });
   }
 
   await saveDocuments(db, input.supplyId, documents.filter((document) => document.storageKey || document.contentType === "text/plain"));

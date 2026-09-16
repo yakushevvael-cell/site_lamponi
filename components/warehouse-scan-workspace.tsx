@@ -17,6 +17,9 @@
  *     комплектации, печать — из окна отправлений, когда собрано всё;
  *   — на Wildberries размер у заказа есть, а в УПД его нет: поле ввода
  *     блокируется, пока человек не подтвердит или не отклонит.
+ *
+ * Собранное задание принимается на стол сканом штрихкода с листа подбора:
+ * отдельным полем или прямо в поле УИН — код T123 от УИН отличается буквой.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -24,6 +27,7 @@ import {
   AlertTriangle,
   Boxes,
   CheckCircle2,
+  ClipboardCheck,
   Loader2,
   Printer,
   RefreshCw,
@@ -39,6 +43,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
+import { parseTaskBarcode } from "@/lib/barcode39.mjs";
 import { formatMoment } from "@/lib/utils";
 
 type Task = {
@@ -148,6 +153,8 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
+  const [receiveCode, setReceiveCode] = useState("");
+  const [receiveConfirm, setReceiveConfirm] = useState<{ taskId: number; number: string; pendingCount: number } | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [offline, setOffline] = useState(false);
   const [updInfo, setUpdInfo] = useState<{ total: number; free: number } | null>(null);
@@ -278,9 +285,58 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     };
   }
 
+  /** Приём задания по скану листа подбора. */
+  async function receiveTask(input: { code?: string; taskId?: number; confirm?: boolean }) {
+    setBusy(true);
+    try {
+      const response = await fetch("/api/warehouse/receive", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(input),
+      });
+      const data = await response.json() as {
+        error?: string; needsConfirm?: boolean; pendingCount?: number; closed?: boolean;
+        task?: { id: number; number: string; status: string };
+      };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "Задание не принято.");
+      if (data.needsConfirm) {
+        setReceiveConfirm({ taskId: data.task.id, number: data.task.number, pendingCount: data.pendingCount ?? 0 });
+        beep("warn");
+        return;
+      }
+      setReceiveConfirm(null);
+      await loadTasks();
+      setTaskId(data.task.id);
+      setOutcome(null);
+      beep("ok");
+      toast.success(`Задание ${data.task.number} принято на упаковку`, {
+        description: data.closed ? "Сборщик не закрыл его на экране — закрыто при приёме." : undefined,
+      });
+    } catch (error) {
+      beep("error");
+      toast.error(error instanceof Error ? error.message : "Задание не принято.");
+    } finally {
+      setReceiveCode("");
+      setBusy(false);
+      window.setTimeout(() => inputRef.current?.focus(), 0);
+    }
+  }
+
   async function submitScan(raw: string, confirmSize = false) {
     const uin = raw.trim();
-    if (!uin || !taskId) return;
+    // Лист подбора отсканировали в поле УИН — это приём задания, а не изделие.
+    if (parseTaskBarcode(uin)) {
+      setValue("");
+      await receiveTask({ code: uin });
+      return;
+    }
+    if (!uin) return;
+    if (!taskId) {
+      beep("warn");
+      toast.warning("Сначала отсканируйте лист подбора или выберите задание.");
+      setValue("");
+      return;
+    }
     setBusy(true);
     try {
       const response = await fetch("/api/warehouse/scan", {
@@ -402,6 +458,56 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
 
       <Card>
         <CardContent className="space-y-4 px-5">
+          <div className="flex flex-wrap items-end gap-3 rounded-xl border bg-muted/30 px-4 py-3">
+            <div className="space-y-1">
+              <p className="flex items-center gap-1 text-xs text-muted-foreground">
+                <ClipboardCheck className="size-3.5" /> Приём собранного: штрихкод с листа подбора
+              </p>
+              <Input
+                className="h-10 w-72 font-mono"
+                placeholder="Сканируйте лист подбора"
+                value={receiveCode}
+                disabled={busy}
+                onChange={(event) => setReceiveCode(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") {
+                    event.preventDefault();
+                    const code = receiveCode.trim();
+                    if (!code) return;
+                    // В это поле по ошибке отсканировали УИН — отправляем его как изделие.
+                    if (!parseTaskBarcode(code) && taskId) {
+                      setReceiveCode("");
+                      inputRef.current?.focus();
+                      void submitScan(code);
+                      return;
+                    }
+                    void receiveTask({ code });
+                  }
+                }}
+              />
+            </div>
+            <p className="max-w-md pb-2 text-xs text-muted-foreground">
+              Задание откроется для упаковки. Лист можно сканировать и в большое поле УИН.
+            </p>
+          </div>
+
+          {receiveConfirm ? (
+            <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
+              <AlertTriangle className="size-4" />
+              <span className="flex-1">
+                Сборщик не закрыл задание <b className="font-mono">{receiveConfirm.number}</b>
+                {receiveConfirm.pendingCount > 0 ? <> — строк без отметки: <b>{receiveConfirm.pendingCount}</b>. Они будут считаться собранными.</> : "."}
+                {" "}Если чего-то нет — сначала отметьте «Не найден» в задании.
+              </span>
+              <Button size="sm" disabled={busy} onClick={() => void receiveTask({ taskId: receiveConfirm.taskId, confirm: true })}>
+                Принять задание
+              </Button>
+              <Button size="sm" variant="outline" disabled={busy} onClick={() => setReceiveConfirm(null)}>
+                Отмена
+              </Button>
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">Задание, по которому идёт упаковка</p>
@@ -467,10 +573,10 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
               ref={inputRef}
               autoFocus
               inputMode="numeric"
-              placeholder={pendingSize ? "Ответьте на вопрос ниже" : "Сканируйте УИН"}
+              placeholder={pendingSize ? "Ответьте на вопрос ниже" : taskId ? "Сканируйте УИН" : "Сканируйте лист подбора"}
               className="h-16 flex-1 min-w-64 text-center font-mono text-2xl"
               value={value}
-              disabled={!taskId || busy || pendingSize !== null}
+              disabled={busy || pendingSize !== null}
               onChange={(event) => setValue(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
