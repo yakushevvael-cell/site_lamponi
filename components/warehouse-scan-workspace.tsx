@@ -199,8 +199,17 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     const timer = setInterval(() => {
       // Пока ждём подтверждения размера, поле выключено: случайный скан не
       // должен проскочить мимо вопроса.
-      if (pendingSize) return;
-      if (document.activeElement !== inputRef.current && !busy) inputRef.current?.focus();
+      if (pendingSize || busy) return;
+      const active = document.activeElement;
+      if (active === inputRef.current) return;
+      // Человек сейчас работает с другим полем: выбирает задание в списке или
+      // что-то вводит. Забрать фокус — значит закрыть открытый список прямо
+      // под курсором, выбрать строку тогда невозможно. Фокус вернётся, когда
+      // человек уйдёт из поля (выбор задания сам возвращает его в скан).
+      if (active instanceof HTMLSelectElement || active instanceof HTMLTextAreaElement) return;
+      if (active instanceof HTMLInputElement && active.type !== "file") return;
+      if (active instanceof HTMLElement && active.isContentEditable) return;
+      inputRef.current?.focus();
     }, 1200);
     return () => clearInterval(timer);
   }, [busy, pendingSize]);
@@ -403,6 +412,18 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
                   const next = Number(event.target.value);
                   setTaskId(Number.isFinite(next) && next > 0 ? next : null);
                   setOutcome(null);
+                  // Задание выбрано — сразу обратно в поле скана, без ожидания таймера.
+                  window.setTimeout(() => inputRef.current?.focus(), 0);
+                }}
+                onKeyDown={(event) => {
+                  // Список открыли и закрыли, не выбрав, — фокус остался на нём.
+                  // Скан в этот момент не должен листать задания: первый символ
+                  // переносим в поле скана, остальные сканер допечатает уже туда.
+                  if (event.key.length !== 1 || event.key === " " || event.ctrlKey || event.altKey || event.metaKey) return;
+                  if (!taskId || busy || pendingSize) return;
+                  event.preventDefault();
+                  setValue((current) => current + event.key);
+                  inputRef.current?.focus();
                 }}
               >
                 <option value="">Выберите задание…</option>

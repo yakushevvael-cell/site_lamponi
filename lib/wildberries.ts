@@ -443,7 +443,17 @@ const WB_MARKETPLACE_BASE = "https://marketplace-api.wildberries.ru/api/v3";
  */
 const WB_MARKETPLACE_NEW = "https://marketplace-api.wildberries.ru/api/marketplace/v3";
 
-export type WildberriesOffice = { id: number; name: string; address?: string; city?: string; selected?: boolean };
+export type WildberriesOffice = {
+  id: number;
+  name: string;
+  address?: string;
+  city?: string;
+  latitude?: number;
+  longitude?: number;
+  cargoType?: number;
+  deliveryType?: number;
+  selected?: boolean;
+};
 
 /** Склады приёмки Wildberries — справочник точек сдачи. */
 export async function getWildberriesOffices(token: string) {
@@ -524,6 +534,8 @@ export type WildberriesShippingPoint = {
   city?: string;
   officeType?: string;
   cargoTypes?: number[];
+  latitude?: number;
+  longitude?: number;
   fulfillment?: boolean;
 };
 

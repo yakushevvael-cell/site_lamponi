@@ -7,6 +7,7 @@ import {
   createSupplyForTask,
   readDropoffPoints,
   readSupplies,
+  readTaskDropoffContext,
   readSupply,
   withDocuments,
 } from "@/lib/supplies";
@@ -25,10 +26,21 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const taskId = idFrom(url.searchParams.get("task"));
 
+  const dropoff = taskId
+    ? await readTaskDropoffContext(runtime.DB, taskId)
+    : { wildberries: false, city: null, recommendedPointId: null };
+  const points = await readDropoffPoints(runtime.DB, undefined, dropoff.city);
+
   return Response.json({
     supplies: await readSupplies(runtime.DB, taskId ? { taskId } : {}),
     blocker: taskId ? await checkSupplyReadiness(runtime.DB, taskId) : null,
-    dropoffPoints: await readDropoffPoints(runtime.DB),
+    // Пока место сдачи не подобрано, список пуст: выбирать наугад из сотен
+    // ПВЗ нельзя — поставку отвезут не туда.
+    dropoffPoints: dropoff.wildberries && !dropoff.city
+      ? points.filter((point) => (point as { marketplaceId?: string }).marketplaceId !== "wildberries")
+      : points,
+    dropoffCity: dropoff.city,
+    recommendedPointId: dropoff.recommendedPointId,
     canManage: auth.permissions.includes("warehouse.supply"),
   });
 }

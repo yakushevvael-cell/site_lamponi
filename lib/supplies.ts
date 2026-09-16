@@ -25,11 +25,15 @@ import {
   deleteWildberriesSupply,
   deliverWildberriesSupply,
   getWildberriesBoxStickers,
+  getWildberriesOffices,
   getWildberriesShippingPoints,
   getWildberriesSupplyBarcode,
+  getWildberriesWarehouses,
   setWildberriesShippingMethod,
+  type WildberriesShippingPoint,
 } from "@/lib/wildberries";
 import { logWarehouseEvent, readTask } from "@/lib/warehouse";
+import { moscowDate, normalizeCity, pickShippingPoint, sameCity } from "@/lib/shipping-point-core.mjs";
 
 export type SupplyDocument = {
   kind: "supply_qr" | "box_sticker" | "act" | "act_barcode";
@@ -118,6 +122,11 @@ export async function refreshDropoffPoints(
   if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
 
   const points = await getWildberriesShippingPoints(credentials.WB_API_TOKEN, city, input.cargoType ?? 1);
+  const added = await saveShippingPoints(db, points, city);
+  return { added, found: points.length, city };
+}
+
+async function saveShippingPoints(db: D1Database, points: WildberriesShippingPoint[], city: string) {
   let added = 0;
   for (const point of points) {
     if (!point?.id) continue;
@@ -138,22 +147,160 @@ export async function refreshDropoffPoints(
     ).run();
     added += Number(result.meta.changes ?? 0);
   }
-  return { added, found: points.length, city };
+  return added;
 }
 
-export async function readDropoffPoints(db: D1Database, marketplaceId?: string) {
+const dropoffCityKey = (warehouseExternalId: string) => `wb_dropoff_city:${warehouseExternalId}`;
+const dropoffPointKey = (warehouseExternalId: string) => `wb_dropoff_point:${warehouseExternalId}`;
+
+async function saveSetting(db: D1Database, key: string, value: string) {
+  await db.prepare(
+    `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = CURRENT_TIMESTAMP`,
+  ).bind(key, value).run();
+}
+
+async function readSetting(db: D1Database, key: string) {
+  const row = await db.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first<{ value: string }>();
+  return row?.value ?? null;
+}
+
+/** Город для запроса к WB: «Ярославль», а не «г. Ярославль» и не «ярославль». */
+function cityForRequest(value: string | null | undefined) {
+  const raw = String(value ?? "").trim();
+  if (raw && !/[,.]/.test(raw) && !/^г\s/i.test(raw)) return raw;
+  // Из адреса «Ярославская обл, г. Ярославль. ул. Громова, д. 9».
+  const fromAddress = raw.match(/(?:^|[\s,])г\.?\s*([А-ЯЁ][А-ЯЁа-яё-]+)/u);
+  if (fromAddress) return fromAddress[1];
+  const normalized = normalizeCity(raw);
+  return normalized ? normalized.charAt(0).toUpperCase() + normalized.slice(1) : "";
+}
+
+export type DropoffResolution = {
+  city: string;
+  officeName: string | null;
+  officeAddress: string | null;
+  found: number;
+  recommendedPointId: number | null;
+  confident: boolean;
+  distance: number | null;
+};
+
+/**
+ * Пункт отгрузки под задание Wildberries.
+ *
+ * Название склада в задании («Самара») — это имя склада продавца в кабинете,
+ * а не место сдачи: везут поставку туда, какой склад WB к нему привязан
+ * (officeId). Поэтому город и пункт берутся из привязки склада, а не из имени
+ * задания. Иначе список заполняется сотнями ПВЗ чужого города, а выбранный
+ * из старого справочника «офис» WB отклоняет как IncorrectRequestBody.
+ */
+export async function resolveWildberriesDropoff(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { taskId: number },
+): Promise<DropoffResolution> {
+  const task = await readTask(db, input.taskId);
+  if (!task) throw new Error("Задание не найдено.");
+  if (task.marketplaceId !== "wildberries") throw new Error("Пункт отгрузки подбирается только для заданий Wildberries.");
+  if (!task.warehouseExternalId) throw new Error("В задании не указан склад Wildberries.");
+
+  const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
+  if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
+  const token = credentials.WB_API_TOKEN;
+
+  const warehouses = await getWildberriesWarehouses(token);
+  const warehouse = warehouses.find((row) => String(row.id) === String(task.warehouseExternalId));
+  if (!warehouse) {
+    throw new Error(`Склад «${task.warehouseName ?? task.warehouseExternalId}» не найден в кабинете Wildberries.`);
+  }
+  if (!warehouse.officeId) {
+    throw new Error(`У склада «${warehouse.name}» в кабинете WB не выбран склад WB для сдачи поставок.`);
+  }
+
+  const offices = await getWildberriesOffices(token);
+  const office = offices.find((row) => Number(row.id) === Number(warehouse.officeId)) ?? null;
+  const city = cityForRequest(office?.city || office?.address || "");
+  if (!office || !city) {
+    throw new Error(`Wildberries не сообщил адрес склада сдачи (ID ${warehouse.officeId}) для склада «${warehouse.name}».`);
+  }
+
+  const cargoType = [1, 2, 3].includes(Number(warehouse.cargoType)) ? Number(warehouse.cargoType) : 1;
+  const points = await getWildberriesShippingPoints(token, city, cargoType);
+  await saveShippingPoints(db, points, city);
+
+  const local = points.filter((point) => !point.city || sameCity(point.city, city));
+  const pick = pickShippingPoint(office, local.length > 0 ? local : points);
+  let recommendedPointId: number | null = null;
+  if (pick) {
+    const row = await db.prepare(
+      "SELECT id FROM dropoff_points WHERE marketplace_id = 'wildberries' AND external_id = ?",
+    ).bind(String(pick.id)).first<{ id: number }>();
+    recommendedPointId = row ? Number(row.id) : null;
+  }
+
+  await saveSetting(db, dropoffCityKey(task.warehouseExternalId), city);
+  if (recommendedPointId && pick?.confident) {
+    await saveSetting(db, dropoffPointKey(task.warehouseExternalId), String(recommendedPointId));
+  }
+
+  return {
+    city,
+    officeName: office.name ?? null,
+    officeAddress: office.address ?? null,
+    found: points.length,
+    recommendedPointId,
+    confident: Boolean(pick?.confident),
+    distance: pick?.distance === null || pick?.distance === undefined ? null : Math.round(pick.distance),
+  };
+}
+
+/** Что уже известно про место сдачи задания: город и пункт с прошлого раза. */
+export async function readTaskDropoffContext(db: D1Database, taskId: number) {
+  const task = await readTask(db, taskId);
+  if (!task || task.marketplaceId !== "wildberries" || !task.warehouseExternalId) {
+    return { wildberries: task?.marketplaceId === "wildberries", city: null as string | null, recommendedPointId: null as number | null };
+  }
+  const city = await readSetting(db, dropoffCityKey(task.warehouseExternalId));
+  const point = Number(await readSetting(db, dropoffPointKey(task.warehouseExternalId)));
+  return { wildberries: true, city, recommendedPointId: Number.isFinite(point) && point > 0 ? point : null };
+}
+
+/**
+ * Пункты отгрузки для выбора.
+ *
+ * Записи из старого справочника «офисов» WB (office_type пустой) не
+ * показываются: WB не принимает их ID как пункт отгрузки. Город сужает список
+ * до места сдачи — иначе в нём сотни ПВЗ со всех городов, где их искали.
+ */
+export async function readDropoffPoints(db: D1Database, marketplaceId?: string, city?: string | null) {
+  const all = await readDropoffPointRows(db, marketplaceId);
+  const current = all.filter((row) => {
+    const point = row as { marketplaceId?: string; officeType?: string | null };
+    return point.marketplaceId !== "wildberries" || Boolean(point.officeType);
+  });
+  if (!city) return current;
+  return current.filter((row) => {
+    const point = row as { marketplaceId?: string; city?: string | null; lastUsedAt?: string | null };
+    return point.marketplaceId !== "wildberries" || sameCity(point.city, city);
+  });
+}
+
+async function readDropoffPointRows(db: D1Database, marketplaceId?: string) {
   const rows = marketplaceId
     ? await db.prepare(
       `SELECT id, marketplace_id AS marketplaceId, external_id AS externalId, name, address,
               city, office_type AS officeType, last_used_at AS lastUsedAt
        FROM dropoff_points WHERE active = 1 AND marketplace_id = ?
-       ORDER BY CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END, last_used_at DESC, name`,
+       ORDER BY CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END, last_used_at DESC,
+                CASE WHEN office_type = 'pp' THEN 1 ELSE 0 END, name, address`,
     ).bind(marketplaceId).all()
     : await db.prepare(
       `SELECT id, marketplace_id AS marketplaceId, external_id AS externalId, name, address,
               city, office_type AS officeType, last_used_at AS lastUsedAt
        FROM dropoff_points WHERE active = 1
-       ORDER BY CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END, last_used_at DESC, name`,
+       ORDER BY CASE WHEN last_used_at IS NULL THEN 1 ELSE 0 END, last_used_at DESC,
+                CASE WHEN office_type = 'pp' THEN 1 ELSE 0 END, name, address`,
     ).all();
   return rows.results;
 }
@@ -341,6 +488,7 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
         boxCount,
         shippingPointId: dropoff ? Number(dropoff.externalId) : null,
         shippingPointType: dropoff?.officeType ?? null,
+        shippingPointName: dropoff?.name ?? null,
         shippingDate: input.departureDate ?? null,
       });
     } else {
@@ -358,6 +506,11 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
       db.prepare("UPDATE supplies SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(supplyId),
       ...(dropoff ? [db.prepare("UPDATE dropoff_points SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?").bind(dropoff.id)] : []),
     ]);
+    // Пункт, с которым WB закрыл поставку, — проверенный: в следующий раз
+    // для этого склада он подставится сам.
+    if (task.marketplaceId === "wildberries" && dropoff?.officeType && task.warehouseExternalId) {
+      await saveSetting(db, dropoffPointKey(task.warehouseExternalId), String(dropoff.id));
+    }
 
     await logWarehouseEvent(db, {
       kind: "supply_created",
@@ -399,9 +552,25 @@ async function createWildberriesSupplyFlow(
     boxCount: number;
     shippingPointId: number | null;
     shippingPointType: string | null;
+    shippingPointName?: string | null;
     shippingDate: string | null;
   },
 ) {
+  // Проверяем пункт до любых запросов к WB: ошибка должна говорить, что
+  // делать, а не «IncorrectRequestBody».
+  if (!input.shippingPointId) {
+    throw new Error("Выберите пункт отгрузки: без него Wildberries не закроет поставку.");
+  }
+  if (!input.shippingPointType) {
+    throw new Error(
+      `Пункт «${input.shippingPointName ?? input.shippingPointId}» из старого справочника складов WB — `
+      + "Wildberries не принимает его как пункт отгрузки. Нажмите «Подобрать пункт отгрузки», выберите пункт и оформите поставку ещё раз.",
+    );
+  }
+  if (!Number.isSafeInteger(input.shippingPointId) || input.shippingPointId <= 0) {
+    throw new Error(`Некорректный ID пункта отгрузки: ${input.shippingPointId}. Обновите список пунктов.`);
+  }
+
   const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
   if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
   const token = credentials.WB_API_TOKEN;
@@ -419,11 +588,10 @@ async function createWildberriesSupplyFlow(
   const documents: SupplyDocument[] = [];
 
   // Без способа, даты и пункта отгрузки WB не закрывает поставку: отвечает
-  // 409 на «передать в доставку». Дата по умолчанию — сегодня.
-  if (!input.shippingPointId) {
-    throw new Error("Выберите пункт отгрузки: без него Wildberries не закроет поставку.");
-  }
-  const shippingDate = (input.shippingDate ?? new Date().toISOString().slice(0, 10)).slice(0, 10);
+  // 409 на «передать в доставку». Дата по умолчанию — сегодня по Москве.
+  const today = moscowDate();
+  const requested = (input.shippingDate ?? "").slice(0, 10);
+  const shippingDate = /^\d{4}-\d{2}-\d{2}$/.test(requested) && requested >= today ? requested : today;
   await setWildberriesShippingMethod(token, {
     supplyId: externalId,
     shippingPointId: input.shippingPointId,

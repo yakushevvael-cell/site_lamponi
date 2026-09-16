@@ -127,6 +127,13 @@
       "when": 1788201200000,
       "tag": "0017_wb_shipping_points",
       "breakpoints": true
+    },
+    {
+      "idx": 18,
+      "version": "6",
+      "when": 1789560000000,
+      "tag": "0018_wb_legacy_offices",
+      "breakpoints": true
     }
   ]
 }
