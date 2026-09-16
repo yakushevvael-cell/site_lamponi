@@ -1,4 +1,5 @@
 import { getRuntimeEnv } from "@/lib/runtime-env";
+import { overdueHandover, shipmentsByDay } from "@/lib/fbs-shipments-core.mjs";
 import { authorizeApi } from "@/lib/app-auth";
 import { readEffectivePermissions } from "@/lib/permissions";
 
@@ -179,6 +180,29 @@ export async function GET(request: Request) {
   }
   const geography = [...geographyMap.values()].sort((a, b) => b.orders - a.orders).slice(0, 100).map((row) => ({ ...row, amount: round(row.amount, 2) }));
 
+  // Отгрузки FBS по дням: заказ перешёл на этап «доставляется».
+  const shippedResult = await runtime.DB.prepare(
+    `SELECT marketplace_id AS marketplaceId, handed_over_at AS handedOverAt
+     FROM orders WHERE handed_over_at IS NOT NULL AND handed_over_at >= ?`,
+  ).bind(new Date(Date.now() - (days + 1) * 86_400_000).toISOString()).all<{ marketplaceId: string; handedOverAt: string }>();
+  const shipmentMarketplaces = [...new Set(["ozon", "wildberries", ...shippedResult.results.map((row) => row.marketplaceId)])];
+  const shipments = shipmentsByDay(shippedResult.results, { days, marketplaces: shipmentMarketplaces });
+
+  // Заказы, которые больше 40 часов ждут передачи в доставку. Окно — 30 дней:
+  // за его пределами синхронизация статусы уже не обновляет.
+  const pendingResult = await runtime.DB.prepare(
+    `SELECT o.marketplace_id AS marketplaceId, o.status, o.ordered_at AS orderedAt,
+            o.canceled_at AS canceledAt, o.handed_over_at AS handedOverAt,
+            COALESCE(SUM(oi.quantity), 1) AS units
+     FROM orders o
+     LEFT JOIN order_items oi ON oi.order_id = o.id
+     WHERE o.canceled_at IS NULL AND o.handed_over_at IS NULL AND o.buyout_at IS NULL AND o.ordered_at >= ?
+     GROUP BY o.id`,
+  ).bind(new Date(Date.now() - 30 * 86_400_000).toISOString()).all<{
+    marketplaceId: string; status: string; orderedAt: string; canceledAt: string | null; handedOverAt: string | null; units: number;
+  }>();
+  const overdue = overdueHandover(pendingResult.results, { marketplaces: ["wildberries", "ozon"], thresholdHours: 40 });
+
   const syncRows = await runtime.DB.prepare(
     `SELECT marketplace_id AS marketplaceId, MAX(created_at) AS lastSyncAt
      FROM sync_events WHERE kind = 'orders' AND status = 'success' GROUP BY marketplace_id`,
@@ -194,6 +218,8 @@ export async function GET(request: Request) {
     summary: showMoney ? summary : { ...summary, orderAmount: 0 },
     marketplaces: showMoney ? marketplaces : marketplaces.map((row) => ({ ...row, amount: 0 })),
     trend,
+    shipments,
+    overdue,
     productRatings,
     geography,
     recentOrders: orders.slice(0, 100).map((order) => ({

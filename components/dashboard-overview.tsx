@@ -1,8 +1,8 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Ban, CalendarDays, CheckCircle2, Loader2, PackageCheck, ReceiptRussianRuble, ShoppingBag, Warehouse } from "lucide-react";
-import { Area, AreaChart, CartesianGrid, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
+import { AlarmClock, Ban, CalendarDays, CheckCircle2, Loader2, PackageCheck, ReceiptRussianRuble, ShoppingBag, Truck, Warehouse } from "lucide-react";
+import { Area, AreaChart, CartesianGrid, Legend, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -15,10 +15,55 @@ type Analytics = {
   showMoney?: boolean;
   summary: { orderCount: number; orderedUnits: number; orderAmount: number; buyoutOrders: number; canceledOrders: number; sellerCanceledOrders: number; buyoutRate: number };
   trend: Array<{ date: string; orders: number; buyouts: number; cancellations: number }>;
+  /** Отгрузки FBS по дням (МСК): по полю на площадку — сколько заказов перешло в «доставляется». */
+  shipments?: Array<{ date: string } & Record<string, number | string>>;
+  /** Заказы старше 40 ч, ещё не переданные в доставку. */
+  overdue?: Record<string, { orders: number; units: number; oldestHours: number | null }>;
   marketplaces: Array<{ id: string; name: string; orders: number; amount: number; buyouts: number; cancellations: number; sellerCancellations: number; buyoutRate: number }>;
   productRatings: Array<{ article: string; units: number; buyouts: number; cancellations: number; sellerCancellations: number }>;
 };
 type StockTotals = { articleCount: number; skuCount: number; physicalQuantity: number; reservedQuantity: number; availableQuantity: number; zeroStockCount: number; manualZeroCount: number };
+const MARKETPLACE_STYLE: Record<string, { name: string; color: string }> = {
+  wildberries: { name: "Wildberries", color: "#a13bd6" },
+  ozon: { name: "Ozon", color: "#1f6feb" },
+  yandex: { name: "Яндекс Маркет", color: "#e0a800" },
+};
+
+/** Русское склонение по числу: plural(3, ["товар", "товара", "товаров"]) → «товара». */
+function plural(value: number, forms: [string, string, string]) {
+  const mod10 = value % 10;
+  const mod100 = value % 100;
+  if (mod10 === 1 && mod100 !== 11) return forms[0];
+  if (mod10 >= 2 && mod10 <= 4 && (mod100 < 12 || mod100 > 14)) return forms[1];
+  return forms[2];
+}
+
+/** Плитка «старше 40 часов без передачи в доставку» для одной площадки. */
+function OverdueTile({ id, value }: { id: string; value?: { orders: number; units: number; oldestHours: number | null } }) {
+  const style = MARKETPLACE_STYLE[id] ?? { name: id, color: "#666" };
+  const units = value?.units ?? 0;
+  const alarm = units > 0;
+  return (
+    <Card className={`flex-1 gap-0 py-5 ${alarm ? "border-red-300 bg-red-50/60" : ""}`}>
+      <CardContent className="flex h-full flex-col justify-between gap-3 px-5">
+        <div className="flex items-start justify-between gap-2">
+          <p className="text-sm font-medium" style={{ color: style.color }}>{style.name}</p>
+          <span className={`grid size-9 place-items-center rounded-xl ${alarm ? "bg-red-100 text-red-700" : "bg-secondary"}`}><AlarmClock className="size-4" /></span>
+        </div>
+        <div>
+          <p className={`text-5xl font-bold tabular-nums ${alarm ? "text-red-700" : ""}`}>{units.toLocaleString("ru-RU")}</p>
+          <p className="mt-1 text-sm text-muted-foreground">{plural(units, ["товар", "товара", "товаров"])} старше 40 ч, ещё не переданы в доставку</p>
+        </div>
+        <p className="text-xs text-muted-foreground">
+          {alarm
+            ? `${(value?.orders ?? 0).toLocaleString("ru-RU")} ${plural(value?.orders ?? 0, ["заказ", "заказа", "заказов"])} · самый давний ждёт ${value?.oldestHours ?? "—"} ч`
+            : "Все заказы старше 40 часов уже в доставке"}
+        </p>
+      </CardContent>
+    </Card>
+  );
+}
+
 const money = (value: number) => new Intl.NumberFormat("ru-RU", { style: "currency", currency: "RUB", maximumFractionDigits: 0 }).format(value);
 
 export function DashboardOverview() {
@@ -37,6 +82,9 @@ export function DashboardOverview() {
   }, []);
   useEffect(() => { void Promise.resolve().then(() => load(period)); }, [load, period]);
   const summary = analytics?.summary;
+  const shipmentData = (analytics?.shipments ?? []).map((row) => ({ ...row, label: new Date(`${row.date}T12:00:00Z`).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" }) }));
+  const shipmentKeys = Object.keys(analytics?.shipments?.[0] ?? {}).filter((key) => key !== "date");
+  const shipmentTotals = Object.fromEntries(shipmentKeys.map((key) => [key, (analytics?.shipments ?? []).reduce((sum, row) => sum + Number(row[key] ?? 0), 0)]));
   const chartData = (analytics?.trend ?? []).map((row) => ({ ...row, label: new Date(row.date).toLocaleDateString("ru-RU", { day: "2-digit", month: "short" }) }));
 
   return <main className="min-h-svh bg-background"><header className="sticky top-0 z-20 flex h-16 items-center justify-between border-b bg-background/90 px-4 backdrop-blur md:px-7"><div className="flex items-center gap-3"><SidebarTrigger className="md:hidden" /><div><h1 className="text-lg font-semibold">Обзор бизнеса</h1><p className="hidden text-xs text-muted-foreground sm:block">Только реальные данные из ОСВ, WB и Ozon</p></div></div><Select value={period} onValueChange={setPeriod}><SelectTrigger className="w-[132px] bg-card"><CalendarDays className="size-4" /><SelectValue /></SelectTrigger><SelectContent><SelectItem value="7">7 дней</SelectItem><SelectItem value="30">30 дней</SelectItem><SelectItem value="90">90 дней</SelectItem></SelectContent></Select></header>
@@ -49,6 +97,37 @@ export function DashboardOverview() {
         { label: "Все отмены", value: Number(summary?.canceledOrders ?? 0).toLocaleString("ru-RU"), note: "все причины", icon: Ban },
         { label: "Отмены продавцом", value: Number(summary?.sellerCanceledOrders ?? 0).toLocaleString("ru-RU"), note: "отдельный показатель", icon: Ban },
       ].filter((item) => item.label !== "Сумма заказов" || analytics?.showMoney !== false).map((item) => <Card key={item.label} className="gap-0 py-5"><CardContent className="px-5"><div className="flex items-start justify-between"><div><p className="text-sm text-muted-foreground">{item.label}</p><p className="mt-2 text-2xl font-semibold">{item.value}</p><p className="mt-2 text-xs text-muted-foreground">{item.note}</p></div><span className="grid size-10 place-items-center rounded-xl bg-secondary"><item.icon className="size-4" /></span></div></CardContent></Card>)}</section>
+      <section className="grid gap-4 xl:grid-cols-[1.4fr_0.8fr]">
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-base"><Truck className="size-4" /> Отгруженные заказы FBS</CardTitle>
+            <p className="text-xs text-muted-foreground">
+              Сколько заказов в день перешло на этап «доставляется», по Москве.
+              {shipmentKeys.length ? ` За период: ${shipmentKeys.map((key) => `${MARKETPLACE_STYLE[key]?.name ?? key} — ${Number(shipmentTotals[key]).toLocaleString("ru-RU")}`).join(", ")}.` : ""}
+            </p>
+          </CardHeader>
+          <CardContent className="h-[280px] px-2 sm:px-5">
+            {shipmentData.length ? (
+              <ResponsiveContainer width="100%" height="100%">
+                <LineChart data={shipmentData} margin={{ left: -18, right: 12 }}>
+                  <CartesianGrid vertical={false} strokeDasharray="4 4" />
+                  <XAxis dataKey="label" tick={{ fontSize: 11 }} />
+                  <YAxis tick={{ fontSize: 11 }} allowDecimals={false} />
+                  <Tooltip />
+                  <Legend wrapperStyle={{ fontSize: 12 }} />
+                  {shipmentKeys.map((key) => (
+                    <Line key={key} type="monotone" dataKey={key} name={MARKETPLACE_STYLE[key]?.name ?? key} stroke={MARKETPLACE_STYLE[key]?.color ?? "#666"} strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
+                  ))}
+                </LineChart>
+              </ResponsiveContainer>
+            ) : <div className="grid h-full place-items-center text-sm text-muted-foreground">Отгрузок за период нет.</div>}
+          </CardContent>
+        </Card>
+        <div className="flex flex-col gap-4">
+          <OverdueTile id="wildberries" value={analytics?.overdue?.wildberries} />
+          <OverdueTile id="ozon" value={analytics?.overdue?.ozon} />
+        </div>
+      </section>
       <section className="grid gap-4 xl:grid-cols-[1.4fr_0.8fr]"><Card><CardHeader><CardTitle className="text-base">Динамика заказов</CardTitle></CardHeader><CardContent className="h-[280px] px-2 sm:px-5">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData} margin={{ left: -18, right: 12 }}><CartesianGrid vertical={false} strokeDasharray="4 4" /><XAxis dataKey="label" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} /><Tooltip /><Area dataKey="orders" name="Заказы" stroke="#8056d9" fill="#8056d9" fillOpacity={0.15} /><Area dataKey="buyouts" name="Выкупы" stroke="#228b63" fillOpacity={0} /><Area dataKey="cancellations" name="Отмены" stroke="#d24f63" fillOpacity={0} /></AreaChart></ResponsiveContainer> : <div className="grid h-full place-items-center text-sm text-muted-foreground">Загрузите заказы в разделе «Заказы».</div>}</CardContent></Card>
         <Card><CardHeader><CardTitle className="text-base">Состояние остатка</CardTitle></CardHeader><CardContent className="space-y-4 px-5">{[
           ["Физически по ОСВ", stocks?.physicalQuantity ?? 0], ["В активных резервах", stocks?.reservedQuantity ?? 0], ["Доступно с учётом обнулений", stocks?.availableQuantity ?? 0], ["Обнулено вручную, позиций", stocks?.manualZeroCount ?? 0],

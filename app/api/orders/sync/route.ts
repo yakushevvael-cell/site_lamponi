@@ -1,4 +1,5 @@
 import { getMarketplaceCredentials } from "@/lib/credentials";
+import { isHandedOver } from "@/lib/fbs-shipments-core.mjs";
 import { authorizeApi } from "@/lib/app-auth";
 import {
   matchOzonCatalog,
@@ -42,6 +43,10 @@ type NormalizedOrder = {
   warehouseExternalId: string | null;
   /** Плановая дата отгрузки: дедлайн, по которому на складе видно, что горит. */
   shipmentDeadline: string | null;
+  /** Точное время передачи в доставку от площадки (Ozon: delivering_date). */
+  handedOverAt: string | null;
+  /** Заказ уже в доставке, а точного времени площадка не дала: запомним, когда увидели. */
+  handedOverSeenAt: string | null;
   final: boolean;
   items: NormalizedItem[];
 };
@@ -108,8 +113,8 @@ async function persistOrders(
     `INSERT INTO orders
        (marketplace_id, external_order_id, status, amount, ordered_at, shipped_at, delivered_at,
         buyout_at, canceled_at, cancellation_source, seller_cancelled, region, city,
-        warehouse_external_id, shipment_deadline, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+        warehouse_external_id, shipment_deadline, handed_over_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
      ON CONFLICT(marketplace_id, external_order_id) DO UPDATE SET
        status = excluded.status,
        amount = excluded.amount,
@@ -123,6 +128,8 @@ async function persistOrders(
        city = COALESCE(excluded.city, orders.city),
        warehouse_external_id = COALESCE(excluded.warehouse_external_id, orders.warehouse_external_id),
        shipment_deadline = COALESCE(excluded.shipment_deadline, orders.shipment_deadline),
+       -- Точное время площадки важнее; иначе первое время, когда заказ увидели в доставке.
+       handed_over_at = COALESCE(?, orders.handed_over_at, ?),
        updated_at = CURRENT_TIMESTAMP`,
   ).bind(
     marketplaceId,
@@ -140,6 +147,9 @@ async function persistOrders(
     order.city,
     order.warehouseExternalId,
     order.shipmentDeadline,
+    order.handedOverAt ?? order.handedOverSeenAt,
+    order.handedOverAt,
+    order.handedOverSeenAt,
   )));
 
   const orderRows = await db.prepare(
@@ -238,6 +248,9 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
       // Wildberries в списке сборочных заданий дедлайн не отдаёт — считаем по
       // дате заказа на экране склада, а поле оставляем пустым.
       shipmentDeadline: null,
+      // WB время передачи в доставку не отдаёт: фиксируем, когда увидели.
+      handedOverAt: null,
+      handedOverSeenAt: isHandedOver("wildberries", info.status) ? syncedAt : null,
       final: info.bought || info.canceled,
       items: [{
         externalSku,
@@ -309,6 +322,8 @@ async function syncOzon(db: D1Database, runtime: ReturnType<typeof getRuntimeEnv
       city: posting.analytics_data?.city ?? null,
       warehouseExternalId: posting.delivery_method?.warehouse_id ? String(posting.delivery_method.warehouse_id) : null,
       shipmentDeadline: posting.shipment_date ?? null,
+      handedOverAt: isHandedOver("ozon", status) ? (posting.delivering_date ?? null) : null,
+      handedOverSeenAt: isHandedOver("ozon", status) ? syncedAt : null,
       final: bought || canceled,
       items,
     };

@@ -134,6 +134,13 @@
       "when": 1789560000000,
       "tag": "0018_wb_legacy_offices",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "6",
+      "when": 1789580000000,
+      "tag": "0019_order_handed_over",
+      "breakpoints": true
     }
   ]
 }

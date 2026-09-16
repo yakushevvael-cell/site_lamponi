@@ -145,11 +145,14 @@ export const orders = sqliteTable(
     warehouseExternalId: text("warehouse_external_id"),
     /** Плановая дата отгрузки отправления — дедлайн, по которому видно, что горит. */
     shipmentDeadline: text("shipment_deadline"),
+    /** Когда заказ передан площадке — перешёл на этап «доставляется». */
+    handedOverAt: text("handed_over_at"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
     uniqueIndex("order_marketplace_external_unique").on(table.marketplaceId, table.externalOrderId),
+    index("order_handed_over_idx").on(table.handedOverAt),
     index("order_ordered_at_idx").on(table.orderedAt),
     index("order_status_idx").on(table.status),
   ],
