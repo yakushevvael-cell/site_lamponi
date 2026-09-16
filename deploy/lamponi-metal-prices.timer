@@ -1,0 +1,10 @@
+[Unit]
+Description=Цены на золото и серебро каждые 2 часа
+
+[Timer]
+OnCalendar=*-*-* 00/2:05:00
+RandomizedDelaySec=120
+Persistent=true
+
+[Install]
+WantedBy=timers.target

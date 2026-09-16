@@ -1,0 +1,16 @@
+[Unit]
+Description=Lamponi: цены на золото и серебро с ProFinance
+After=lamponi.service network-online.target
+Wants=lamponi.service network-online.target
+
+[Service]
+Type=oneshot
+User=lamponi
+Group=lamponi
+WorkingDirectory=/opt/lamponi/current
+EnvironmentFile=/opt/lamponi/shared/.env
+# Браузер для чтения страницы лежит вне папки релиза: выкат его не стирает.
+Environment=PLAYWRIGHT_BROWSERS_PATH=/opt/lamponi/shared/ms-playwright
+TimeoutStartSec=300
+Nice=10
+ExecStart=/usr/bin/node scripts/fetch-metal-prices.mjs
