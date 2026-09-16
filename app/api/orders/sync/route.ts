@@ -14,6 +14,7 @@ import {
   getWildberriesCards,
   getWildberriesOrders,
   getWildberriesOrderStatuses,
+  getWildberriesSupplies,
   type WildberriesOrder,
   type WildberriesOrderStatus,
 } from "@/lib/wildberries";
@@ -225,6 +226,17 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
   const remoteOrders = await getWildberriesOrders(token, days);
   const statuses = await getWildberriesOrderStatuses(token, remoteOrders.map((order) => order.id));
   const statusById = new Map(statuses.map((status) => [status.id, status]));
+  // Время передачи в доставку — закрытие поставки. Если список поставок не
+  // пришёл, время не выдумываем: заказ просто не попадёт в график отгрузок.
+  const supplyHandover = new Map<string, string>();
+  try {
+    for (const supply of await getWildberriesSupplies(token)) {
+      const at = supply.closedAt || supply.scanDt;
+      if (supply.done !== false && at) supplyHandover.set(supply.id, at);
+    }
+  } catch {
+    // Без права на поставки заказы всё равно синхронизируются.
+  }
   const syncedAt = new Date().toISOString();
   const normalized = remoteOrders.map((order: WildberriesOrder): NormalizedOrder => {
     const externalSku = String(order.chrtId);
@@ -248,9 +260,9 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
       // Wildberries в списке сборочных заданий дедлайн не отдаёт — считаем по
       // дате заказа на экране склада, а поле оставляем пустым.
       shipmentDeadline: null,
-      // WB время передачи в доставку не отдаёт: фиксируем, когда увидели.
-      handedOverAt: null,
-      handedOverSeenAt: isHandedOver("wildberries", info.status) ? syncedAt : null,
+      // У задания времени передачи нет — берём закрытие его поставки.
+      handedOverAt: isHandedOver("wildberries", info.status) && order.supplyId ? (supplyHandover.get(order.supplyId) ?? null) : null,
+      handedOverSeenAt: null,
       final: info.bought || info.canceled,
       items: [{
         externalSku,

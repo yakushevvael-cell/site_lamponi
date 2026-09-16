@@ -39,6 +39,8 @@ export type WildberriesCard = {
 
 export type WildberriesOrder = {
   id: number;
+  /** Поставка, за которой закреплено задание. */
+  supplyId?: string;
   article?: string;
   chrtId: number;
   nmId?: number;
@@ -459,6 +461,30 @@ export type WildberriesOffice = {
 export async function getWildberriesOffices(token: string) {
   const payload = await wildberriesRequest<WildberriesOffice[]>(`${WB_MARKETPLACE_BASE}/offices`, token);
   return Array.isArray(payload) ? payload : [];
+}
+
+export type WildberriesSupplyInfo = { id: string; done?: boolean; createdAt?: string; closedAt?: string | null; scanDt?: string | null };
+
+/**
+ * Все поставки FBS продавца. Нужны ради closedAt — момента, когда поставка
+ * передана в доставку: время перехода задания на этап «в доставке» Wildberries
+ * у самого задания не отдаёт.
+ */
+export async function getWildberriesSupplies(token: string, maxPages = 50) {
+  const supplies: WildberriesSupplyInfo[] = [];
+  let next = 0;
+  for (let page = 0; page < maxPages; page += 1) {
+    const url = new URL(`${WB_MARKETPLACE_BASE}/supplies`);
+    url.searchParams.set("limit", "1000");
+    url.searchParams.set("next", String(next));
+    const payload = await wildberriesRequest<{ next?: number; supplies?: WildberriesSupplyInfo[] }>(url.toString(), token);
+    const rows = Array.isArray(payload.supplies) ? payload.supplies : [];
+    supplies.push(...rows.filter((row) => row && typeof row.id === "string"));
+    const nextValue = Number(payload.next ?? 0);
+    if (rows.length === 0 || !Number.isFinite(nextValue) || nextValue <= 0 || nextValue === next) break;
+    next = nextValue;
+  }
+  return supplies;
 }
 
 /** Создание поставки. Возвращает её идентификатор WB-XXXXXXX. */
