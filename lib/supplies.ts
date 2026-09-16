@@ -107,9 +107,11 @@ async function saveDocuments(db: D1Database, supplyId: number, documents: Supply
 /**
  * Обновление справочника пунктов отгрузки по городу.
  *
- * Город берётся из задания: задание WB собирается на один региональный склад,
- * и его название и есть город отгрузки. Идентификатор пункта (shippingPointId)
- * нужен, чтобы закрыть поставку, — старые «офисы» WB для этого не годятся.
+ * Город — это место, куда склад реально везёт коробки (Кострома, Ярославль),
+ * а не регион склада в задании: задание «САМАРА» тоже сдаётся в Ярославле.
+ * Идентификатор пункта (shippingPointId) нужен, чтобы закрыть поставку, —
+ * старые «офисы» WB для этого не годятся. Город запоминается в списке
+ * городов отгрузки.
  */
 export async function refreshDropoffPoints(
   db: D1Database,
@@ -123,7 +125,22 @@ export async function refreshDropoffPoints(
 
   const points = await getWildberriesShippingPoints(credentials.WB_API_TOKEN, city, input.cargoType ?? 1);
   const added = await saveShippingPoints(db, points, city);
-  return { added, found: points.length, city };
+  if (points.length === 0) {
+    throw new Error(`Wildberries не нашёл пунктов отгрузки в городе «${city}». Проверьте написание: «Кострома», «Ярославль».`);
+  }
+  // Пункт, который WB убрал из справочника, больше не предлагаем.
+  const fresh = new Set(points.map((point) => String(point.id)));
+  const known = await db.prepare(
+    `SELECT id, external_id AS externalId, city FROM dropoff_points
+     WHERE marketplace_id = 'wildberries' AND active = 1 AND office_type IS NOT NULL`,
+  ).all<{ id: number; externalId: string; city: string | null }>();
+  for (const row of known.results) {
+    if (sameCity(row.city, city) && !fresh.has(String(row.externalId))) {
+      await db.prepare("UPDATE dropoff_points SET active = 0 WHERE id = ?").bind(row.id).run();
+    }
+  }
+  const cities = await addShippingCity(db, city);
+  return { added, found: points.length, city, cities };
 }
 
 async function saveShippingPoints(db: D1Database, points: WildberriesShippingPoint[], city: string) {
@@ -150,7 +167,9 @@ async function saveShippingPoints(db: D1Database, points: WildberriesShippingPoi
   return added;
 }
 
-const dropoffCityKey = (warehouseExternalId: string) => `wb_dropoff_city:${warehouseExternalId}`;
+const SHIPPING_CITIES_KEY = "wb_shipping_cities";
+/** Куда склад возит коробки WB: ПВЗ в Костроме или сортировочный центр в Ярославле. */
+const DEFAULT_SHIPPING_CITIES = ["Кострома", "Ярославль"];
 const dropoffPointKey = (warehouseExternalId: string) => `wb_dropoff_point:${warehouseExternalId}`;
 
 async function saveSetting(db: D1Database, key: string, value: string) {
@@ -163,6 +182,54 @@ async function saveSetting(db: D1Database, key: string, value: string) {
 async function readSetting(db: D1Database, key: string) {
   const row = await db.prepare("SELECT value FROM settings WHERE key = ?").bind(key).first<{ value: string }>();
   return row?.value ?? null;
+}
+
+/** Города отгрузки, пункты которых показываются в списке выбора. */
+export async function readShippingCities(db: D1Database): Promise<string[]> {
+  const raw = await readSetting(db, SHIPPING_CITIES_KEY);
+  if (raw === null) return [...DEFAULT_SHIPPING_CITIES];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.filter((item): item is string => typeof item === "string" && item.trim() !== "") : [];
+  } catch {
+    return [...DEFAULT_SHIPPING_CITIES];
+  }
+}
+
+async function addShippingCity(db: D1Database, city: string) {
+  const cities = await readShippingCities(db);
+  const next = cities.some((item) => sameCity(item, city)) ? cities : [...cities, city.trim()];
+  await saveSetting(db, SHIPPING_CITIES_KEY, JSON.stringify(next));
+  return next;
+}
+
+export async function removeShippingCity(db: D1Database, city: string) {
+  const cities = await readShippingCities(db);
+  const next = cities.filter((item) => !sameCity(item, city));
+  await saveSetting(db, SHIPPING_CITIES_KEY, JSON.stringify(next));
+  return next;
+}
+
+/**
+ * Города из списка, по которым справочник пунктов ещё пуст, догружаются из
+ * WB сами — чтобы в первый раз не пришлось искать кнопку.
+ */
+export async function ensureShippingCityPoints(db: D1Database, runtime: AppRuntimeEnv) {
+  const cities = await readShippingCities(db);
+  if (cities.length === 0) return [];
+  const rows = await db.prepare(
+    `SELECT city FROM dropoff_points WHERE marketplace_id = 'wildberries' AND active = 1 AND office_type IS NOT NULL`,
+  ).all<{ city: string | null }>();
+  const problems: string[] = [];
+  for (const city of cities) {
+    if (rows.results.some((row) => sameCity(row.city, city))) continue;
+    try {
+      await refreshDropoffPoints(db, runtime, { city });
+    } catch (error) {
+      problems.push(`${city}: ${error instanceof Error ? error.message : "пункты не загрузились"}`);
+    }
+  }
+  return problems;
 }
 
 /** Город для запроса к WB: «Ярославль», а не «г. Ярославль» и не «ярославль». */
@@ -239,10 +306,9 @@ export async function resolveWildberriesDropoff(
     recommendedPointId = row ? Number(row.id) : null;
   }
 
-  await saveSetting(db, dropoffCityKey(task.warehouseExternalId), city);
-  if (recommendedPointId && pick?.confident) {
-    await saveSetting(db, dropoffPointKey(task.warehouseExternalId), String(recommendedPointId));
-  }
+  // Подсказку человек запросил сам — город склада сдачи добавляем в список,
+  // но пункт не закрепляем: решает тот, кто везёт коробки.
+  await addShippingCity(db, city);
 
   return {
     city,
@@ -255,16 +321,31 @@ export async function resolveWildberriesDropoff(
   };
 }
 
-/** Что уже известно про место сдачи задания: город и пункт с прошлого раза. */
-export async function readTaskDropoffContext(db: D1Database, taskId: number) {
-  const task = await readTask(db, taskId);
-  if (!task || task.marketplaceId !== "wildberries" || !task.warehouseExternalId) {
-    return { wildberries: task?.marketplaceId === "wildberries", city: null as string | null, recommendedPointId: null as number | null };
+/**
+ * Пункт по умолчанию для задания: тот, с которым закрывали поставку этого
+ * склада в прошлый раз, иначе последний использованный вообще. Наугад пункт
+ * не подставляется.
+ */
+export async function readTaskDropoffContext(db: D1Database, taskId: number | null) {
+  const task = taskId ? await readTask(db, taskId) : null;
+  const wildberries = task?.marketplaceId === "wildberries";
+  let recommendedPointId: number | null = null;
+  if (wildberries && task?.warehouseExternalId) {
+    const saved = Number(await readSetting(db, dropoffPointKey(task.warehouseExternalId)));
+    if (Number.isFinite(saved) && saved > 0) recommendedPointId = saved;
   }
-  const city = await readSetting(db, dropoffCityKey(task.warehouseExternalId));
-  const point = Number(await readSetting(db, dropoffPointKey(task.warehouseExternalId)));
-  return { wildberries: true, city, recommendedPointId: Number.isFinite(point) && point > 0 ? point : null };
+  if (wildberries && !recommendedPointId) {
+    const last = await db.prepare(
+      `SELECT id FROM dropoff_points
+       WHERE marketplace_id = 'wildberries' AND active = 1 AND office_type IS NOT NULL AND last_used_at IS NOT NULL
+       ORDER BY last_used_at DESC LIMIT 1`,
+    ).first<{ id: number }>();
+    recommendedPointId = last ? Number(last.id) : null;
+  }
+  return { wildberries, recommendedPointId };
 }
+
+const TYPE_ORDER: Record<string, number> = { sc: 0, sw: 1, pp: 2 };
 
 /**
  * Пункты отгрузки для выбора.
@@ -273,17 +354,21 @@ export async function readTaskDropoffContext(db: D1Database, taskId: number) {
  * показываются: WB не принимает их ID как пункт отгрузки. Город сужает список
  * до места сдачи — иначе в нём сотни ПВЗ со всех городов, где их искали.
  */
-export async function readDropoffPoints(db: D1Database, marketplaceId?: string, city?: string | null) {
-  const all = await readDropoffPointRows(db, marketplaceId);
-  const current = all.filter((row) => {
-    const point = row as { marketplaceId?: string; officeType?: string | null };
-    return point.marketplaceId !== "wildberries" || Boolean(point.officeType);
-  });
-  if (!city) return current;
-  return current.filter((row) => {
-    const point = row as { marketplaceId?: string; city?: string | null; lastUsedAt?: string | null };
-    return point.marketplaceId !== "wildberries" || sameCity(point.city, city);
-  });
+export async function readDropoffPoints(db: D1Database, marketplaceId?: string, cities?: string[] | null) {
+  type Row = { marketplaceId?: string; officeType?: string | null; city?: string | null; address?: string | null; name?: string };
+  const all = (await readDropoffPointRows(db, marketplaceId)) as Row[];
+  const current = all.filter((point) => point.marketplaceId !== "wildberries" || Boolean(point.officeType));
+  if (!cities) return current;
+  const cityIndex = (point: Row) => cities.findIndex((city) => sameCity(point.city, city));
+  // Порядок: города как в списке, внутри — сортировочный центр и склад WB,
+  // затем ПВЗ по адресу.
+  return current
+    .filter((point) => point.marketplaceId !== "wildberries" || cityIndex(point) >= 0)
+    .map((point) => ({ point, city: cityIndex(point) }))
+    .sort((left, right) => left.city - right.city
+      || (TYPE_ORDER[left.point.officeType ?? ""] ?? 3) - (TYPE_ORDER[right.point.officeType ?? ""] ?? 3)
+      || String(left.point.address ?? left.point.name ?? "").localeCompare(String(right.point.address ?? right.point.name ?? ""), "ru"))
+    .map((entry) => entry.point);
 }
 
 async function readDropoffPointRows(db: D1Database, marketplaceId?: string) {

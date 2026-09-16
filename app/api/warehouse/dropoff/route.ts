@@ -1,7 +1,13 @@
-/** Справочник точек сдачи: список и обновление из API площадки. */
+/** Пункты отгрузки: список по городам отгрузки, загрузка города из WB, подсказка из кабинета. */
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
-import { readDropoffPoints, refreshDropoffPoints, resolveWildberriesDropoff } from "@/lib/supplies";
+import {
+  readDropoffPoints,
+  readShippingCities,
+  refreshDropoffPoints,
+  removeShippingCity,
+  resolveWildberriesDropoff,
+} from "@/lib/supplies";
 
 export async function GET(request: Request) {
   const auth = await authorizePermission(["warehouse.supply", "warehouse.tasks"]);
@@ -9,7 +15,8 @@ export async function GET(request: Request) {
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
   const marketplace = new URL(request.url).searchParams.get("marketplace") ?? undefined;
-  return Response.json({ points: await readDropoffPoints(runtime.DB, marketplace ?? undefined) });
+  const cities = await readShippingCities(runtime.DB);
+  return Response.json({ cities, points: await readDropoffPoints(runtime.DB, marketplace ?? undefined, cities) });
 }
 
 export async function POST(request: Request) {
@@ -17,38 +24,46 @@ export async function POST(request: Request) {
   if ("response" in auth) return auth.response;
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
+  const db = runtime.DB;
 
-  const body = await request.json().catch(() => null) as { city?: unknown; cargoType?: unknown; taskId?: unknown } | null;
+  const body = await request.json().catch(() => null) as {
+    action?: unknown; city?: unknown; cargoType?: unknown; taskId?: unknown;
+  } | null;
+  const action = typeof body?.action === "string" ? body.action : "";
+  const city = typeof body?.city === "string" ? body.city.trim().slice(0, 80) : "";
 
-  // Задание WB: город и пункт берутся из склада сдачи, привязанного к складу
-  // продавца в кабинете WB, а не из имени склада в задании.
-  const taskIdRaw = Number(body?.taskId);
-  const cityOverride = typeof body?.city === "string" ? body.city.trim() : "";
-  if (Number.isFinite(taskIdRaw) && taskIdRaw > 0 && !cityOverride) {
-    try {
-      const result = await resolveWildberriesDropoff(runtime.DB, runtime, { taskId: Math.trunc(taskIdRaw) });
-      return Response.json({ ok: true, ...result, points: await readDropoffPoints(runtime.DB, undefined, result.city) });
-    } catch (error) {
-      return Response.json({
-        error: error instanceof Error ? error.message : "Не удалось подобрать пункт отгрузки.",
-      }, { status: 502 });
-    }
-  }
-
-  // Город вручную — запасной путь, если привязка склада в WB не заполнена.
-  const city = cityOverride;
-  if (!city) {
-    return Response.json({ error: "Не указан город отгрузки." }, { status: 400 });
-  }
-  const cargoTypeRaw = Number(body?.cargoType);
-  const cargoType = Number.isFinite(cargoTypeRaw) && cargoTypeRaw > 0 ? Math.trunc(cargoTypeRaw) : 1;
+  const listing = async () => {
+    const cities = await readShippingCities(db);
+    return { cities, points: await readDropoffPoints(db, undefined, cities) };
+  };
 
   try {
-    const result = await refreshDropoffPoints(runtime.DB, runtime, { city, cargoType });
-    return Response.json({ ok: true, ...result, points: await readDropoffPoints(runtime.DB, undefined, city) });
+    // Убрать город из списка: его пункты перестают показываться в выборе.
+    if (action === "remove_city") {
+      if (!city) return Response.json({ error: "Не указан город." }, { status: 400 });
+      await removeShippingCity(db, city);
+      return Response.json({ ok: true, ...(await listing()) });
+    }
+
+    // Подсказка: склад сдачи, привязанный к складу продавца в кабинете WB.
+    if (action === "suggest") {
+      const taskId = Number(body?.taskId);
+      if (!Number.isFinite(taskId) || taskId <= 0) {
+        return Response.json({ error: "Выберите задание Wildberries." }, { status: 400 });
+      }
+      const result = await resolveWildberriesDropoff(db, runtime, { taskId: Math.trunc(taskId) });
+      return Response.json({ ok: true, ...result, ...(await listing()) });
+    }
+
+    // Загрузить (или обновить) пункты города и добавить его в список.
+    if (!city) return Response.json({ error: "Укажите город отгрузки, например «Кострома»." }, { status: 400 });
+    const cargoTypeRaw = Number(body?.cargoType);
+    const cargoType = [1, 2, 3].includes(cargoTypeRaw) ? cargoTypeRaw : 1;
+    const result = await refreshDropoffPoints(db, runtime, { city, cargoType });
+    return Response.json({ ok: true, found: result.found, city: result.city, ...(await listing()) });
   } catch (error) {
     return Response.json({
-      error: error instanceof Error ? error.message : "Не удалось обновить точки сдачи.",
+      error: error instanceof Error ? error.message : "Не удалось обновить пункты отгрузки.",
     }, { status: 502 });
   }
 }

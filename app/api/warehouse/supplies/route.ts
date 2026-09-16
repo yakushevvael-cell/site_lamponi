@@ -7,7 +7,9 @@ import {
   createSupplyForTask,
   readDropoffPoints,
   readSupplies,
+  readShippingCities,
   readTaskDropoffContext,
+  ensureShippingCityPoints,
   readSupply,
   withDocuments,
 } from "@/lib/supplies";
@@ -26,20 +28,18 @@ export async function GET(request: Request) {
   const url = new URL(request.url);
   const taskId = idFrom(url.searchParams.get("task"));
 
-  const dropoff = taskId
-    ? await readTaskDropoffContext(runtime.DB, taskId)
-    : { wildberries: false, city: null, recommendedPointId: null };
-  const points = await readDropoffPoints(runtime.DB, undefined, dropoff.city);
+  const dropoff = await readTaskDropoffContext(runtime.DB, taskId);
+  // Для задания WB города из списка, по которым пунктов ещё нет, догружаются
+  // из WB сами. Ошибка не мешает странице открыться — её покажем текстом.
+  const dropoffProblems = dropoff.wildberries ? await ensureShippingCityPoints(runtime.DB, runtime) : [];
+  const cities = await readShippingCities(runtime.DB);
 
   return Response.json({
     supplies: await readSupplies(runtime.DB, taskId ? { taskId } : {}),
     blocker: taskId ? await checkSupplyReadiness(runtime.DB, taskId) : null,
-    // Пока место сдачи не подобрано, список пуст: выбирать наугад из сотен
-    // ПВЗ нельзя — поставку отвезут не туда.
-    dropoffPoints: dropoff.wildberries && !dropoff.city
-      ? points.filter((point) => (point as { marketplaceId?: string }).marketplaceId !== "wildberries")
-      : points,
-    dropoffCity: dropoff.city,
+    dropoffPoints: await readDropoffPoints(runtime.DB, undefined, cities),
+    shippingCities: cities,
+    dropoffProblems,
     recommendedPointId: dropoff.recommendedPointId,
     canManage: auth.permissions.includes("warehouse.supply"),
   });

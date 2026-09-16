@@ -8,10 +8,13 @@
  * Документы печатаются прямо из браузера и лежат на сервере.
  */
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AlertTriangle,
   Boxes,
+  Plus,
+  Sparkles,
+  X,
   CheckCircle2,
   Loader2,
   MapPin,
@@ -81,10 +84,20 @@ type DropoffResolution = {
 const OFFICE_TYPE: Record<string, string> = { sc: "сортировочный центр", sw: "склад WB", pp: "ПВЗ" };
 
 function pointLabel(point: DropoffPoint) {
-  // У пунктов WB название часто просто город («Самара») — различает их адрес.
+  // У пунктов WB название часто просто город («Кострома») — различает их адрес.
   const place = point.address && point.address !== point.name ? point.address : point.name;
   const type = point.officeType ? OFFICE_TYPE[point.officeType] : null;
-  return type ? `${place} (${type})` : place;
+  return type ? `${type === "ПВЗ" ? "ПВЗ" : type.charAt(0).toUpperCase() + type.slice(1)} · ${place}` : place;
+}
+
+function normalize(value: string | null | undefined) {
+  return String(value ?? "").toLowerCase().replace(/ё/g, "е");
+}
+
+/** Город пункта из списка городов отгрузки: WB пишет «г Кострома», «Кострома». */
+function cityOf(point: DropoffPoint, cities: string[]) {
+  const pointCity = normalize(point.city);
+  return cities.find((city) => pointCity.includes(normalize(city))) ?? "Другие";
 }
 
 export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: number | null }) {
@@ -98,12 +111,11 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
   const [canManage, setCanManage] = useState(false);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [dropoffCity, setDropoffCity] = useState<string | null>(null);
+  const [cities, setCities] = useState<string[]>([]);
+  const [newCity, setNewCity] = useState("");
+  const [pointFilter, setPointFilter] = useState("");
+  const [dropoffProblems, setDropoffProblems] = useState<string[]>([]);
   const [resolution, setResolution] = useState<DropoffResolution | null>(null);
-  const [resolveError, setResolveError] = useState<string | null>(null);
-  const [manualCity, setManualCity] = useState("");
-  // Автоподбор пункта — один раз на задание, чтобы ошибка WB не зациклилась.
-  const autoResolved = useRef(new Set<number>());
 
   const loadTasks = useCallback(async () => {
     const response = await fetch("/api/warehouse/tasks", { cache: "no-store" });
@@ -118,14 +130,15 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
     const response = await fetch(`/api/warehouse/supplies${id ? `?task=${id}` : ""}`, { cache: "no-store" });
     const data = await response.json() as {
       supplies?: Supply[]; blocker?: Blocker; dropoffPoints?: DropoffPoint[]; canManage?: boolean; error?: string;
-      dropoffCity?: string | null; recommendedPointId?: number | null;
+      shippingCities?: string[]; dropoffProblems?: string[]; recommendedPointId?: number | null;
     };
     if (!response.ok) throw new Error(data.error ?? "Поставки не загрузились.");
     const list = data.dropoffPoints ?? [];
     setSupplies(data.supplies ?? []);
     setBlocker(data.blocker ?? null);
     setPoints(list);
-    setDropoffCity(data.dropoffCity ?? null);
+    setCities(data.shippingCities ?? []);
+    setDropoffProblems(data.dropoffProblems ?? []);
     setCanManage(Boolean(data.canManage));
     // Пункт наугад не подставляется: неверный пункт хуже пустого. Берём
     // проверенный для этого склада, иначе оставляем выбор, если он ещё в списке.
@@ -146,59 +159,72 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
     void loadSupplies(taskId).catch(() => undefined);
   }, [taskId, loading, loadSupplies]);
 
-  const refreshPoints = useCallback(async (options: { city?: string; silent?: boolean } = {}) => {
-    if (!taskId) {
-      toast.error("Выберите задание.");
-      return;
-    }
-    setBusy("points");
+  async function dropoffRequest(body: Record<string, unknown>, busyKey: string) {
+    setBusy(busyKey);
     try {
-      // Без города сервер сам берёт склад сдачи, привязанный к складу WB в
-      // кабинете, и подбирает пункт по его адресу. Город — запасной путь.
       const response = await fetch("/api/warehouse/dropoff", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(options.city ? { city: options.city, cargoType: 1 } : { taskId }),
+        body: JSON.stringify(body),
       });
-      const data = await response.json() as Partial<DropoffResolution> & { points?: DropoffPoint[]; error?: string };
-      if (!response.ok) throw new Error(data.error ?? "Не удалось подобрать пункт отгрузки.");
+      const data = await response.json() as Partial<DropoffResolution> & {
+        points?: DropoffPoint[]; cities?: string[]; error?: string;
+      };
+      if (!response.ok) throw new Error(data.error ?? "Не удалось обновить пункты отгрузки.");
       const list = data.points ?? [];
       setPoints(list);
-      setDropoffCity(data.city ?? options.city ?? null);
-      setResolveError(null);
-      if (options.city) {
-        setResolution(null);
-        setPointId(null);
-        toast.success(`Пункты отгрузки по «${options.city}»: ${data.found ?? 0}. Выберите пункт.`);
-        return;
-      }
-      const resolved: DropoffResolution = {
-        city: data.city ?? "",
-        officeName: data.officeName ?? null,
-        officeAddress: data.officeAddress ?? null,
-        found: data.found ?? 0,
-        recommendedPointId: data.recommendedPointId ?? null,
-        confident: Boolean(data.confident),
-        distance: data.distance ?? null,
-      };
-      setResolution(resolved);
-      if (resolved.confident && resolved.recommendedPointId && list.some((point) => point.id === resolved.recommendedPointId)) {
-        setPointId(resolved.recommendedPointId);
-        if (!options.silent) toast.success("Пункт отгрузки подобран по складу сдачи WB");
-      } else {
-        setPointId(null);
-        toast.warning("Пункт отгрузки не подобрался сам — выберите его в списке", {
-          description: resolved.officeAddress ?? undefined,
-        });
-      }
+      setCities(data.cities ?? []);
+      setDropoffProblems([]);
+      // Выбранный пункт сохраняется, если он остался в списке.
+      setPointId((current) => (current && list.some((point) => point.id === current) ? current : null));
+      return data;
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Не удалось подобрать пункт отгрузки.";
-      setResolveError(message);
-      toast.error(message);
+      toast.error(error instanceof Error ? error.message : "Не удалось обновить пункты отгрузки.");
+      return null;
     } finally {
       setBusy(null);
     }
-  }, [taskId]);
+  }
+
+  async function addCity() {
+    const city = newCity.trim();
+    if (!city) return;
+    const data = await dropoffRequest({ city, cargoType: 1 }, "city");
+    if (data) {
+      setNewCity("");
+      toast.success(`${city}: пунктов отгрузки ${data.found ?? 0}`);
+    }
+  }
+
+  async function reloadCity(city: string) {
+    const data = await dropoffRequest({ city, cargoType: 1 }, `city:${city}`);
+    if (data) toast.success(`${city}: список обновлён, пунктов ${data.found ?? 0}`);
+  }
+
+  async function removeCity(city: string) {
+    await dropoffRequest({ action: "remove_city", city }, `city:${city}`);
+  }
+
+  async function suggestFromCabinet() {
+    if (!taskId) return;
+    const data = await dropoffRequest({ action: "suggest", taskId }, "suggest");
+    if (!data) return;
+    const resolved: DropoffResolution = {
+      city: data.city ?? "",
+      officeName: data.officeName ?? null,
+      officeAddress: data.officeAddress ?? null,
+      found: data.found ?? 0,
+      recommendedPointId: data.recommendedPointId ?? null,
+      confident: Boolean(data.confident),
+      distance: data.distance ?? null,
+    };
+    setResolution(resolved);
+    if (!resolved.confident) {
+      toast.warning("Точного пункта для склада сдачи из кабинета WB нет — выберите пункт сами", {
+        description: resolved.officeAddress ?? undefined,
+      });
+    }
+  }
 
   async function createSupply() {
     if (!taskId) return;
@@ -247,21 +273,28 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
 
   const selectedTask = tasks.find((item) => item.id === taskId) ?? null;
 
-  // Задание WB без подобранного места сдачи — подбираем сразу, без кнопки.
-  useEffect(() => {
-    if (loading || !taskId || busy !== null || dropoffCity) return;
-    if (selectedTask?.marketplaceId !== "wildberries") return;
-    if (autoResolved.current.has(taskId)) return;
-    autoResolved.current.add(taskId);
-    void refreshPoints({ silent: true });
-  }, [loading, taskId, busy, dropoffCity, selectedTask, refreshPoints]);
+  // Список пунктов с фильтром по адресу. Выбранный пункт остаётся в списке,
+  // даже если не подходит под фильтр, — иначе select молча сбросит выбор.
+  const groupedPoints = useMemo<Array<[string, DropoffPoint[]]>>(() => {
+    const query = normalize(pointFilter).trim();
+    const visible = points.filter((point) => (
+      (!selectedTask || point.marketplaceId === selectedTask.marketplaceId)
+      && (!query || point.id === pointId || normalize(`${point.address} ${point.name}`).includes(query))
+    ));
+    const groups = new Map<string, DropoffPoint[]>();
+    for (const point of visible) {
+      const city = cityOf(point, cities);
+      groups.set(city, [...(groups.get(city) ?? []), point]);
+    }
+    return [...groups.entries()];
+  }, [points, pointFilter, pointId, cities, selectedTask]);
 
   if (loading) {
     return <div className="grid min-h-72 place-items-center text-sm text-muted-foreground"><Loader2 className="mr-2 inline size-4 animate-spin" />Загружаем поставки…</div>;
   }
 
   const task = selectedTask;
-  const marketplacePoints = points.filter((point) => !task || point.marketplaceId === task.marketplaceId);
+  const selectedPoint = points.find((point) => point.id === pointId) ?? null;
 
   return (
     <div className="mx-auto max-w-[1200px] space-y-6 p-4 md:p-7">
@@ -284,8 +317,6 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
                   const next = Number(event.target.value);
                   setTaskId(Number.isFinite(next) && next > 0 ? next : null);
                   setResolution(null);
-                  setResolveError(null);
-                  setDropoffCity(null);
                 }}
               >
                 <option value="">Выберите задание…</option>
@@ -297,25 +328,29 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
                 ))}
               </NativeSelect>
             </div>
-            <div className="space-y-1">
-              <Label className="text-xs">Пункт отгрузки{dropoffCity ? ` · ${dropoffCity}` : ""}</Label>
+            {task?.marketplaceId !== "ozon" ? <div className="space-y-1">
+              <Label className="text-xs">Пункт отгрузки — куда фактически повезёте коробки</Label>
               <NativeSelect
-                className="w-96"
+                className="w-[28rem] max-w-full"
                 value={pointId ?? ""}
                 onChange={(event) => {
                   const next = Number(event.target.value);
                   setPointId(Number.isFinite(next) && next > 0 ? next : null);
                 }}
               >
-                <option value="">Не выбрана</option>
-                {marketplacePoints.map((point) => (
-                  <option key={point.id} value={point.id}>
-                    {point.id === resolution?.recommendedPointId && resolution.confident ? "★ " : ""}
-                    {pointLabel(point)}
-                  </option>
+                <option value="">Выберите пункт…</option>
+                {groupedPoints.map(([city, list]: [string, DropoffPoint[]]) => (
+                  <optgroup key={city} label={`${city} · ${list.length}`}>
+                    {list.map((point) => (
+                      <option key={point.id} value={point.id}>
+                        {point.id === resolution?.recommendedPointId && resolution.confident ? "★ " : ""}
+                        {pointLabel(point)}
+                      </option>
+                    ))}
+                  </optgroup>
                 ))}
               </NativeSelect>
-            </div>
+            </div> : null}
             <div className="space-y-1">
               <Label className="text-xs">Коробов</Label>
               <Input className="w-24" inputMode="numeric" value={boxCount} onChange={(event) => setBoxCount(event.target.value)} />
@@ -323,31 +358,77 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
             <Button disabled={!taskId || Boolean(blocker) || busy !== null || !canManage} onClick={() => void createSupply()}>
               {busy === "create" ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Оформить поставку
             </Button>
-            <Button variant="ghost" disabled={busy !== null || !taskId} onClick={() => void refreshPoints()}>
-              {busy === "points" ? <Loader2 className="size-4 animate-spin" /> : <MapPin className="size-4" />} Подобрать пункт отгрузки
-            </Button>
           </div>
 
-          {task?.marketplaceId === "wildberries" && resolution ? (
-            <p className="flex items-start gap-2 text-xs text-muted-foreground">
-              <MapPin className="mt-0.5 size-3.5 shrink-0" />
-              <span>
-                Склад сдачи в кабинете WB: {resolution.officeName ?? "—"}
-                {resolution.officeAddress ? ` — ${resolution.officeAddress}` : ""}.{" "}
-                {resolution.confident
-                  ? `Пункт отгрузки подобран${resolution.distance !== null ? ` (${resolution.distance} м от склада сдачи)` : ""}, отмечен звёздочкой.`
-                  : "Точного совпадения в справочнике пунктов отгрузки нет — выберите пункт вручную."}
-              </span>
-            </p>
-          ) : null}
+          {task?.marketplaceId === "wildberries" ? (
+            <div className="space-y-3 rounded-xl border bg-muted/30 px-4 py-3">
+              <div className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="flex items-center gap-1 text-muted-foreground"><MapPin className="size-4" /> Города отгрузки:</span>
+                {cities.length === 0 ? <span className="text-muted-foreground">не заданы</span> : null}
+                {cities.map((city) => (
+                  <span key={city} className="inline-flex items-center gap-1 rounded-full border bg-background py-0.5 pl-3 pr-1">
+                    <button
+                      type="button"
+                      className="hover:underline"
+                      title="Обновить пункты этого города из WB"
+                      disabled={busy !== null}
+                      onClick={() => void reloadCity(city)}
+                    >
+                      {busy === `city:${city}` ? <Loader2 className="mr-1 inline size-3 animate-spin" /> : null}{city}
+                    </button>
+                    <button
+                      type="button"
+                      className="rounded-full p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground"
+                      title="Убрать город из списка"
+                      disabled={busy !== null}
+                      onClick={() => void removeCity(city)}
+                    >
+                      <X className="size-3.5" />
+                    </button>
+                  </span>
+                ))}
+                <form
+                  className="flex items-center gap-1"
+                  onSubmit={(event) => { event.preventDefault(); void addCity(); }}
+                >
+                  <Input className="h-8 w-44" placeholder="Добавить город" value={newCity} onChange={(event) => setNewCity(event.target.value)} />
+                  <Button type="submit" size="sm" variant="outline" disabled={busy !== null || !newCity.trim()}>
+                    {busy === "city" ? <Loader2 className="size-4 animate-spin" /> : <Plus className="size-4" />} Добавить
+                  </Button>
+                </form>
+                <Button size="sm" variant="ghost" disabled={busy !== null || !taskId} onClick={() => void suggestFromCabinet()}>
+                  {busy === "suggest" ? <Loader2 className="size-4 animate-spin" /> : <Sparkles className="size-4" />} Подсказка из кабинета WB
+                </Button>
+              </div>
 
-          {task?.marketplaceId === "wildberries" && resolveError ? (
-            <div className="flex flex-wrap items-end gap-2 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              <p className="basis-full">{resolveError} Можно найти пункты по городу вручную:</p>
-              <Input className="w-56 bg-white" placeholder="Город, например Ярославль" value={manualCity} onChange={(event) => setManualCity(event.target.value)} />
-              <Button size="sm" variant="outline" disabled={busy !== null || !manualCity.trim()} onClick={() => void refreshPoints({ city: manualCity.trim() })}>
-                Найти пункты
-              </Button>
+              {points.length > 12 ? (
+                <Input
+                  className="h-8 w-72"
+                  placeholder="Найти пункт по адресу: улица, дом"
+                  value={pointFilter}
+                  onChange={(event) => setPointFilter(event.target.value)}
+                />
+              ) : null}
+
+              {selectedPoint ? (
+                <p className="text-xs text-muted-foreground">
+                  {selectedPoint.officeType === "pp"
+                    ? "ПВЗ: Wildberries требует короба — будут заведены короба по числу в поле «Коробов» и напечатаны их стикеры."
+                    : "Сортировочный центр или склад WB: короба не заводятся, печатается QR поставки."}
+                </p>
+              ) : null}
+
+              {resolution ? (
+                <p className="text-xs text-muted-foreground">
+                  В кабинете WB к складу задания привязан склад сдачи: {resolution.officeName ?? "—"}
+                  {resolution.officeAddress ? ` — ${resolution.officeAddress}` : ""}.{" "}
+                  {resolution.confident ? "Подходящий пункт отмечен ★ — выбирать его не обязательно." : "Точного пункта для него в справочнике нет."}
+                </p>
+              ) : null}
+
+              {dropoffProblems.length > 0 ? (
+                <p className="text-xs text-amber-800">Не загрузились пункты: {dropoffProblems.join("; ")}</p>
+              ) : null}
             </div>
           ) : null}
 
