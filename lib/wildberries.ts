@@ -180,7 +180,9 @@ export async function getWildberriesCards(token: string) {
   let updatedAt: string | undefined;
   let nmID: number | undefined;
 
-  for (let page = 0; page < 40; page += 1) {
+  // Страниц по 100 карточек: 40 страниц не хватало на весь ассортимент, а
+  // карточки, до которых обход не дошёл, теряли размер в задании на сборку.
+  for (let page = 0; page < 200; page += 1) {
     const payload = await wildberriesRequest<{
       cards?: WildberriesCard[];
       cursor?: { updatedAt?: string; nmID?: number; total?: number };

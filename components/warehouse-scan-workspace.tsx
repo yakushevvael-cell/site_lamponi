@@ -97,7 +97,7 @@ type ScanItem = {
 type Outcome =
   | { status: "ok"; item: ScanItem; label: { marketplaceId: string; externalOrderId: string; contentType: string } }
   | { status: "grouped"; uin: string; item: ScanItem; slot: number | null; scanned: number; total: number; complete: boolean }
-  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string }
+  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string; updSize: string | null }
   | { status: "uin_unknown"; uin: string }
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
@@ -641,8 +641,10 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
                 <p className="font-mono text-2xl font-bold">{outcome.item.article}</p>
                 <p className="text-lg">
                   На Wildberries заказан размер{" "}
-                  <span className="rounded bg-amber-200 px-2 font-mono font-bold">{outcome.orderSize}</span>, а в УПД
-                  размер не указан.
+                  <span className="rounded bg-amber-200 px-2 font-mono font-bold">{outcome.orderSize}</span>, а в УПД{" "}
+                  {outcome.updSize
+                    ? <>указан <span className="rounded bg-amber-200 px-2 font-mono font-bold">{outcome.updSize}</span>.</>
+                    : "размер не указан."}
                 </p>
                 <p className="text-sm">Проверьте изделие в руках. Подтверждаете, что это тот самый размер?</p>
                 <div className="flex flex-wrap gap-2 pt-1">

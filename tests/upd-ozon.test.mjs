@@ -31,8 +31,14 @@ test("заголовки УПД узнаются в две строки и с н
 test("артикул чистится от кавычек, длинных тире и неразрывных пробелов", () => {
   assert.equal(normalizeArticle(" «К—1234» "), "К-1234");
   assert.equal(normalizeArticle("К 1234"), "К 1234");
-  assert.equal(articleKey("к-1234", "17"), "К-1234::17");
-  assert.equal(articleKey("К 1234", "17,5"), "К1234::17.5");
+  // Ключ сравнения: похожие русские буквы приводятся к латинским,
+  // поэтому «с-3064зр» из карточки WB и «С-3064зр» из 1С — один артикул.
+  assert.equal(articleKey("к-1234", "17"), "K-1234::17");
+  assert.equal(articleKey("К 1234", "17,5"), "K1234::17.5");
+  assert.equal(articleKey("с-3064зр", null), articleKey("С-3064ЗР", ""));
+  assert.equal(articleKey("Бр-2665-009р", "16,0 +"), articleKey("Бр-2665-009р", "16+"));
+  assert.equal(articleKey("К-1820р", "17,0"), articleKey("К-1820р", "17"));
+  assert.notEqual(articleKey("К-1820р", "16-20"), articleKey("К-1820р", "16"));
 });
 
 test("УИН и размер вынимаются из наименования", () => {
@@ -43,6 +49,12 @@ test("УИН и размер вынимаются из наименования"
   assert.equal(extractSize("Кольцо, размер 17,5"), "17.5");
   assert.equal(extractSize("Футболка, size: XL"), "XL");
   assert.equal(extractSize("Кольцо без размера"), null);
+  // Размеры колец: диапазон и «с плюсом» раньше обрезались до первого числа.
+  assert.equal(extractSize("Кольцо, размер 16-20, УИН 6431234567890123"), "16-20");
+  assert.equal(extractSize("Кольцо, размер 16,0 +"), "16+");
+  assert.equal(extractSize("Кольцо, размер 18,0 +"), "18+");
+  assert.equal(extractSize("Браслет, размер б/р"), "Б/Р");
+  assert.equal(extractSize("Кольцо, размер 17,0"), "17");
 });
 
 test("из строк УПД собираются пары артикул + УИН", () => {

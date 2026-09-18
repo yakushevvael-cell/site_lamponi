@@ -34,7 +34,7 @@ import {
 } from "@/lib/ozon-exemplars.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import { ensureWildberriesSupply } from "@/lib/supplies";
-import { articleKey } from "@/lib/upd-parse-core.mjs";
+import { articleKey, normalizeSizeValue } from "@/lib/upd-parse-core.mjs";
 import {
   addOrdersToWildberriesSupply,
   getWildberriesStickers,
@@ -663,7 +663,7 @@ export async function readPostingBoard(db: D1Database, taskId: number): Promise<
 export type ScanOutcome =
   | { status: "ok"; item: ScanItem; label: { marketplaceId: string; externalOrderId: string; contentType: string } }
   | { status: "grouped"; uin: string; item: ScanItem; slot: number | null; scanned: number; total: number; complete: boolean }
-  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string }
+  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string; updSize: string | null }
   | { status: "uin_unknown"; uin: string }
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
@@ -745,21 +745,32 @@ export async function resolveScan(
     .bind(uin).first<{ uin: string; article: string; size: string | null }>();
   if (!known) return { status: "uin_unknown", uin };
 
+  // Артикул сравнивается в коде, а не в SQL: SQLite не знает регистра кириллицы,
+  // и «с-3064зр» из карточки WB не равно «С-3064зр» из 1С. Поэтому из базы
+  // берутся строки заданий за последний месяц, а отбор идёт по ключу артикула.
   const candidates = await db.prepare(
     `SELECT ti.id AS itemId, ti.task_id AS taskId, ti.marketplace_id AS marketplaceId,
             ti.external_order_id AS externalOrderId, ti.article, ti.size, ti.cell_code AS cellCode,
-            ti.scanned_at AS scannedAt, t.number AS taskNumber, t.status AS taskStatus
+            ti.scanned_at AS scannedAt, ti.uin AS itemUin, t.number AS taskNumber, t.status AS taskStatus
      FROM pick_task_items ti
      JOIN pick_tasks t ON t.id = ti.task_id
      WHERE ti.status <> 'not_found' AND t.status <> 'cancelled'
-       AND (ti.uin = ? OR ti.article = ?)
+       AND (ti.uin = ? OR t.created_at >= datetime('now', '-45 day'))
      ORDER BY CASE WHEN ti.uin = ? THEN 0 ELSE 1 END, ti.task_id DESC, ti.id`,
-  ).bind(uin, known.article, uin).all<ScanItem & { taskNumber: string | null; taskStatus: string }>();
+  ).bind(uin, uin).all<ScanItem & { itemUin: string | null; taskNumber: string | null; taskStatus: string }>();
 
-  const rows = candidates.results.filter((row) => {
-    if (!known.size || !row.size) return true;
-    return articleKey(row.article, row.size) === articleKey(known.article, known.size);
-  });
+  const articleOnly = articleKey(known.article, null) as string;
+  const withSize = articleKey(known.article, known.size) as string;
+  const sameArticle = candidates.results.filter(
+    (row) => row.itemUin === uin || (articleKey(row.article, null) as string) === articleOnly,
+  );
+
+  // Размер из УПД — подсказка, а не фильтр: у колец он либо не приходит вовсе
+  // («б/р», «16-20», «16,0 +»), либо записан иначе, чем в заказе. Точное
+  // совпадение выигрывает, но если его нет, строку не прячем — размер
+  // подтверждает человек.
+  const exactSize = sameArticle.filter((row) => (articleKey(row.article, row.size) as string) === withSize);
+  const rows = exactSize.length > 0 ? exactSize : sameArticle;
 
   const inTask = rows.filter((row) => row.taskId === input.taskId);
   if (inTask.length === 0) {
@@ -778,11 +789,13 @@ export async function resolveScan(
 
   const orderSize = String(target.size ?? "").trim();
   const updSize = String(known.size ?? "").trim();
+  const sizeMatches = normalizeSizeValue(orderSize) === normalizeSizeValue(updSize);
 
-  // Размер на Wildberries («16-20», «18,0+», «б/р») в УПД не приходит вовсе.
-  // Решение — за человеком: подтвердил, значит изделие то самое.
-  if (target.marketplaceId === "wildberries" && orderSize && !updSize && input.confirmSize !== true) {
-    return { status: "size_confirm", uin, item: target, orderSize };
+  // Размер на Wildberries («16-20», «18,0 +», «б/р») в УПД либо не приходит
+  // вовсе, либо записан иначе. Решение — за человеком: подтвердил, значит
+  // изделие то самое.
+  if (target.marketplaceId === "wildberries" && orderSize && !sizeMatches && input.confirmSize !== true) {
+    return { status: "size_confirm", uin, item: target, orderSize, updSize: updSize || null };
   }
 
   const postingItems = await db.prepare(

@@ -15,6 +15,7 @@ import {
   getWildberriesOrders,
   getWildberriesOrderStatuses,
   getWildberriesSupplies,
+  type WildberriesCard,
   type WildberriesOrder,
   type WildberriesOrderStatus,
 } from "@/lib/wildberries";
@@ -216,11 +217,27 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
      ON CONFLICT(id) DO NOTHING`,
   ).run();
   const localProducts = await readLocalProducts(db);
+  let cards: WildberriesCard[] = [];
   try {
-    const cards = await getWildberriesCards(token);
+    cards = await getWildberriesCards(token);
     await saveMappings(db, "wildberries", matchWildberriesCatalog(localProducts, cards));
   } catch {
     // Заказы остаются доступны даже если у ключа нет отдельного права «Контент».
+  }
+  // Размер и артикул из карточки WB по chrtId. Сопоставление с 1С бывает
+  // неполным — товара может не быть в последней ОСВ, — и тогда в задании у
+  // кольца не было размера. Карточка знает размер заказанного chrtId точно.
+  const cardByChrt = new Map<string, { article: string | null; size: string | null }>();
+  for (const card of cards) {
+    for (const size of card.sizes ?? []) {
+      if (typeof size.chrtID !== "number") continue;
+      const value = String(size.techSize ?? size.wbSize ?? "").trim();
+      cardByChrt.set(String(size.chrtID), {
+        article: String(card.vendorCode ?? "").trim() || null,
+        // «0» и пустая строка у WB значат «размера нет», а не размер 0.
+        size: value && value !== "0" ? value : null,
+      });
+    }
   }
   const mappingIndex = await readMappingIndex(db, "wildberries");
   const remoteOrders = await getWildberriesOrders(token, days);
@@ -241,6 +258,7 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
   const normalized = remoteOrders.map((order: WildberriesOrder): NormalizedOrder => {
     const externalSku = String(order.chrtId);
     const mapping = mappingIndex.get(externalSku);
+    const card = cardByChrt.get(externalSku);
     const info = wbStatusInfo(statusById.get(order.id));
     const price = Number(order.convertedFinalPrice ?? order.convertedPrice ?? order.finalPrice ?? order.price ?? 0) / 100;
     return {
@@ -267,8 +285,8 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
       items: [{
         externalSku,
         productSku: mapping?.sourceSku ?? null,
-        sellerArticle: mapping?.article ?? order.article ?? externalSku,
-        size: mapping?.size ?? null,
+        sellerArticle: mapping?.article ?? card?.article ?? order.article ?? externalSku,
+        size: mapping?.size ?? card?.size ?? null,
         quantity: 1,
         unitPrice: price,
       }],
