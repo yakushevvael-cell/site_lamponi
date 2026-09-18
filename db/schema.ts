@@ -478,8 +478,15 @@ export const pickTasks = sqliteTable(
     cancelledAt: text("cancelled_at"),
     printedAt: text("printed_at"),
     comment: text("comment"),
+    /** Штрихкод листа подбора: 12 цифр, свой у каждого задания и неповторяемый. */
+    barcode: text("barcode"),
+    /** Отгрузку закрыли руками в кабинете площадки — храним отдельно от closed. */
+    manualCloseAt: text("manual_close_at"),
+    manualCloseBy: text("manual_close_by"),
+    manualCloseNote: text("manual_close_note"),
   },
   (table) => [
+    uniqueIndex("pick_task_barcode_unique").on(table.barcode),
     uniqueIndex("pick_task_number_unique").on(table.number),
     index("pick_task_status_idx").on(table.status, table.createdAt),
     index("pick_task_assignee_idx").on(table.assigneeEmail, table.status),
@@ -718,6 +725,9 @@ export const supplies = sqliteTable(
     createdBy: text("created_by"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     closedAt: text("closed_at"),
+    /** Поставку оформили руками в кабинете площадки, а не через сайт. */
+    closedManually: integer("closed_manually").notNull().default(0),
+    closedBy: text("closed_by"),
   },
   (table) => [index("supply_task_idx").on(table.taskId), index("supply_created_idx").on(table.createdAt)],
 );

@@ -9,6 +9,7 @@
  * попасть в два задания. Два кладовщика, нажавшие кнопку одновременно, не
  * выдадут сборщикам один и тот же товар.
  */
+import { generatePickSheetCode, parsePickSheetScan } from "@/lib/barcode39.mjs";
 import {
   attachCells,
   buildTaskNumber,
@@ -78,6 +79,11 @@ export type PickTask = {
   cancelledAt: string | null;
   printedAt: string | null;
   comment: string | null;
+  /** Код листа подбора: 12 цифр, свой у каждого задания. */
+  barcode: string | null;
+  manualCloseAt: string | null;
+  manualCloseBy: string | null;
+  manualCloseNote: string | null;
 };
 
 export type PickTaskItem = {
@@ -424,12 +430,33 @@ async function insertTask(
   const routed = sortByRoute(attachCells(flat, input.placements)) as Array<CandidateRow & { cellCode: string | null; cellSort: number | null }>;
   if (routed.length === 0) return null;
 
-  const insert = await db.prepare(
-    `INSERT INTO pick_tasks (number, marketplace_id, warehouse_external_id, warehouse_name, status, created_by)
-     VALUES (?, ?, ?, ?, 'created', ?)`,
-  ).bind(input.number, input.marketplaceId, input.warehouseExternalId, input.warehouseName, input.actorEmail).run();
-  const taskId = Number(insert.meta.last_row_id ?? 0);
-  if (!taskId) return null;
+  // Код листа подбора выдаётся сразу: на нём держится и печать листа, и
+  // работа стола упаковки. Уникальный индекс в базе не даст выдать один код
+  // дважды, поэтому при столкновении просто берём следующий.
+  let taskId = 0;
+  let lastError: unknown = null;
+  for (let attempt = 0; attempt < 5 && taskId === 0; attempt += 1) {
+    try {
+      const insert = await db.prepare(
+        `INSERT INTO pick_tasks (number, marketplace_id, warehouse_external_id, warehouse_name, status, created_by, barcode)
+         VALUES (?, ?, ?, ?, 'created', ?, ?)`,
+      ).bind(
+        input.number,
+        input.marketplaceId,
+        input.warehouseExternalId,
+        input.warehouseName,
+        input.actorEmail,
+        generatePickSheetCode() as string,
+      ).run();
+      taskId = Number(insert.meta.last_row_id ?? 0);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  if (!taskId) {
+    if (lastError) throw lastError;
+    return null;
+  }
 
   // ON CONFLICT DO NOTHING: если тот же товар успел уйти в другое задание,
   // строка просто не добавится, а задание пересчитает свои счётчики по факту.
@@ -533,7 +560,9 @@ const TASK_COLUMNS = `
   order_count AS orderCount, item_count AS itemCount, unit_count AS unitCount,
   picked_count AS pickedCount, not_found_count AS notFoundCount, cell_count AS cellCount,
   created_by AS createdBy, created_at AS createdAt, issued_at AS issuedAt, picked_at AS pickedAt,
-  shipped_at AS shippedAt, cancelled_at AS cancelledAt, printed_at AS printedAt, comment
+  shipped_at AS shippedAt, cancelled_at AS cancelledAt, printed_at AS printedAt, comment,
+  barcode, manual_close_at AS manualCloseAt, manual_close_by AS manualCloseBy,
+  manual_close_note AS manualCloseNote
 `;
 
 export async function readTaskList(
@@ -697,6 +726,77 @@ export async function markAllPicked(db: D1Database, taskId: number, actorEmail: 
     });
   }
   return { ok: true as const, marked, task: await readTask(db, taskId) };
+}
+
+/**
+ * Задание по скану листа подбора.
+ *
+ * На новых листах в штрихкоде едет код задания (12 цифр), на листах, которые
+ * напечатали раньше, — номер задания в базе. Оба варианта находят задание, но
+ * вручную номер задания подставить нельзя: код в листе для этого и нужен.
+ */
+export async function findTaskByPickSheet(db: D1Database, value: string) {
+  const scan = parsePickSheetScan(value) as { code: string | null; taskId: number | null } | null;
+  if (!scan) return null;
+  if (scan.code) {
+    return db.prepare(`SELECT ${TASK_COLUMNS} FROM pick_tasks WHERE barcode = ?`).bind(scan.code).first<PickTask>();
+  }
+  return scan.taskId ? readTask(db, scan.taskId) : null;
+}
+
+/**
+ * Ручное закрытие отгрузки.
+ *
+ * Часть поставок оформляют руками в кабинете площадки — например, когда
+ * поставка уже создана там, а на сайте задание осталось «собрано» и висит
+ * неотгруженным. Отметка хранится отдельно от обычного закрытия: в задании
+ * видно, что отгрузку закрыл человек, кто именно и когда, а поставка по
+ * заданию помечается как оформленная вручную.
+ */
+export async function closeShipmentManually(
+  db: D1Database,
+  taskId: number,
+  actorEmail: string,
+  note: string | null,
+) {
+  const task = await readTask(db, taskId);
+  if (!task) return { ok: false as const, error: "Задание не найдено." };
+  if (task.status === "cancelled") return { ok: false as const, error: `Задание ${task.number} отменено.` };
+  if (task.manualCloseAt) return { ok: false as const, error: `Задание ${task.number} уже закрыто вручную.` };
+
+  const comment = note && note.trim() ? note.trim().slice(0, 500) : null;
+  await db.batch([
+    db.prepare(
+      `UPDATE pick_tasks
+       SET status = 'shipped',
+           shipped_at = COALESCE(shipped_at, CURRENT_TIMESTAMP),
+           picked_at = COALESCE(picked_at, CURRENT_TIMESTAMP),
+           manual_close_at = CURRENT_TIMESTAMP,
+           manual_close_by = ?,
+           manual_close_note = ?
+       WHERE id = ?`,
+    ).bind(actorEmail, comment, taskId),
+    // Поставка по заданию могла остаться открытой: закрываем её той же
+    // отметкой, иначе она продолжит числиться незакрытой.
+    db.prepare(
+      `UPDATE supplies
+       SET status = 'closed',
+           closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP),
+           closed_manually = 1,
+           closed_by = ?
+       WHERE task_id = ? AND status <> 'closed'`,
+    ).bind(actorEmail, taskId),
+  ]);
+
+  await logWarehouseEvent(db, {
+    kind: "shipment_closed_manually",
+    taskId,
+    taskNumber: task.number,
+    marketplaceId: task.marketplaceId,
+    actorEmail,
+    payload: { note: comment, statusBefore: task.status, pickedAt: task.pickedAt },
+  });
+  return { ok: true as const, task: await readTask(db, taskId) };
 }
 
 /**

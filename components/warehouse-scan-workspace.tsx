@@ -18,8 +18,9 @@
  *   — на Wildberries размер у заказа есть, а в УПД его нет: поле ввода
  *     блокируется, пока человек не подтвердит или не отклонит.
  *
- * Собранное задание принимается на стол сканом штрихкода с листа подбора:
- * отдельным полем или прямо в поле УИН — код T123 от УИН отличается буквой.
+ * Работа начинается со скана листа подбора: пока лист не отсканирован, поле
+ * принимает только его код (12 цифр), и выбрать задание из списка нельзя —
+ * так на столе не окажется чужая партия. Дальше то же поле принимает УИН.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -41,9 +42,8 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
-import { NativeSelect } from "@/components/ui/native-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { parseTaskBarcode } from "@/lib/barcode39.mjs";
+import { parsePickSheetScan } from "@/lib/barcode39.mjs";
 import { formatMoment } from "@/lib/utils";
 
 type Task = {
@@ -142,9 +142,12 @@ const OUTCOME_TEXT: Record<Outcome["status"], string> = {
   label_not_ready: "Этикетка ещё не готова",
 };
 
-export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: number | null }) {
+export function WarehouseScanWorkspace() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [taskId, setTaskId] = useState<number | null>(initialTaskId);
+  const [taskId, setTaskId] = useState<number | null>(null);
+  // Код с листа подбора: пропуск к упаковке. Уходит с каждым сканом, и сервер
+  // проверяет его сам — без листа скан УИН не принимается.
+  const [sheetCode, setSheetCode] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [labelErrors, setLabelErrors] = useState<LabelError[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
@@ -153,8 +156,7 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [value, setValue] = useState("");
   const [busy, setBusy] = useState(false);
-  const [receiveCode, setReceiveCode] = useState("");
-  const [receiveConfirm, setReceiveConfirm] = useState<{ taskId: number; number: string; pendingCount: number } | null>(null);
+  const [receiveConfirm, setReceiveConfirm] = useState<{ code: string; number: string; pendingCount: number } | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [offline, setOffline] = useState(false);
   const [updInfo, setUpdInfo] = useState<{ total: number; free: number } | null>(null);
@@ -171,7 +173,6 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     // На столе упаковки нужны собранные задания: до них товар не доходит.
     const usable = (data.tasks ?? []).filter((task) => task.status === "picked" || task.status === "issued");
     setTasks(usable);
-    setTaskId((current) => current ?? usable[0]?.id ?? null);
   }, []);
 
   const loadUpd = useCallback(async () => {
@@ -285,8 +286,8 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
     };
   }
 
-  /** Приём задания по скану листа подбора. */
-  async function receiveTask(input: { code?: string; taskId?: number; confirm?: boolean }) {
+  /** Приём задания по скану листа подбора — единственный вход на стол. */
+  async function receiveTask(input: { code: string; confirm?: boolean }) {
     setBusy(true);
     try {
       const response = await fetch("/api/warehouse/receive", {
@@ -300,13 +301,14 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
       };
       if (!response.ok || !data.task) throw new Error(data.error ?? "Задание не принято.");
       if (data.needsConfirm) {
-        setReceiveConfirm({ taskId: data.task.id, number: data.task.number, pendingCount: data.pendingCount ?? 0 });
+        setReceiveConfirm({ code: input.code, number: data.task.number, pendingCount: data.pendingCount ?? 0 });
         beep("warn");
         return;
       }
       setReceiveConfirm(null);
       await loadTasks();
       setTaskId(data.task.id);
+      setSheetCode(input.code);
       setOutcome(null);
       beep("ok");
       toast.success(`Задание ${data.task.number} принято на упаковку`, {
@@ -316,7 +318,6 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
       beep("error");
       toast.error(error instanceof Error ? error.message : "Задание не принято.");
     } finally {
-      setReceiveCode("");
       setBusy(false);
       window.setTimeout(() => inputRef.current?.focus(), 0);
     }
@@ -324,16 +325,17 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
 
   async function submitScan(raw: string, confirmSize = false) {
     const uin = raw.trim();
-    // Лист подбора отсканировали в поле УИН — это приём задания, а не изделие.
-    if (parseTaskBarcode(uin)) {
+    if (!uin) return;
+    // Лист подбора в поле УИН — это приём задания, а не изделие. Он же меняет
+    // задание на столе: отсканировали другой лист — упаковка идёт по нему.
+    if (parsePickSheetScan(uin)) {
       setValue("");
       await receiveTask({ code: uin });
       return;
     }
-    if (!uin) return;
-    if (!taskId) {
+    if (!taskId || !sheetCode) {
       beep("warn");
-      toast.warning("Сначала отсканируйте лист подбора или выберите задание.");
+      toast.warning("Сначала отсканируйте штрихкод листа подбора.");
       setValue("");
       return;
     }
@@ -342,7 +344,7 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
       const response = await fetch("/api/warehouse/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uin, taskId, confirmSize }),
+        body: JSON.stringify({ uin, code: sheetCode, confirmSize }),
       });
       const data = await response.json() as {
         outcome?: Outcome; summary?: Summary; board?: BoardRow[]; error?: string;
@@ -458,39 +460,6 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
 
       <Card>
         <CardContent className="space-y-4 px-5">
-          <div className="flex flex-wrap items-end gap-3 rounded-xl border bg-muted/30 px-4 py-3">
-            <div className="space-y-1">
-              <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                <ClipboardCheck className="size-3.5" /> Приём собранного: штрихкод с листа подбора
-              </p>
-              <Input
-                className="h-10 w-72 font-mono"
-                placeholder="Сканируйте лист подбора"
-                value={receiveCode}
-                disabled={busy}
-                onChange={(event) => setReceiveCode(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") {
-                    event.preventDefault();
-                    const code = receiveCode.trim();
-                    if (!code) return;
-                    // В это поле по ошибке отсканировали УИН — отправляем его как изделие.
-                    if (!parseTaskBarcode(code) && taskId) {
-                      setReceiveCode("");
-                      inputRef.current?.focus();
-                      void submitScan(code);
-                      return;
-                    }
-                    void receiveTask({ code });
-                  }
-                }}
-              />
-            </div>
-            <p className="max-w-md pb-2 text-xs text-muted-foreground">
-              Задание откроется для упаковки. Лист можно сканировать и в большое поле УИН.
-            </p>
-          </div>
-
           {receiveConfirm ? (
             <div className="flex flex-wrap items-center gap-3 rounded-xl border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900">
               <AlertTriangle className="size-4" />
@@ -499,7 +468,7 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
                 {receiveConfirm.pendingCount > 0 ? <> — строк без отметки: <b>{receiveConfirm.pendingCount}</b>. Они будут считаться собранными.</> : "."}
                 {" "}Если чего-то нет — сначала отметьте «Не найден» в задании.
               </span>
-              <Button size="sm" disabled={busy} onClick={() => void receiveTask({ taskId: receiveConfirm.taskId, confirm: true })}>
+              <Button size="sm" disabled={busy} onClick={() => void receiveTask({ code: receiveConfirm.code, confirm: true })}>
                 Принять задание
               </Button>
               <Button size="sm" variant="outline" disabled={busy} onClick={() => setReceiveConfirm(null)}>
@@ -511,34 +480,37 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
           <div className="flex flex-wrap items-end justify-between gap-3">
             <div className="space-y-1">
               <p className="text-xs text-muted-foreground">Задание, по которому идёт упаковка</p>
-              <NativeSelect
-                className="w-72"
-                value={taskId ?? ""}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  setTaskId(Number.isFinite(next) && next > 0 ? next : null);
-                  setOutcome(null);
-                  // Задание выбрано — сразу обратно в поле скана, без ожидания таймера.
-                  window.setTimeout(() => inputRef.current?.focus(), 0);
-                }}
-                onKeyDown={(event) => {
-                  // Список открыли и закрыли, не выбрав, — фокус остался на нём.
-                  // Скан в этот момент не должен листать задания: первый символ
-                  // переносим в поле скана, остальные сканер допечатает уже туда.
-                  if (event.key.length !== 1 || event.key === " " || event.ctrlKey || event.altKey || event.metaKey) return;
-                  if (!taskId || busy || pendingSize) return;
-                  event.preventDefault();
-                  setValue((current) => current + event.key);
-                  inputRef.current?.focus();
-                }}
-              >
-                <option value="">Выберите задание…</option>
-                {tasks.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.number} — {item.marketplaceId === "ozon" ? "Ozon" : "WB"} · {item.itemCount} поз.
-                  </option>
-                ))}
-              </NativeSelect>
+              {/* Задание выбирает лист подбора, а не список: руками его тут
+                  выбрать нельзя — иначе на стол попадёт чужая партия. */}
+              {task && sheetCode ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xl font-bold">{task.number}</span>
+                  <Badge variant="secondary">
+                    {task.marketplaceId === "ozon" ? "Ozon" : "WB"} · {task.itemCount} поз.
+                  </Badge>
+                  <span className="font-mono text-xs text-muted-foreground">лист {sheetCode}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy}
+                    onClick={() => {
+                      setSheetCode(null);
+                      setTaskId(null);
+                      setOutcome(null);
+                      setSummary(null);
+                      setBoard([]);
+                      setLabelErrors([]);
+                      window.setTimeout(() => inputRef.current?.focus(), 0);
+                    }}
+                  >
+                    Закрыть стол
+                  </Button>
+                </div>
+              ) : (
+                <p className="flex items-center gap-2 text-lg font-semibold">
+                  <ClipboardCheck className="size-5" /> Отсканируйте лист подбора
+                </p>
+              )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
               <Badge variant="secondary">
@@ -573,7 +545,7 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
               ref={inputRef}
               autoFocus
               inputMode="numeric"
-              placeholder={pendingSize ? "Ответьте на вопрос ниже" : taskId ? "Сканируйте УИН" : "Сканируйте лист подбора"}
+              placeholder={pendingSize ? "Ответьте на вопрос ниже" : taskId && sheetCode ? "Сканируйте УИН" : "Сканируйте штрихкод листа подбора"}
               className="h-16 flex-1 min-w-64 text-center font-mono text-2xl"
               value={value}
               disabled={busy || pendingSize !== null}
@@ -601,7 +573,12 @@ export function WarehouseScanWorkspace({ initialTaskId }: { initialTaskId: numbe
 
           <div className={`rounded-2xl border px-5 py-6 ${banner}`}>
             {outcome === null ? (
-              <p className="flex items-center gap-2 text-sm"><ScanLine className="size-4" /> Отсканируйте УИН изделия — этикетка напечатается сама.</p>
+              <p className="flex items-center gap-2 text-sm">
+                <ScanLine className="size-4" />
+                {taskId && sheetCode
+                  ? "Отсканируйте УИН изделия — этикетка напечатается сама."
+                  : "Отсканируйте штрихкод листа подбора — или введите его 12 цифр руками и нажмите Enter."}
+              </p>
             ) : outcome.status === "ok" ? (
               <div className="space-y-1">
                 <p className="flex items-center gap-2 text-xl font-bold"><CheckCircle2 className="size-6" /> Этикетка на печать</p>

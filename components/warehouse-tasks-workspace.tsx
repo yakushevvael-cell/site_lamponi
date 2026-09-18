@@ -15,11 +15,11 @@ import {
   AlertTriangle,
   ArrowRight,
   Ban,
+  CheckCircle2,
   ClipboardList,
   Clock,
   Loader2,
   PackagePlus,
-  Printer,
   RefreshCw,
   Settings2,
   UserRound,
@@ -62,6 +62,10 @@ type Task = {
   issuedAt: string | null;
   pickedAt: string | null;
   printedAt: string | null;
+  barcode: string | null;
+  manualCloseAt: string | null;
+  manualCloseBy: string | null;
+  manualCloseNote: string | null;
 };
 
 type WaitingGroup = {
@@ -91,6 +95,16 @@ const MARKETPLACE_LABEL: Record<Task["marketplaceId"], string> = {
 };
 
 function StatusBadge({ task }: { task: Task }) {
+  // Отметка о ручном закрытии важнее статуса: по такому заданию поставку
+  // оформляли в кабинете площадки, и искать её документы на сайте не надо.
+  if (task.manualCloseAt) {
+    return (
+      <span className="flex flex-col items-start gap-1">
+        <Badge variant="outline">{STATUS_LABEL.shipped}</Badge>
+        <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">закрыто вручную</Badge>
+      </span>
+    );
+  }
   if (task.status === "created") return <Badge variant="secondary">{STATUS_LABEL.created}</Badge>;
   if (task.status === "issued") return <Badge className="bg-blue-100 text-blue-900 hover:bg-blue-100">{STATUS_LABEL.issued}</Badge>;
   if (task.status === "picked") return <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">{STATUS_LABEL.picked}</Badge>;
@@ -108,6 +122,8 @@ export function WarehouseTasksWorkspace() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
   const [cancelTarget, setCancelTarget] = useState<Task | null>(null);
+  const [manualTarget, setManualTarget] = useState<Task | null>(null);
+  const [manualNote, setManualNote] = useState("");
 
   const load = useCallback(async () => {
     const [tasksResponse, pickersResponse] = await Promise.all([
@@ -432,14 +448,21 @@ export function WarehouseTasksWorkspace() {
                   </TableCell>
                   <TableCell className="pr-5">
                     <div className="flex flex-wrap justify-end gap-2">
-                      <Button asChild size="sm" variant="outline">
-                        <a href={`/print/pick-sheet?task=${task.id}`} target="_blank" rel="noreferrer">
-                          <Printer className="size-4" /> Лист подбора
-                        </a>
-                      </Button>
                       <Button asChild size="sm" variant="ghost">
                         <Link href={`/warehouse/task?id=${task.id}`}>Открыть</Link>
                       </Button>
+                      {/* Лист подбора печатает сборщик на «Набрать товары»:
+                          один лист на задание, и код на нём не дублируется. */}
+                      {task.status !== "cancelled" && !task.manualCloseAt && task.status !== "shipped" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null}
+                          onClick={() => setManualTarget(task)}
+                        >
+                          <CheckCircle2 className="size-4" /> Закрыть вручную
+                        </Button>
+                      ) : null}
                       {task.status !== "shipped" && task.status !== "cancelled" ? (
                         <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={busy !== null} onClick={() => setCancelTarget(task)}>
                           <Ban className="size-4" />
@@ -456,6 +479,45 @@ export function WarehouseTasksWorkspace() {
           </Table>
         </div>
       </Card>
+
+      <AlertDialog
+        open={Boolean(manualTarget)}
+        onOpenChange={(open) => { if (!open) { setManualTarget(null); setManualNote(""); } }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Закрыть отгрузку {manualTarget?.number} вручную?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Так закрывают задания, поставку по которым оформили руками в кабинете площадки.
+              Задание перестанет числиться неотгруженным, а отметка «закрыто вручную» — кто и
+              когда — останется при задании и в журнале. Заказы и этикетки не меняются.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-1">
+            <Label htmlFor="manual-note" className="text-xs">Комментарий (необязательно)</Label>
+            <Input
+              id="manual-note"
+              placeholder="например: поставка 123456 оформлена в кабинете WB"
+              value={manualNote}
+              onChange={(event) => setManualNote(event.target.value)}
+            />
+          </div>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Не закрывать</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const task = manualTarget;
+                const comment = manualNote.trim();
+                setManualTarget(null);
+                setManualNote("");
+                if (task) void act(task, "close_manual", { comment }, "Отгрузка закрыта вручную");
+              }}
+            >
+              Закрыть вручную
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={Boolean(cancelTarget)} onOpenChange={(open) => { if (!open) setCancelTarget(null); }}>
         <AlertDialogContent>

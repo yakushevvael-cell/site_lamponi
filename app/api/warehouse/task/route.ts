@@ -10,6 +10,7 @@ import { getRuntimeEnv } from "@/lib/runtime-env";
 import {
   assignTask,
   cancelTask,
+  closeShipmentManually,
   closeTask,
   markAllPicked,
   markTaskPrinted,
@@ -110,6 +111,16 @@ export async function POST(request: Request) {
     const result = await markAllPicked(db, taskId, auth.user.email);
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ ok: true, marked: result.marked, task: result.task });
+  }
+
+  // Отгрузку закрыли руками в кабинете площадки: задание перестаёт числиться
+  // неотгруженным, но отметка «закрыто вручную» остаётся при нём навсегда.
+  if (action === "close_manual") {
+    if (!manages) return Response.json({ error: "Закрыть отгрузку вручную может кладовщик." }, { status: 403 });
+    const note = typeof body?.comment === "string" ? body.comment : null;
+    const result = await closeShipmentManually(db, taskId, auth.user.email, note);
+    if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
+    return Response.json({ ok: true, task: result.task });
   }
 
   if (action === "cancel") {

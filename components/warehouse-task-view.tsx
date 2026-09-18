@@ -171,19 +171,23 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
             <Button size="sm" variant="ghost" disabled={busy !== null} onClick={() => void load()}>
               <RefreshCw className="size-4" />
             </Button>
-            {manages ? (
+            {/* Лист печатает сборщик, за которым закреплено задание: один
+                лист на задание, и код на нём не размножается по копиям. */}
+            {own ? (
               <Button asChild size="sm" variant="outline">
                 <a href={`/print/pick-sheet?task=${task.id}`} target="_blank" rel="noreferrer"><Printer className="size-4" /> Лист подбора</a>
               </Button>
             ) : null}
+            {/* Дальше работа идёт по скану листа: номер задания в ссылке не
+                передаём — стол и поставки открывают задание сами. */}
             {manages && task.status === "picked" ? (
               <Button asChild size="sm">
-                <Link href={`/warehouse/supplies?task=${task.id}`}><Truck className="size-4" /> Оформить поставку</Link>
+                <Link href="/warehouse/supplies"><Truck className="size-4" /> Поставки</Link>
               </Button>
             ) : null}
             {manages && task.status === "picked" ? (
               <Button asChild size="sm" variant="outline">
-                <Link href={`/warehouse/scan?task=${task.id}`}>Стол сканирования</Link>
+                <Link href="/warehouse/scan">Стол сканирования</Link>
               </Button>
             ) : null}
             {!closed && !task.assigneeEmail ? (

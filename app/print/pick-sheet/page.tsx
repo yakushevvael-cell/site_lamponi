@@ -30,7 +30,10 @@ export default async function PickSheetPage({ searchParams }: { searchParams: Pr
   const task = await readTask(runtime.DB, Math.trunc(taskId));
   if (!task) return <main style={{ padding: 24, fontFamily: "system-ui" }}>Задание не найдено.</main>;
   const items = await readTaskItems(runtime.DB, task.id);
-  const barcode = code39Svg(taskBarcodeValue(task.id), { moduleWidth: 2, height: 56 }) as string;
+  // Код листа у каждого задания свой. У заданий, созданных до его появления,
+  // в штрихкоде по-прежнему едет номер задания в базе — такие листы читаются.
+  const code = taskBarcodeValue(task.barcode ?? task.id) as string;
+  const barcode = code39Svg(code, { moduleWidth: 2, height: 64 }) as string;
 
   return (
     <main className="pick-sheet">
@@ -39,8 +42,10 @@ export default async function PickSheetPage({ searchParams }: { searchParams: Pr
         .pick-sheet__head { display: flex; justify-content: space-between; align-items: flex-start; gap: 24px; border-bottom: 2px solid #111; padding-bottom: 12px; }
         .pick-sheet__number { font-size: 34px; font-weight: 800; letter-spacing: 0.02em; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
         .pick-sheet__meta { margin-top: 6px; font-size: 13px; color: #333; }
-        .pick-sheet__barcode { text-align: center; }
-        .pick-sheet__barcode small { display: block; font-family: ui-monospace, monospace; font-size: 11px; letter-spacing: 0.2em; }
+        .pick-sheet__barcode { text-align: center; border: 2px solid #111; border-radius: 6px; padding: 8px 12px 6px; }
+        .pick-sheet__barcode-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.1em; color: #444; margin-bottom: 4px; }
+        .pick-sheet__code { display: block; margin-top: 4px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 22px; font-weight: 800; letter-spacing: 0.16em; }
+        .pick-sheet__barcode-hint { font-size: 10px; color: #444; margin-top: 2px; }
         table { width: 100%; border-collapse: collapse; margin-top: 14px; font-size: 13px; }
         th, td { border-bottom: 1px solid #ccc; padding: 7px 6px; text-align: left; vertical-align: top; }
         th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.06em; color: #444; }
@@ -74,8 +79,11 @@ export default async function PickSheetPage({ searchParams }: { searchParams: Pr
           </p>
         </div>
         <div className="pick-sheet__barcode">
+          <p className="pick-sheet__barcode-title">Код листа подбора</p>
           <div dangerouslySetInnerHTML={{ __html: barcode }} />
-          <small>{taskBarcodeValue(task.id)}</small>
+          {/* Цифры крупно: если сканер не прочитал, код вводят руками. */}
+          <span className="pick-sheet__code">{code}</span>
+          <p className="pick-sheet__barcode-hint">сканировать или ввести вручную</p>
         </div>
       </header>
 

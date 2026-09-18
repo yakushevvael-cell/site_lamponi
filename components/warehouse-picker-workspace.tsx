@@ -10,7 +10,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import { ClipboardList, Loader2, PackageCheck, RefreshCw } from "lucide-react";
+import { ClipboardList, Loader2, PackageCheck, Printer, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
@@ -67,6 +67,15 @@ function TaskCard({
         </div>
         <div className="flex items-center gap-2">
           {task.status === "picked" ? <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">собрано</Badge> : null}
+          {/* Лист подбора печатает сборщик: на нём код, которым открывается
+              стол упаковки и поставка по этому заданию. */}
+          {action === "open" ? (
+            <Button asChild size="lg" variant="outline">
+              <a href={`/print/pick-sheet?task=${task.id}`} target="_blank" rel="noreferrer">
+                <Printer className="size-4" /> Лист подбора
+              </a>
+            </Button>
+          ) : null}
           <Button size="lg" disabled={busy} onClick={() => onAction(task)}>
             {busy ? <Loader2 className="size-4 animate-spin" /> : <PackageCheck className="size-4" />}
             {action === "take" ? "Взять задание" : "Открыть"}

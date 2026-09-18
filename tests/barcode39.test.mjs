@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { CODE39, code39Svg, encodeCode39, parseTaskBarcode, sanitizeCode39, taskBarcodeValue } from "../lib/barcode39.mjs";
+import {
+  CODE39,
+  PICK_SHEET_CODE_LENGTH,
+  code39Svg,
+  encodeCode39,
+  generatePickSheetCode,
+  parsePickSheetScan,
+  parseTaskBarcode,
+  pickSheetCode,
+  sanitizeCode39,
+  taskBarcodeValue,
+} from "../lib/barcode39.mjs";
 
 /** Элементы символа: чередование чёрных и белых полос. */
 function elements(pattern) {
@@ -57,4 +68,31 @@ test("скан листа подбора читается при любой ра
   assert.equal(parseTaskBarcode("6432600987653957"), null); // УИН
   assert.equal(parseTaskBarcode("T0"), null);
   assert.equal(parseTaskBarcode("TX1"), null);
+});
+
+test("код листа подбора: 12 цифр, каждый раз новый", () => {
+  const codes = new Set();
+  for (let index = 0; index < 500; index += 1) {
+    const code = generatePickSheetCode();
+    assert.match(code, /^[1-8]\d{11}$/);
+    assert.equal(code.length, PICK_SHEET_CODE_LENGTH);
+    codes.add(code);
+  }
+  // Повторов быть не должно: на этом держится «один лист — одно задание».
+  assert.equal(codes.size, 500);
+  // Девятка первой оставлена старым заданиям, которым код выдала миграция.
+  assert.equal(pickSheetCode("900000000018"), "900000000018");
+});
+
+test("лист подбора узнаётся по коду, а УИН — нет", () => {
+  assert.equal(pickSheetCode("482039157701"), "482039157701");
+  assert.equal(pickSheetCode("*482039157701*"), "482039157701");
+  assert.equal(pickSheetCode("6432600987653957"), null); // УИН, 16 цифр
+  assert.equal(pickSheetCode("48203915770"), null); // на цифру короче
+  assert.deepEqual(parsePickSheetScan("482039157701"), { code: "482039157701", taskId: null });
+  // Листы, напечатанные до кода, читаются по номеру задания в базе.
+  assert.deepEqual(parsePickSheetScan("T18"), { code: null, taskId: 18 });
+  assert.deepEqual(parsePickSheetScan("Е18"), { code: null, taskId: 18 });
+  assert.equal(parsePickSheetScan("6432600987653957"), null);
+  assert.equal(taskBarcodeValue("482039157701"), "482039157701");
 });

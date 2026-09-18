@@ -8,6 +8,7 @@ import {
   BarChart3,
   Boxes,
   Building2,
+  ChevronDown,
   ChevronRight,
   ClipboardCheck,
   ClipboardList,
@@ -28,6 +29,7 @@ import {
 
 import type { PermissionCode } from "@/lib/permission-codes";
 
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import {
   Sidebar,
   SidebarContent,
@@ -39,6 +41,9 @@ import {
   SidebarMenu,
   SidebarMenuButton,
   SidebarMenuItem,
+  SidebarMenuSub,
+  SidebarMenuSubButton,
+  SidebarMenuSubItem,
 } from "@/components/ui/sidebar";
 
 type NavItem = {
@@ -53,13 +58,21 @@ type NavItem = {
   permission?: PermissionCode;
 };
 
+/**
+ * Путь одной отгрузки — от задания до поставки — собран в один раздел и в том
+ * порядке, в каком идёт работа: сотруднику не приходится искать свою кнопку
+ * среди справочников и отчётов.
+ */
+const FBS_FLOW: NavItem[] = [
+  { href: "/warehouse", label: "Сборка и задания", icon: PackageCheck, permission: "warehouse.tasks" },
+  { href: "/warehouse/my", label: "Набрать товары", icon: ClipboardCheck, permission: "warehouse.pick" },
+  { href: "/warehouse/scan", label: "Сканирование и этикетки", icon: ScanLine, permission: "warehouse.scan" },
+  { href: "/warehouse/supplies", label: "Поставки", icon: Truck, permission: "warehouse.supply" },
+];
+
 const navigation: NavItem[] = [
   { href: "/", label: "Обзор", icon: BarChart3 },
-  { href: "/warehouse/my", label: "Моё задание", icon: ClipboardCheck, permission: "warehouse.pick" },
-  { href: "/warehouse", label: "Сборка и задания", icon: PackageCheck, permission: "warehouse.tasks" },
-  { href: "/warehouse/scan", label: "Сканирование и этикетки", icon: ScanLine, permission: "warehouse.scan" },
   { href: "/warehouse/problems", label: "Проблемные товары", icon: AlertTriangle, permission: "warehouse.problems" },
-  { href: "/warehouse/supplies", label: "Поставки", icon: Truck, permission: "warehouse.supply" },
   { href: "/warehouse/discrepancies", label: "Расхождения", icon: Scale, permission: "warehouse.problems.release" },
   { href: "/warehouse/cells", label: "Ячейки и раскладка", icon: LayoutGrid, permission: "warehouse.cells" },
   { href: "/stocks", label: "Остатки", icon: Boxes },
@@ -91,6 +104,23 @@ export function AppSidebar({
     router.refresh();
   }
 
+  const visible = (item: NavItem) => (!item.adminOnly || fullAccess)
+    && (!item.ownerOnly || owner)
+    && (!item.permission || permissions.includes(item.permission));
+
+  // «Сборка и задания» не подсвечивается, когда открыто задание сборщика:
+  // /warehouse/my и /warehouse/task — это его экран, а не список заданий.
+  const isActive = (item: NavItem) => item.href === "/"
+    ? pathname === "/"
+    : item.href === "/warehouse"
+      ? pathname === "/warehouse"
+      : item.href === "/warehouse/my"
+        ? pathname.startsWith("/warehouse/my") || pathname.startsWith("/warehouse/task")
+        : pathname.startsWith(item.href);
+
+  const flow = FBS_FLOW.filter(visible);
+  const flowActive = flow.some((item) => isActive(item));
+
   return (
     <Sidebar collapsible="icon" className="border-r-0">
       <SidebarHeader className="gap-0 border-b border-sidebar-border/70 px-4 py-5">
@@ -111,16 +141,42 @@ export function AppSidebar({
           </SidebarGroupLabel>
           <SidebarGroupContent>
             <SidebarMenu>
+              {flow.length > 0 ? (
+                <Collapsible defaultOpen={flowActive} className="group/flow">
+                  <SidebarMenuItem>
+                    <CollapsibleTrigger asChild>
+                      <SidebarMenuButton
+                        tooltip="Отгрузка FBS"
+                        isActive={flowActive}
+                        className="h-10"
+                      >
+                        <Truck />
+                        <span>Отгрузка FBS</span>
+                        <ChevronDown className="ml-auto transition-transform group-data-[state=closed]/flow:-rotate-90" />
+                      </SidebarMenuButton>
+                    </CollapsibleTrigger>
+                    <CollapsibleContent>
+                      <SidebarMenuSub className="mt-1 gap-0.5">
+                        {flow.map((item) => (
+                          <SidebarMenuSubItem key={item.href}>
+                            <SidebarMenuSubButton asChild isActive={isActive(item)} className="h-9">
+                              <Link href={item.href}>
+                                <item.icon />
+                                <span>{item.label}</span>
+                              </Link>
+                            </SidebarMenuSubButton>
+                          </SidebarMenuSubItem>
+                        ))}
+                      </SidebarMenuSub>
+                    </CollapsibleContent>
+                  </SidebarMenuItem>
+                </Collapsible>
+              ) : null}
               {navigation
                 .filter((item) => (!item.adminOnly || fullAccess) && (!item.ownerOnly || owner))
                 .filter((item) => !item.permission || permissions.includes(item.permission))
                 .map((item) => {
-                // «Сборка и задания» не должна подсвечиваться, когда открыто «Моё задание».
-                const active = item.href === "/"
-                  ? pathname === "/"
-                  : item.href === "/warehouse"
-                    ? pathname === "/warehouse" || pathname.startsWith("/warehouse/task")
-                    : pathname.startsWith(item.href);
+                const active = isActive(item);
                 return (
                   <SidebarMenuItem key={item.href}>
                     <SidebarMenuButton asChild isActive={active} tooltip={item.label} className="h-10">

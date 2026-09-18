@@ -11,7 +11,7 @@
 import { readPostingBoard, readScanSummary, resolveScan } from "@/lib/labels";
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
-import { logWarehouseEvent, readTask } from "@/lib/warehouse";
+import { findTaskByPickSheet, logWarehouseEvent } from "@/lib/warehouse";
 
 export async function POST(request: Request) {
   const auth = await authorizePermission("warehouse.scan");
@@ -21,21 +21,23 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => null) as {
     uin?: unknown;
-    taskId?: unknown;
+    code?: unknown;
     confirmSize?: unknown;
   } | null;
   const raw = typeof body?.uin === "string" ? body.uin : "";
   // Сканер иногда добавляет пробелы и перевод строки, а иногда префикс.
   const uin = raw.replace(/\s+/g, "").replace(/^УИН[:№#-]?/i, "");
-  const taskIdRaw = Number(body?.taskId);
-  const taskId = Number.isFinite(taskIdRaw) && taskIdRaw > 0 ? Math.trunc(taskIdRaw) : null;
-
   if (!uin) return Response.json({ error: "Пустой скан." }, { status: 400 });
-  if (!taskId) return Response.json({ error: "Выберите задание, по которому идёт упаковка." }, { status: 400 });
 
-  const task = await readTask(runtime.DB, taskId);
-  if (!task) return Response.json({ error: "Задание не найдено." }, { status: 404 });
+  // Задание берётся из кода листа подбора, который отсканировали на столе.
+  // Номер задания сам по себе больше не пропуск: без листа упаковки нет.
+  const code = typeof body?.code === "string" ? body.code : "";
+  const task = await findTaskByPickSheet(runtime.DB, code);
+  if (!task) {
+    return Response.json({ error: "Сначала отсканируйте штрихкод листа подбора." }, { status: 400 });
+  }
   if (task.status === "cancelled") return Response.json({ error: "Задание отменено." }, { status: 409 });
+  const taskId = task.id;
 
   const outcome = await resolveScan(runtime.DB, {
     uin,

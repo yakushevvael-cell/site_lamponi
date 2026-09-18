@@ -61,6 +61,9 @@ export type SupplyRow = {
   createdBy: string | null;
   createdAt: string;
   closedAt: string | null;
+  /** Поставку оформили руками в кабинете площадки, а не через сайт. */
+  closedManually: number;
+  closedBy: string | null;
 };
 
 const SUPPLY_COLUMNS = `
@@ -68,7 +71,8 @@ const SUPPLY_COLUMNS = `
   box_count AS boxCount, posting_count AS postingCount, dropoff_point_id AS dropoffPointId,
   dropoff_name AS dropoffName, shipping_type AS shippingType, shipping_date AS shippingDate,
   documents_json AS documentsJson, error, created_by AS createdBy,
-  created_at AS createdAt, closed_at AS closedAt
+  created_at AS createdAt, closed_at AS closedAt,
+  closed_manually AS closedManually, closed_by AS closedBy
 `;
 
 function parseDocuments(row: Pick<SupplyRow, "documentsJson">): SupplyDocument[] {

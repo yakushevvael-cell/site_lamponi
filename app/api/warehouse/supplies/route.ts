@@ -1,6 +1,7 @@
 /** Поставки: готовность задания, оформление и догрузка документов. */
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
+import { findTaskByPickSheet } from "@/lib/warehouse";
 import {
   checkSupplyReadiness,
   collectOzonActDocuments,
@@ -53,7 +54,7 @@ export async function POST(request: Request) {
 
   const body = await request.json().catch(() => null) as {
     action?: unknown;
-    taskId?: unknown;
+    code?: unknown;
     supplyId?: unknown;
     boxCount?: unknown;
     dropoffPointId?: unknown;
@@ -74,8 +75,13 @@ export async function POST(request: Request) {
     return Response.json({ ok: true, status: result.status, supply: updated ? withDocuments(updated) : null });
   }
 
-  const taskId = idFrom(body?.taskId);
-  if (!taskId) return Response.json({ error: "Не указано задание." }, { status: 400 });
+  // Поставка оформляется только по отсканированному листу подбора: задание
+  // руками больше не выбирают, чтобы поставка не ушла по чужой партии.
+  const scanned = await findTaskByPickSheet(runtime.DB, typeof body?.code === "string" ? body.code : "");
+  if (!scanned) {
+    return Response.json({ error: "Сначала отсканируйте штрихкод листа подбора." }, { status: 400 });
+  }
+  const taskId = scanned.id;
   const boxCountRaw = Number(body?.boxCount);
   const boxCount = Number.isFinite(boxCountRaw) && boxCountRaw > 0 ? Math.min(200, Math.trunc(boxCountRaw)) : 1;
   const departureDate = typeof body?.departureDate === "string" && body.departureDate.trim()

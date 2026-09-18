@@ -6,6 +6,9 @@
  * Один склад = одна поставка. Кнопка активна, когда по заданию всё
  * отсканировано и проблемные разобраны — иначе поставку потом не закрыть.
  * Документы печатаются прямо из браузера и лежат на сервере.
+ *
+ * Задание открывается сканом листа подбора: выбрать его из списка нельзя,
+ * чтобы поставка не ушла по чужой партии.
  */
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -66,6 +69,8 @@ type Supply = {
   error: string | null;
   createdAt: string;
   closedAt: string | null;
+  closedManually: number;
+  closedBy: string | null;
   documents: SupplyDocument[];
 };
 
@@ -100,9 +105,12 @@ function cityOf(point: DropoffPoint, cities: string[]) {
   return cities.find((city) => pointCity.includes(normalize(city))) ?? "Другие";
 }
 
-export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: number | null }) {
+export function WarehouseSuppliesWorkspace() {
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [taskId, setTaskId] = useState<number | null>(initialTaskId);
+  const [taskId, setTaskId] = useState<number | null>(null);
+  // Код с листа подбора: и выбор задания, и пропуск к оформлению поставки.
+  const [sheetCode, setSheetCode] = useState<string | null>(null);
+  const [sheetInput, setSheetInput] = useState("");
   const [points, setPoints] = useState<DropoffPoint[]>([]);
   const [pointId, setPointId] = useState<number | null>(null);
   const [boxCount, setBoxCount] = useState("1");
@@ -139,7 +147,6 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
     if (!response.ok) throw new Error(data.error ?? "Задания не загрузились.");
     const ready = (data.tasks ?? []).filter((task) => task.status === "picked");
     setTasks(ready);
-    setTaskId((current) => current ?? ready[0]?.id ?? null);
   }, []);
 
   const loadSupplies = useCallback(async (id: number | null) => {
@@ -165,15 +172,39 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
   }, []);
 
   useEffect(() => {
-    void Promise.all([loadTasks(), loadSupplies(initialTaskId)])
+    void Promise.all([loadTasks(), loadSupplies(null)])
       .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Не загрузилось."))
       .finally(() => setLoading(false));
-  }, [loadTasks, loadSupplies, initialTaskId]);
+  }, [loadTasks, loadSupplies]);
 
   useEffect(() => {
     if (loading) return;
     void loadSupplies(taskId).catch(() => undefined);
   }, [taskId, loading, loadSupplies]);
+
+  /** Открыть задание по листу подбора: другого способа выбрать его нет. */
+  async function openSheet(raw: string) {
+    const code = raw.trim();
+    if (!code) return;
+    setBusy("sheet");
+    try {
+      const response = await fetch(`/api/warehouse/pick-sheet?code=${encodeURIComponent(code)}`, { cache: "no-store" });
+      const data = await response.json() as { task?: { id: number; number: string; status: string }; error?: string };
+      if (!response.ok || !data.task) throw new Error(data.error ?? "Лист подбора не найден.");
+      if (data.task.status !== "picked" && data.task.status !== "shipped") {
+        throw new Error(`Задание ${data.task.number} ещё не собрано — поставку по нему рано оформлять.`);
+      }
+      await loadTasks();
+      setTaskId(data.task.id);
+      setSheetCode(code);
+      setResolution(null);
+      setSheetInput("");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "Лист подбора не найден.");
+    } finally {
+      setBusy(null);
+    }
+  }
 
   async function dropoffRequest(body: Record<string, unknown>, busyKey: string) {
     setBusy(busyKey);
@@ -249,7 +280,7 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
       const response = await fetch("/api/warehouse/supplies", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "create", taskId, boxCount: Number(boxCount), dropoffPointId: pointId }),
+        body: JSON.stringify({ action: "create", code: sheetCode, boxCount: Number(boxCount), dropoffPointId: pointId }),
       });
       const data = await response.json() as { supply?: Supply; error?: string; details?: string[] };
       if (!response.ok) {
@@ -330,25 +361,47 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
         </CardHeader>
         <CardContent className="space-y-4 px-5">
           <div className="flex flex-wrap items-end gap-3">
+            {/* Задание открывает лист подбора: скан штрихкода или те же
+                12 цифр руками, если сканер не дотянулся до стола. */}
             <div className="space-y-1">
-              <Label className="text-xs">Задание</Label>
-              <NativeSelect
-                className="w-72"
-                value={taskId ?? ""}
-                onChange={(event) => {
-                  const next = Number(event.target.value);
-                  setTaskId(Number.isFinite(next) && next > 0 ? next : null);
-                  setResolution(null);
-                }}
-              >
-                <option value="">Выберите задание…</option>
-                {tasks.map((item) => (
-                  <option key={item.id} value={item.id}>
-                    {item.number} — {item.marketplaceId === "ozon" ? "Ozon" : "WB"}
-                    {item.warehouseName ? ` · ${item.warehouseName}` : ""}
-                  </option>
-                ))}
-              </NativeSelect>
+              <Label className="text-xs" htmlFor="supply-sheet">Лист подбора</Label>
+              {task && sheetCode ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xl font-bold">{task.number}</span>
+                  <Badge variant="secondary">
+                    {task.marketplaceId === "ozon" ? "Ozon" : "WB"}
+                    {task.warehouseName ? ` · ${task.warehouseName}` : ""}
+                  </Badge>
+                  <span className="font-mono text-xs text-muted-foreground">лист {sheetCode}</span>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    disabled={busy !== null}
+                    onClick={() => {
+                      setSheetCode(null);
+                      setTaskId(null);
+                      setResolution(null);
+                    }}
+                  >
+                    Другой лист
+                  </Button>
+                </div>
+              ) : (
+                <Input
+                  id="supply-sheet"
+                  autoFocus
+                  className="h-11 w-72 font-mono text-lg"
+                  placeholder="Сканируйте лист подбора"
+                  value={sheetInput}
+                  disabled={busy !== null}
+                  onChange={(event) => setSheetInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key !== "Enter") return;
+                    event.preventDefault();
+                    void openSheet(sheetInput);
+                  }}
+                />
+              )}
             </div>
             {task?.marketplaceId !== "ozon" ? <div className="space-y-1">
               <Label className="text-xs">Пункт отгрузки — куда фактически повезёте коробки</Label>
@@ -377,7 +430,7 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
               <Label className="text-xs">Коробов</Label>
               <Input className="w-24" inputMode="numeric" value={boxCount} onChange={(event) => setBoxCount(event.target.value)} />
             </div>
-            <Button disabled={!taskId || Boolean(blocker) || busy !== null || !canManage} onClick={() => void createSupply()}>
+            <Button disabled={!taskId || !sheetCode || Boolean(blocker) || busy !== null || !canManage} onClick={() => void createSupply()}>
               {busy === "create" ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Оформить поставку
             </Button>
           </div>
@@ -500,7 +553,12 @@ export function WarehouseSuppliesWorkspace({ initialTaskId }: { initialTaskId: n
                 <div className="flex items-center gap-2">
                   {supply.status === "open" ? <Badge className="bg-sky-100 text-sky-900 hover:bg-sky-100">открыта, идёт упаковка</Badge> : null}
                   {supply.status === "error" ? <Badge variant="destructive">ошибка</Badge> : null}
-                  {supply.status === "closed" ? <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">закрыта</Badge> : null}
+                  {supply.status === "closed" && !supply.closedManually ? <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">закрыта</Badge> : null}
+                  {supply.closedManually ? (
+                    <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">
+                      закрыто вручную{supply.closedBy ? ` · ${supply.closedBy}` : ""}
+                    </Badge>
+                  ) : null}
                   {supply.marketplaceId === "ozon" ? (
                     <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void refreshDocuments(supply)}>
                       {busy === `docs:${supply.id}` ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Обновить документы
