@@ -155,6 +155,13 @@
       "when": 1789600000000,
       "tag": "0021_pick_sheet_code",
       "breakpoints": true
+    },
+    {
+      "idx": 22,
+      "version": "6",
+      "when": 1789700000000,
+      "tag": "0022_dmdk",
+      "breakpoints": true
     }
   ]
 }

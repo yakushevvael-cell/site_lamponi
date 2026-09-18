@@ -21,6 +21,7 @@ import {
   Scale,
   ScanLine,
   ScrollText,
+  ShieldCheck,
   Settings2,
   Truck,
   UploadCloud,
@@ -82,6 +83,7 @@ const navigation: NavItem[] = [
   { href: "/warehouses", label: "Склады площадок", icon: Building2 },
   { href: "/logs", label: "Журнал выгрузки", icon: ScrollText },
   { href: "/password", label: "Смена пароля", icon: KeyRound },
+  { href: "/dmdk", label: "ГИИС ДМДК", icon: ShieldCheck, ownerOnly: true },
   { href: "/settings", label: "Подключения", icon: Settings2, ownerOnly: true },
   { href: "/users", label: "Пользователи", icon: Users, adminOnly: true },
 ];

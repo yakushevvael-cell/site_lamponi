@@ -756,3 +756,151 @@ export const postingSlots = sqliteTable(
     uniqueIndex("posting_slot_number_unique").on(table.taskId, table.slot),
   ],
 );
+
+/**
+ * Настройки передачи данных в ГИИС ДМДК по каждой площадке.
+ *
+ * У WB и Ozon разные грузополучатели и разные контракты, поэтому набор один и
+ * тот же, а значения свои. Хранятся идентификаторы из справочников ГИИС, а не
+ * введённый руками текст: реквизиты спецификации должны совпасть с системой.
+ */
+export const dmdkSettings = sqliteTable("dmdk_settings", {
+  marketplaceId: text("marketplace_id").primaryKey(),
+  shipperOgrn: text("shipper_ogrn"),
+  shipperName: text("shipper_name"),
+  consigneeOgrn: text("consignee_ogrn"),
+  consigneeName: text("consignee_name"),
+  dealId: text("deal_id"),
+  dealNumber: text("deal_number"),
+  carrierOgrn: text("carrier_ogrn"),
+  carrierName: text("carrier_name"),
+  amountType: text("amount_type").notNull().default("P_SALE"),
+  currency: text("currency").notNull().default("RUB"),
+  vatRate: text("vat_rate").notNull().default("NDS_22"),
+  /** Откуда берётся цена изделия: из сборочного задания или из учёта. */
+  priceSource: text("price_source").notNull().default("order"),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(false),
+  updatedBy: text("updated_by"),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
+/** Кэш справочников ГИИС: организации, контракты, валюты. */
+export const dmdkDictionaryItems = sqliteTable(
+  "dmdk_dictionary_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    kind: text("kind").notNull(),
+    externalId: text("external_id").notNull(),
+    name: text("name").notNull(),
+    extraJson: text("extra_json").notNull().default("{}"),
+    active: integer("active", { mode: "boolean" }).notNull().default(true),
+    fetchedAt: text("fetched_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex("dmdk_dictionary_unique").on(table.kind, table.externalId)],
+);
+
+/**
+ * Спецификация задания.
+ *
+ * Состояние — копия состояния в ГИИС. По нему решается, можно ли вносить УИН в
+ * сборочные задания площадки: до приёмки получателем маркировка не пройдёт.
+ */
+export const dmdkSpecifications = sqliteTable(
+  "dmdk_specifications",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    taskId: integer("task_id"),
+    marketplaceId: text("marketplace_id").notNull(),
+    gisId: text("gis_id"),
+    number: text("number").notNull(),
+    state: text("state").notNull().default("DS_SP_COMPLETE_SET"),
+    specDate: text("spec_date"),
+    uinCount: integer("uin_count").notNull().default(0),
+    amountKopecks: integer("amount_kopecks").notNull().default(0),
+    vatKopecks: integer("vat_kopecks").notNull().default(0),
+    vatRate: text("vat_rate"),
+    fromUpd: integer("from_upd", { mode: "boolean" }).notNull().default(false),
+    updNumber: text("upd_number"),
+    manual: integer("manual", { mode: "boolean" }).notNull().default(false),
+    error: text("error"),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    filledAt: text("filled_at"),
+    sentAt: text("sent_at"),
+    acceptedAt: text("accepted_at"),
+    checkedAt: text("checked_at"),
+  },
+  (table) => [
+    uniqueIndex("dmdk_specification_number_unique").on(table.number),
+    index("dmdk_specification_task_idx").on(table.taskId),
+    index("dmdk_specification_state_idx").on(table.state, table.createdAt),
+  ],
+);
+
+/** Изделия спецификации. Цена фиксируется в момент наполнения. */
+export const dmdkSpecificationItems = sqliteTable(
+  "dmdk_specification_items",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    specificationId: integer("specification_id").notNull(),
+    uin: text("uin").notNull(),
+    article: text("article"),
+    size: text("size"),
+    externalOrderId: text("external_order_id"),
+    priceKopecks: integer("price_kopecks").notNull().default(0),
+    vatKopecks: integer("vat_kopecks").notNull().default(0),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [uniqueIndex("dmdk_specification_item_unique").on(table.specificationId, table.uin)],
+);
+
+/** Журнал обращений к сервису интеграции: что ушло, что зависло, что повторить. */
+export const dmdkRequests = sqliteTable(
+  "dmdk_requests",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    method: text("method").notNull(),
+    specificationId: integer("specification_id"),
+    messageId: text("message_id"),
+    status: text("status", { enum: ["queued", "sent", "done", "error"] }).notNull().default("queued"),
+    attempts: integer("attempts").notNull().default(0),
+    error: text("error"),
+    signed: integer("signed", { mode: "boolean" }).notNull().default(false),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    completedAt: text("completed_at"),
+  },
+  (table) => [
+    index("dmdk_request_status_idx").on(table.status, table.createdAt),
+    index("dmdk_request_spec_idx").on(table.specificationId),
+  ],
+);
+
+/** Регистр из 1С: штрихкод бирки → УИН, артикул, размер. */
+export const dmdkRegistryItems = sqliteTable(
+  "dmdk_registry_items",
+  {
+    barcode: text("barcode").primaryKey(),
+    uin: text("uin").notNull(),
+    article: text("article").notNull(),
+    size: text("size"),
+    uploadId: integer("upload_id"),
+    updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("dmdk_registry_uin_idx").on(table.uin),
+    index("dmdk_registry_article_idx").on(table.article, table.size),
+  ],
+);
+
+export const dmdkRegistryUploads = sqliteTable("dmdk_registry_uploads", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  fileName: text("file_name").notNull(),
+  rowCount: integer("row_count").notNull().default(0),
+  acceptedCount: integer("accepted_count").notNull().default(0),
+  duplicateCount: integer("duplicate_count").notNull().default(0),
+  skippedCount: integer("skipped_count").notNull().default(0),
+  warningsJson: text("warnings_json").notNull().default("[]"),
+  uploadedBy: text("uploaded_by"),
+  createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
