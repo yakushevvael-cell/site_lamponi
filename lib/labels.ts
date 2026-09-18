@@ -27,7 +27,7 @@ import {
 import {
   OZON_SHIPPED_STATUSES,
   buildExemplarSetPayload,
-  buildShipProducts,
+  buildShipPackages,
   exemplarStatusErrors,
   neededUinCount,
   normalizeLabelPostings,
@@ -461,11 +461,17 @@ async function prepareOzonLabel(
 
   let labelPostings: string[] = [input.postingNumber];
   try {
+    // Многотоварное отправление уезжает отдельными упаковками: Ozon делит его
+    // на отправления по одному изделию, и на каждое приходит своя этикетка.
     const shipped = await ozonShipPosting(
       clientId,
       apiKey,
       input.postingNumber,
-      buildShipProducts(created, Number(input.products[0]?.externalSku)) as Array<{ product_id: number; quantity: number }>,
+      buildShipPackages(
+        created,
+        Number(input.products[0]?.externalSku),
+        input.products.length > 1,
+      ) as Array<{ products: Array<{ product_id: number; quantity: number }> }>,
     );
     labelPostings = normalizeLabelPostings(shipped.result, input.postingNumber) as string[];
   } catch (error) {

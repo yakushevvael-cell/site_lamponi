@@ -613,18 +613,24 @@ export async function ozonExemplarStatus(clientId: string, apiKey: string, posti
   );
 }
 
-/** Перевод отправления в сборку. */
+/**
+ * Перевод отправления в сборку.
+ *
+ * Упаковок может быть несколько: тогда Ozon делит отправление на столько же
+ * новых, и в ответе приходят их номера. Это единственный способ разделить
+ * многотоварное отправление — отдельного метода у Ozon нет.
+ */
 export async function ozonShipPosting(
   clientId: string,
   apiKey: string,
   postingNumber: string,
-  products: Array<{ product_id: number; quantity: number }>,
+  packages: Array<{ products: Array<{ product_id: number; quantity: number }> }>,
 ) {
   return ozonRequest<{ result?: unknown }>(
     "/v4/posting/fbs/ship",
     clientId,
     apiKey,
-    { posting_number: postingNumber, packages: [{ products }], with: { additional_data: false } },
+    { posting_number: postingNumber, packages, with: { additional_data: false } },
   );
 }
 

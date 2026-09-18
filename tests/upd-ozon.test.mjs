@@ -12,6 +12,7 @@ import {
 } from "../lib/upd-parse-core.mjs";
 import {
   buildExemplarSetPayload,
+  buildShipPackages,
   buildShipProducts,
   countExemplars,
   neededUinCount,
@@ -144,6 +145,20 @@ test("состав отправления и счёт экземпляров", (
   assert.deepEqual(buildShipProducts({}, 42), [{ product_id: 42, quantity: 1 }]);
   assert.equal(countExemplars(created), 1);
   assert.equal(countExemplars({ products: [{ quantity: 2 }] }), 2);
+});
+
+test("многотоварное отправление делится на упаковки по изделию", () => {
+  const two = { products: [{ product_id: 555, quantity: 2 }, { product_id: 777, quantity: 1 }] };
+  // Без деления — одна упаковка со всем составом: поведение прежнее.
+  assert.deepEqual(buildShipPackages(two, 0, false), [{ products: buildShipProducts(two, 0) }]);
+  // С делением — по упаковке на изделие, значит и по отправлению на изделие.
+  assert.deepEqual(buildShipPackages(two, 0, true), [
+    { products: [{ product_id: 555, quantity: 1 }] },
+    { products: [{ product_id: 555, quantity: 1 }] },
+    { products: [{ product_id: 777, quantity: 1 }] },
+  ]);
+  // Одно изделие делить не на что — упаковка остаётся одна.
+  assert.deepEqual(buildShipPackages(created, 0, true), [{ products: [{ product_id: 555, quantity: 1 }] }]);
 });
 
 test("номера отправлений для этикетки не превращаются в [object Object]", () => {
