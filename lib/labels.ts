@@ -27,11 +27,13 @@ import {
 import {
   OZON_SHIPPED_STATUSES,
   buildExemplarSetPayload,
+  buildLabelLines,
   buildShipPackages,
   exemplarStatusErrors,
   neededUinCount,
   normalizeLabelPostings,
 } from "@/lib/ozon-exemplars.mjs";
+import { stampLabelLines } from "@/lib/label-stamp.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import { ensureWildberriesSupply } from "@/lib/supplies";
 import { articleKey, normalizeSizeValue } from "@/lib/upd-parse-core.mjs";
@@ -319,6 +321,7 @@ export async function prepareLabelsForTask(
           products: taken.map((entry) => ({
             externalSku: entry.item.externalSku,
             article: entry.item.article,
+            size: entry.item.size,
             uin: entry.uin,
           })),
         });
@@ -401,7 +404,7 @@ export async function prepareLabelsForTask(
 async function prepareOzonLabel(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { postingNumber: string; products: Array<{ externalSku: string; article: string; uin: string }> },
+  input: { postingNumber: string; products: Array<{ externalSku: string; article: string; size: string | null; uin: string }> },
 ) {
   const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
   if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Ключи Ozon не добавлены.");
@@ -484,7 +487,19 @@ async function prepareOzonLabel(
 
   const label = await ozonPackageLabel(clientId, apiKey, labelPostings);
   if (!label.ok) throw new Error(label.message);
-  return storeLabelFile(runtime, "ozon", input.postingNumber, label.pdf, "pdf");
+
+  // Впечатываем «артикул / размер» в нижнюю белую полосу этикетки. Строки идут
+  // в том же порядке, что и упаковки при сборке, поэтому каждая попадает на свою
+  // страницу PDF. Сбой впечатывания не должен ронять уже готовую этикетку —
+  // тогда сохраняем исходный PDF от Ozon, как было раньше.
+  let pdf: Uint8Array = label.pdf;
+  try {
+    const lines = buildLabelLines(created, input.products, input.products.length > 1) as Array<{ article: string; size: string | null }>;
+    pdf = (await stampLabelLines(label.pdf, lines)) as Uint8Array;
+  } catch (error) {
+    console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, error);
+  }
+  return storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
 }
 
 async function prepareWildberriesLabel(
