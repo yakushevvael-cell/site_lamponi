@@ -824,12 +824,19 @@ async function createYandexSupplyFlow(
   const deliveryServiceId = Number(credentials.YANDEX_DELIVERY_SERVICE_ID);
   if (!Number.isFinite(deliveryServiceId)) throw new Error("Код службы доставки в Маркете должен быть числом.");
 
-  const existingRows = await db.prepare(
-    `SELECT external_order_id AS externalOrderId, request_id AS requestId
-     FROM delivery_requests
-     WHERE marketplace_id = 'yandex' AND request_id IS NOT NULL AND status <> 'cancelled'`,
-  ).all<{ externalOrderId: string; requestId: string }>();
-  const existing = new Map(existingRows.results.map((row) => [row.externalOrderId, row.requestId]));
+  // Уже созданные заявки по этим же заказам: повторное оформление отгрузки
+  // не должно вызвать второго курьера на ту же посылку.
+  const existing = new Map<string, string>();
+  for (let start = 0; start < input.orderIds.length; start += 100) {
+    const chunk = input.orderIds.slice(start, start + 100);
+    const rows = await db.prepare(
+      `SELECT external_order_id AS externalOrderId, request_id AS requestId
+       FROM delivery_requests
+       WHERE marketplace_id = 'yandex' AND request_id IS NOT NULL AND status = 'confirmed'
+         AND external_order_id IN (${chunk.map(() => "?").join(",")})`,
+    ).bind(...chunk).all<{ externalOrderId: string; requestId: string }>();
+    for (const row of rows.results) existing.set(row.externalOrderId, row.requestId);
+  }
 
   const requestIds: string[] = [];
   const failures: string[] = [];
