@@ -11,6 +11,7 @@ import { readFile, writeFile, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 
 import { applyMigrations } from "@/lib/migrate.mjs";
+import { mergeSizeSpellings } from "@/lib/size-merge.mjs";
 import { openDatabase } from "@/lib/sqlite-d1.mjs";
 
 export type AppRuntimeEnv = {
@@ -113,6 +114,15 @@ function getDatabase(): D1Database {
   if (!migrationsPromise) {
     migrationsPromise = applyMigrations(database, migrationsPath(), (message: string) => {
       console.log(`[migrate] ${message}`);
+    }).then(async () => {
+      // «17» и «17,0» одного артикула — одна позиция. Ошибка склейки не должна
+      // останавливать сервис: пары просто останутся как были.
+      try {
+        const merged = await mergeSizeSpellings(database!);
+        if (merged.length) console.log(`[migrate] Склеено позиций по написанию размера: ${merged.length}`);
+      } catch (error) {
+        console.error("[migrate] Склейка размеров не удалась:", error);
+      }
     }).catch((error: unknown) => {
       // Ошибку миграции нельзя проглатывать: с несовпадающей схемой
       // приложение посчитает остатки неверно.

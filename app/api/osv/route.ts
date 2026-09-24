@@ -6,6 +6,7 @@ import { authorizeApi, hasAdminAccess } from "@/lib/app-auth";
 import { readEffectivePermissions } from "@/lib/permissions";
 import { parseOsvWorkbook } from "@/lib/osv-parser";
 import { rebuildReservations } from "@/lib/reservations";
+import { mergeSizeSpellings } from "@/lib/size-merge.mjs";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 
 const MAX_FILE_SIZE = 12 * 1024 * 1024;
@@ -188,6 +189,10 @@ export async function POST(request: Request) {
     await db.prepare(
       "UPDATE products SET current_physical_qty = 0, latest_upload_id = ?, updated_at = CURRENT_TIMESTAMP WHERE latest_upload_id IS NULL OR latest_upload_id <> ?",
     ).bind(upload.id, upload.id).run();
+
+    // Позиции прежних ОСВ, где размер был записан иначе («17,0» вместо «17»),
+    // сводятся к новой: сопоставления с площадками и резервы переезжают на неё.
+    await mergeSizeSpellings(db);
 
     // Резерв пересчитывается целиком: гасим только те отгрузки, которые эта ОСВ
     // уже учла (сравнение с датой ОСВ), и снимаем протухшие резервы.

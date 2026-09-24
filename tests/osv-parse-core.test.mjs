@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseOsvSheet } from "../lib/osv-parse-core.mjs";
+import { canonicalOsvSize, parseOsvSheet } from "../lib/osv-parse-core.mjs";
 
 /**
  * Мини-конструктор листа. Стили заданы так же, как их выгружает 1С:
@@ -111,6 +111,30 @@ test("одинаковые сочетания артикул+размер скл
   assert.equal(result.products.length, 1);
   assert.equal(result.products[0].quantity, 5);
   assert.ok(result.warnings.some((text) => text.includes("Объединено повторяющихся")));
+});
+
+test("17 и 17,0 у одного артикула — одна позиция", () => {
+  const result = parse([
+    [["A", "0.СГП.1, Склад", 3], ["F", 9, 3]],
+    [["A", "К-1248зр", 7], ["F", 9, 7]],
+    [["A", "17", 10], ["F", 2, 10]],
+    [["A", "17,0", 10], ["F", 3, 10]],
+    [["A", "17,5", 10], ["F", 4, 10]],
+    [["A", "Итого", 3], ["F", 9, 3]],
+  ]);
+  assert.deepEqual(
+    result.products.map((item) => [item.variantKey, item.size, item.quantity]),
+    [["К-1248зр::17", "17", 5], ["К-1248зр::17,5", "17,5", 4]],
+  );
+  assert.deepEqual(result.blockers, []);
+});
+
+test("числовой размер приводится к одному написанию, остальные не трогаются", () => {
+  assert.equal(canonicalOsvSize("17,0"), "17");
+  assert.equal(canonicalOsvSize("17.00"), "17");
+  assert.equal(canonicalOsvSize("16,50"), "16,5");
+  assert.equal(canonicalOsvSize("16,0 +"), "16,0 +");
+  assert.equal(canonicalOsvSize("XL"), "XL");
 });
 
 test("несходимость итога попадает в блокирующие расхождения", () => {
