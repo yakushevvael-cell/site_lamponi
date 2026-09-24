@@ -58,6 +58,7 @@ export type YandexOrder = {
     deliveryServiceId?: number | null;
     dates?: { fromDate?: string | null; toDate?: string | null; realDeliveryDate?: string | null } | null;
     shipments?: Array<{ id?: number; shipmentDate?: string | null; boxes?: Array<{ id?: number }> }> | null;
+    region?: { id?: number; name?: string | null; type?: string | null; parent?: { name?: string | null } | null } | null;
     address?: {
       country?: string | null;
       city?: string | null;

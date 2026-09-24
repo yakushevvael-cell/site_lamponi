@@ -41,7 +41,18 @@ export function expectedOfferKeys(product: LocalProductIdentity) {
   return sizeTokens(product.size).map((size) => `${article}${size}`);
 }
 
-export function matchOzonCatalog(localProducts: LocalProductIdentity[], catalog: OzonProduct[]) {
+/**
+ * Сопоставление по артикулу продавца.
+ *
+ * Годится для площадок, где внешний идентификатор товара — наш собственный
+ * артикул с размером: у Ozon это offerId, у Яндекс Маркета — тоже offerId.
+ * Пара принимается, только если ключ однозначен с обеих сторон: два товара с
+ * одним ключом — это ошибка каталога, и молча выбирать из них нельзя.
+ */
+function matchByOfferId(
+  localProducts: LocalProductIdentity[],
+  catalog: Array<{ offerId: string; archived?: boolean }>,
+) {
   const localByKey = new Map<string, LocalProductIdentity[]>();
   for (const product of localProducts) {
     for (const key of expectedOfferKeys(product)) {
@@ -51,7 +62,7 @@ export function matchOzonCatalog(localProducts: LocalProductIdentity[], catalog:
     }
   }
 
-  const remoteByKey = new Map<string, OzonProduct[]>();
+  const remoteByKey = new Map<string, Array<{ offerId: string }>>();
   for (const product of catalog.filter((item) => !item.archived)) {
     const key = normalizeProductKey(product.offerId);
     const rows = remoteByKey.get(key) ?? [];
@@ -66,6 +77,17 @@ export function matchOzonCatalog(localProducts: LocalProductIdentity[], catalog:
     matches.push({ ...localRows[0], externalSku: remoteRows[0].offerId });
   }
   return [...new Map(matches.map((match) => [match.sourceSku, match])).values()];
+}
+
+export function matchOzonCatalog(localProducts: LocalProductIdentity[], catalog: OzonProduct[]) {
+  return matchByOfferId(localProducts, catalog);
+}
+
+export function matchYandexCatalog(
+  localProducts: LocalProductIdentity[],
+  catalog: Array<{ offerId: string; archived?: boolean }>,
+) {
+  return matchByOfferId(localProducts, catalog);
 }
 
 export function matchWildberriesCatalog(localProducts: LocalProductIdentity[], cards: WildberriesCard[]) {
