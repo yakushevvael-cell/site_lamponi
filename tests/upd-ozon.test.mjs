@@ -18,6 +18,7 @@ import {
   neededUinCount,
   exemplarStatusErrors,
   normalizeLabelPostings,
+  readExemplarProgress,
 } from "../lib/ozon-exemplars.mjs";
 
 test("заголовки УПД узнаются в две строки и с неразрывными пробелами", () => {
@@ -121,6 +122,81 @@ test("УИН уходит маркой jw_uin, прежние марки сох�
     { mark: "0104", mark_type: "gs1" },
     { mark: "6431111111111111", mark_type: "jw_uin" },
   ]);
+});
+
+test("нулевое количество коробок в payload не уходит", () => {
+  // multi_box_qty: 0 у отправления быть не может — раньше ноль уезжал в Ozon
+  // просто потому, что поля не было в ответе.
+  const { payload } = buildExemplarSetPayload("1111-0001-1", created, "6431111111111111");
+  assert.equal("multi_box_qty" in payload, false);
+  const boxed = { products: created.result.products, multi_box_qty: 2 };
+  assert.equal(buildExemplarSetPayload("1-1", boxed, "643").payload.multi_box_qty, 2);
+});
+
+test("уже переданный УИН не пересылается: проверка не начинается заново", () => {
+  const withUin = {
+    result: {
+      products: [{
+        ...created.result.products[0],
+        exemplars: [{
+          exemplar_id: 777,
+          marks: [{ mark: "0104", mark_type: "gs1" }, { mark: "6431111111111111", mark_type: "jw_uin" }],
+        }],
+      }],
+    },
+  };
+
+  // Тот же УИН — передавать нечего, но состав марок остаётся полным.
+  const same = buildExemplarSetPayload("1-1", withUin, "6431111111111111");
+  assert.equal(same.mustSet, false);
+  assert.deepEqual(same.assigned.map((entry) => [entry.uin, entry.reused]), [["6431111111111111", true]]);
+  assert.deepEqual(same.payload.products[0].exemplars[0].marks, [
+    { mark: "0104", mark_type: "gs1" },
+    { mark: "6431111111111111", mark_type: "jw_uin" },
+  ]);
+
+  // УИН из УПД проиграл тому, что уже стоит на экземпляре в Ozon: иначе
+  // каждая повторная подготовка обнуляла бы проверку.
+  const other = buildExemplarSetPayload("1-1", withUin, "6432222222222222");
+  assert.equal(other.mustSet, false);
+  assert.equal(other.assigned[0].uin, "6431111111111111");
+
+  // А вот пустой экземпляр по-прежнему требует передачи.
+  assert.equal(buildExemplarSetPayload("1-1", created, "643").mustSet, true);
+});
+
+const markStatus = (checkStatus, status, errorCodes = []) => ({
+  status,
+  products: [{
+    product_id: 555,
+    exemplars: [{ exemplar_id: 777, marks: [{ mark: "643", mark_type: "jw_uin", check_status: checkStatus, error_codes: errorCodes }] }],
+  }],
+});
+
+test("update_available — это про редактирование, а не про проверку", () => {
+  // Ozon смешивает в одном поле две оси. Прежний код считал update_available
+  // продолжением проверки и через 9 секунд объявлял ошибку — из-за этого
+  // отправления зависали навсегда.
+  assert.equal(readExemplarProgress(markStatus("passed", "update_available")).decision, "ship");
+  assert.equal(readExemplarProgress(markStatus("processing", "update_available")).decision, "wait");
+  assert.equal(readExemplarProgress(markStatus("failed", "update_available")).decision, "resend");
+  assert.equal(readExemplarProgress(markStatus("passed", "update_not_available")).decision, "ship");
+});
+
+test("решение по exemplar/status: сборка, ожидание, пересылка, отказ", () => {
+  assert.equal(readExemplarProgress(markStatus("processing", "validation_in_process")).decision, "wait");
+  assert.equal(readExemplarProgress(markStatus("passed", "ship_available")).decision, "ship");
+
+  const refused = readExemplarProgress(markStatus("passed", "ship_not_available", ["UIN_NOT_FOUND"]));
+  assert.equal(refused.decision, "fail");
+  assert.match(refused.message, /UIN_NOT_FOUND/);
+
+  // Ошибка марки важнее статуса отправления: причина должна дойти до стола.
+  assert.equal(readExemplarProgress(markStatus("processing", "update_available", ["BAD_UIN"])).decision, "fail");
+
+  // Экземпляров в ответе ещё нет — ждём, а не объявляем ошибку.
+  assert.equal(readExemplarProgress({ status: "update_available", products: [] }).decision, "wait");
+  assert.equal(readExemplarProgress(null).decision, "wait");
 });
 
 test("обязательные поля Ozon называются до отправки, а не после ошибки", () => {

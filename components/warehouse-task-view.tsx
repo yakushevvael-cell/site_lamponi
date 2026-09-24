@@ -47,7 +47,7 @@ import { formatAge, formatMoment } from "@/lib/utils";
 type Task = {
   id: number;
   number: string;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: "created" | "issued" | "picked" | "shipped" | "cancelled";
   assigneeEmail: string | null;
@@ -76,7 +76,7 @@ type Item = {
   resolvedAt: string | null;
 };
 
-const MARKETPLACE_LABEL = { ozon: "Ozon", wildberries: "Wildberries" } as const;
+const MARKETPLACE_LABEL = { ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс Маркет" } as const;
 
 export function WarehouseTaskView({ taskId }: { taskId: number }) {
   const [task, setTask] = useState<Task | null>(null);

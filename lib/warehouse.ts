@@ -24,15 +24,19 @@ import {
   taskDay,
 } from "@/lib/warehouse-core.mjs";
 
-export type MarketplaceId = "ozon" | "wildberries";
+export type MarketplaceId = "ozon" | "wildberries" | "yandex";
 export type PickTaskStatus = "created" | "issued" | "picked" | "shipped" | "cancelled";
 export type PickItemStatus = "pending" | "picked" | "not_found";
 
 export const OZON_BATCH_SIZE_KEY = "warehouse_ozon_batch_size";
 export const WB_BATCH_SIZE_KEY = "warehouse_wb_batch_size";
+export const YANDEX_BATCH_SIZE_KEY = "warehouse_yandex_batch_size";
 
 /** Статусы Ozon, при которых отправление ждёт сборки. */
 const OZON_PICK_STATUSES = ["awaiting_packaging"];
+
+/** Яндекс Маркет отдаёт заказ на сборку в PROCESSING/STARTED. */
+const YANDEX_PICK_STATUS = "PROCESSING/STARTED";
 
 export type CandidateRow = {
   marketplaceId: MarketplaceId;
@@ -149,19 +153,24 @@ async function readSetting(db: D1Database, key: string) {
 }
 
 export async function readBatchSizes(db: D1Database) {
-  const [ozon, wb] = await Promise.all([readSetting(db, OZON_BATCH_SIZE_KEY), readSetting(db, WB_BATCH_SIZE_KEY)]);
+  const [ozon, wb, yandex] = await Promise.all([
+    readSetting(db, OZON_BATCH_SIZE_KEY),
+    readSetting(db, WB_BATCH_SIZE_KEY),
+    readSetting(db, YANDEX_BATCH_SIZE_KEY),
+  ]);
   const wbParsed = Number(wb);
   return {
     ozon: normalizeBatchSize(ozon ?? 30, 30),
     // Ноль — «не делить»: у WB задание делится по региональным складам, и
     // дробить его на партии нужно не всегда.
     wildberries: Number.isFinite(wbParsed) && wbParsed > 0 ? normalizeBatchSize(wbParsed, 0) : 0,
+    yandex: normalizeBatchSize(yandex ?? 30, 30),
   };
 }
 
 export async function writeBatchSizes(
   db: D1Database,
-  values: { ozon?: unknown; wildberries?: unknown },
+  values: { ozon?: unknown; wildberries?: unknown; yandex?: unknown },
   actorEmail: string,
 ) {
   const statements: D1PreparedStatement[] = [];
@@ -175,6 +184,7 @@ export async function writeBatchSizes(
     const parsed = Number(values.wildberries);
     save(WB_BATCH_SIZE_KEY, Number.isFinite(parsed) && parsed > 0 ? normalizeBatchSize(parsed, 0) : 0);
   }
+  if (values.yandex !== undefined) save(YANDEX_BATCH_SIZE_KEY, normalizeBatchSize(values.yandex, 30));
   if (statements.length === 0) return readBatchSizes(db);
   statements.push(eventStatement(db, { kind: "settings_changed", actorEmail, payload: { batchSizes: values } }));
   await db.batch(statements);
@@ -205,6 +215,7 @@ const CANDIDATE_SQL = `
     AND (
       (o.marketplace_id = 'ozon' AND o.status IN (${OZON_PICK_STATUSES.map((status) => `'${status}'`).join(", ")}))
       OR (o.marketplace_id = 'wildberries' AND o.status LIKE 'new/%')
+      OR (o.marketplace_id = 'yandex' AND o.status = '${YANDEX_PICK_STATUS}')
     )
     AND NOT EXISTS (
       SELECT 1 FROM pick_task_items ti
@@ -264,7 +275,8 @@ export async function readWaitingSummary(db: D1Database) {
     const group = groups.get(key) ?? {
       marketplaceId: posting.marketplaceId,
       warehouseExternalId: posting.warehouseExternalId,
-      warehouseName: names.get(key) ?? (posting.marketplaceId === "ozon" ? "Ozon" : "Склад не указан"),
+      warehouseName: names.get(key)
+        ?? (posting.marketplaceId === "ozon" ? "Ozon" : posting.marketplaceId === "yandex" ? "Яндекс Маркет" : "Склад не указан"),
       postingCount: 0,
       itemCount: 0,
       unitCount: 0,
@@ -349,7 +361,9 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
   const takenRows = await db.prepare("SELECT number FROM pick_tasks WHERE number LIKE ?").bind(`${day}%`).all<{ number: string }>();
   const taken = new Set(takenRows.results.map((row) => row.number));
 
-  const batchSize = options.marketplaceId === "ozon" ? batchSizes.ozon : batchSizes.wildberries;
+  const batchSize = options.marketplaceId === "ozon"
+    ? batchSizes.ozon
+    : options.marketplaceId === "yandex" ? batchSizes.yandex : batchSizes.wildberries;
 
   // Группы будущих заданий: для WB — по складам, для Ozon — одна очередь.
   const groups: Array<{ warehouseExternalId: string | null; postings: PostingGroup[] }> = [];
@@ -367,24 +381,27 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
   }
 
   const created: CreatedTask[] = [];
-  let ozonSequence = [...taken].filter((number) => number.startsWith(`${day}-OZ-`)).length;
+  // Порядковый номер партии за день: у Ozon и Яндекса свои очереди номеров.
+  const sequencePrefix = `${day}-${options.marketplaceId === "yandex" ? "YM" : "OZ"}-`;
+  let batchSequence = [...taken].filter((number) => number.startsWith(sequencePrefix)).length;
   let batchesLeft = options.maxBatches && options.maxBatches > 0 ? options.maxBatches : Number.POSITIVE_INFINITY;
 
   for (const group of groups) {
     const warehouseName = group.warehouseExternalId
       ? names.get(`${options.marketplaceId}::${group.warehouseExternalId}`) ?? `Склад ${group.warehouseExternalId}`
-      : options.marketplaceId === "ozon" ? "Ozon" : "Склад не указан";
+      : options.marketplaceId === "ozon" ? "Ozon"
+        : options.marketplaceId === "yandex" ? "Яндекс Маркет" : "Склад не указан";
 
     const batches = batchSize > 0 ? splitIntoBatches(group.postings, batchSize) : [group.postings];
     for (const batch of batches as PostingGroup[][]) {
       if (batchesLeft <= 0) break;
       if (batch.length === 0) continue;
-      if (options.marketplaceId === "ozon") ozonSequence += 1;
+      if (options.marketplaceId !== "wildberries") batchSequence += 1;
       const number = buildTaskNumber({
         day,
         marketplaceId: options.marketplaceId,
         warehouseName,
-        sequence: ozonSequence,
+        sequence: batchSequence,
         taken: [...taken],
       });
       taken.add(number);

@@ -23,11 +23,33 @@ jobs:
       - name: Зависимости
         run: npm install --no-audit --no-fund
 
+      # Ошибки складываются в сводку прогона: она видна на странице Actions
+      # без прав на скачивание логов.
       - name: Типы
-        run: npx tsc --noEmit
+        run: |
+          npx tsc --noEmit 2>&1 | tee tsc.log || true
+          if [ -s tsc.log ]; then
+            {
+              echo '### Ошибки типов'
+              echo '```'
+              cat tsc.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            while IFS= read -r line; do echo "::error::$line"; done < tsc.log
+            exit 1
+          fi
 
       - name: Тесты
-        run: npm test
+        run: |
+          npm test 2>&1 | tee tests.log || {
+            {
+              echo '### Упавшие тесты'
+              echo '```'
+              tail -n 120 tests.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          }
 
       - name: Сборка
         run: npm run build

@@ -21,7 +21,7 @@ import { formatAge, formatMoment } from "@/lib/utils";
 type Task = {
   id: number;
   number: string;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: "created" | "issued" | "picked" | "shipped" | "cancelled";
   assigneeEmail: string | null;
@@ -36,7 +36,7 @@ type Task = {
   pickedAt: string | null;
 };
 
-const MARKETPLACE_LABEL = { ozon: "Ozon", wildberries: "Wildberries" } as const;
+const MARKETPLACE_LABEL = { ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс Маркет" } as const;
 
 function TaskCard({
   task,

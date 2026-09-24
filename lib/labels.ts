@@ -29,9 +29,9 @@ import {
   buildExemplarSetPayload,
   buildLabelLines,
   buildShipPackages,
-  exemplarStatusErrors,
   neededUinCount,
   normalizeLabelPostings,
+  readExemplarProgress,
 } from "@/lib/ozon-exemplars.mjs";
 import { stampLabelLines } from "@/lib/label-stamp.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
@@ -43,10 +43,17 @@ import {
   setWildberriesUin,
 } from "@/lib/wildberries";
 import { logWarehouseEvent } from "@/lib/warehouse";
+import {
+  getYandexOrder,
+  getYandexOrderLabels,
+  setYandexOrderBoxes,
+  updateYandexOrderStatus,
+} from "@/lib/yandex";
+import { buildYandexBoxes, parseYandexStatus, yandexStatusKey } from "@/lib/yandex-core.mjs";
 
 export type LabelRow = {
   id: number;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   externalOrderId: string;
   taskId: number | null;
   article: string | null;
@@ -56,6 +63,9 @@ export type LabelRow = {
   contentType: string | null;
   storageKey: string | null;
   error: string | null;
+  exemplarStatus: string | null;
+  note: string | null;
+  shipPostings: string | null;
   attempts: number;
   preparedAt: string | null;
   printedAt: string | null;
@@ -65,21 +75,19 @@ export type LabelRow = {
 const LABEL_COLUMNS = `
   id, marketplace_id AS marketplaceId, external_order_id AS externalOrderId, task_id AS taskId,
   article, size, uin, status, content_type AS contentType, storage_key AS storageKey,
-  error, attempts, prepared_at AS preparedAt, printed_at AS printedAt, print_count AS printCount
+  error, exemplar_status AS exemplarStatus, note, ship_postings AS shipPostings,
+  attempts, prepared_at AS preparedAt, printed_at AS printedAt, print_count AS printCount
 `;
 
-/** Сколько раз спрашиваем Ozon о проверке УИН, прежде чем отложить отправление. */
-const EXEMPLAR_STATUS_ROUNDS = 6;
-const EXEMPLAR_STATUS_DELAY_MS = 1500;
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+/** Номера отправлений после сборки хранятся строкой через запятую. */
+function splitPostings(value: string | null | undefined) {
+  return String(value ?? "").split(",").map((entry) => entry.trim()).filter(Boolean);
 }
 
 type TaskItemRow = {
   id: number;
   taskId: number;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   externalOrderId: string;
   externalSku: string;
   article: string;
@@ -141,13 +149,16 @@ async function upsertLabel(
     contentType?: string | null;
     storageKey?: string | null;
     error?: string | null;
+    exemplarStatus?: string | null;
+    note?: string | null;
+    shipPostings?: string[] | null;
   },
 ) {
   await db.prepare(
     `INSERT INTO shipment_labels
        (marketplace_id, external_order_id, task_id, article, size, uin, status, content_type, storage_key, error,
-        attempts, prepared_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CASE WHEN ? = 'ready' THEN CURRENT_TIMESTAMP ELSE NULL END)
+        exemplar_status, note, ship_postings, attempts, prepared_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, CASE WHEN ? = 'ready' THEN CURRENT_TIMESTAMP ELSE NULL END)
      ON CONFLICT(marketplace_id, external_order_id) DO UPDATE SET
        task_id = COALESCE(excluded.task_id, shipment_labels.task_id),
        article = COALESCE(excluded.article, shipment_labels.article),
@@ -157,6 +168,11 @@ async function upsertLabel(
        content_type = COALESCE(excluded.content_type, shipment_labels.content_type),
        storage_key = COALESCE(excluded.storage_key, shipment_labels.storage_key),
        error = excluded.error,
+       exemplar_status = COALESCE(excluded.exemplar_status, shipment_labels.exemplar_status),
+       note = excluded.note,
+       -- Номера сборки не перетираются пустым значением: собрать отправление
+       -- второй раз нельзя, и потеря номеров означала бы этикетку в никуда.
+       ship_postings = COALESCE(excluded.ship_postings, shipment_labels.ship_postings),
        attempts = shipment_labels.attempts + 1,
        prepared_at = CASE WHEN excluded.status = 'ready' THEN CURRENT_TIMESTAMP ELSE shipment_labels.prepared_at END`,
   ).bind(
@@ -170,6 +186,9 @@ async function upsertLabel(
     input.contentType ?? null,
     input.storageKey ?? null,
     input.error ?? null,
+    input.exemplarStatus ?? null,
+    input.note ?? null,
+    input.shipPostings && input.shipPostings.length > 0 ? input.shipPostings.join(",") : null,
     input.status,
   ).run();
 }
@@ -204,11 +223,23 @@ export type PrepareResult = {
   prepared: number;
   failed: number;
   skipped: number;
+  /** Отправлений, ожидающих сканов: собрано ещё не всё. */
   waiting: number;
+  /** Отправлений, по которым УИН уже у Ozon и идёт проверка. */
+  validating: number;
   ready: number;
   total: number;
   messages: string[];
 };
+
+/**
+ * Сколько отправлений за один заход доводим до площадки.
+ *
+ * Опрос статуса проверки УИН стоит один дешёвый запрос, поэтому он не тратит
+ * лимит: иначе в большом задании отправления, ждущие проверки, забирали бы
+ * все места и до новых очередь не доходила бы никогда.
+ */
+const STATUS_POLLS_PER_PASS = 40;
 
 /**
  * Готовит этикетки по заданию.
@@ -231,7 +262,7 @@ export async function prepareLabelsForTask(
   const items = await readTaskItemsForLabels(db, input.taskId);
   const messages: string[] = [];
   if (items.length === 0) {
-    return { prepared: 0, failed: 0, skipped: 0, waiting: 0, ready: 0, total: 0, messages };
+    return { prepared: 0, failed: 0, skipped: 0, waiting: 0, validating: 0, ready: 0, total: 0, messages };
   }
 
   const existing = await db.prepare(
@@ -257,7 +288,9 @@ export async function prepareLabelsForTask(
   let failed = 0;
   let skipped = 0;
   let waiting = 0;
+  let validating = 0;
   let ready = 0;
+  let statusPolls = 0;
 
   for (const [key, group] of postings) {
     const label = byPosting.get(key);
@@ -278,7 +311,16 @@ export async function prepareLabelsForTask(
       continue;
     }
 
-    if (prepared + failed >= limit) {
+    // Отправление, по которому УИН уже у Ozon, стоит один дешёвый запрос
+    // статуса — лимит захода оно не занимает.
+    const polling = marketplaceId === "ozon" && label?.status === "pending" && Boolean(label.note);
+    if (polling) {
+      if (statusPolls >= STATUS_POLLS_PER_PASS) {
+        skipped += 1;
+        continue;
+      }
+      statusPolls += 1;
+    } else if (prepared + failed >= limit) {
       skipped += 1;
       continue;
     }
@@ -314,9 +356,28 @@ export async function prepareLabelsForTask(
       continue;
     }
 
+    // Закрепление УИН вынесено из общего хвоста: по Ozon оно происходит сразу
+    // после передачи УИН площадке, не дожидаясь сборки. Иначе следующий заход
+    // снова возьмёт свободный УИН из УПД — уже другой — и проверка в Ozon
+    // начнётся заново. Ровно из-за этого отправления зависали навсегда.
+    const persistUins = async (pairs: Array<{ itemId: number | null; uin: string }>) => {
+      for (const pair of pairs) {
+        await markUinUsed(db, {
+          uin: pair.uin,
+          marketplaceId,
+          externalOrderId: first.externalOrderId,
+          taskId: input.taskId,
+          actorEmail: input.actorEmail,
+        });
+        if (pair.itemId === null) continue;
+        await db.prepare("UPDATE pick_task_items SET uin = COALESCE(uin, ?) WHERE id = ?")
+          .bind(pair.uin, pair.itemId).run();
+      }
+    };
+
     try {
       if (marketplaceId === "ozon") {
-        const storageKey = await prepareOzonLabel(db, runtime, {
+        const step = await prepareOzonLabel(db, runtime, {
           postingNumber: first.externalOrderId,
           products: taken.map((entry) => ({
             externalSku: entry.item.externalSku,
@@ -324,7 +385,69 @@ export async function prepareLabelsForTask(
             size: entry.item.size,
             uin: entry.uin,
           })),
+          shipPostings: splitPostings(label?.shipPostings),
         });
+
+        // Отправление из одного изделия могло уже получить УИН в Ozon на
+        // прошлом заходе — тогда за изделием закрепляется именно он. У
+        // отсканированного изделия УИН свой, и подменять его нельзя: это
+        // скрыло бы пересорт.
+        const adopt = group.length === 1 && step.uins.length === 1 && !group[0].uin;
+        await persistUins(adopt
+          ? [{ itemId: group[0].id, uin: step.uins[0] }]
+          : [
+            ...taken.map((entry) => ({ itemId: entry.item.id, uin: entry.uin })),
+            ...step.uins.filter((uin) => !taken.some((entry) => entry.uin === uin))
+              .map((uin) => ({ itemId: null, uin })),
+          ]);
+        if (adopt) for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
+
+        if (step.kind === "waiting") {
+          await upsertLabel(db, {
+            marketplaceId,
+            externalOrderId: first.externalOrderId,
+            taskId: input.taskId,
+            article: articles,
+            size: multi ? null : first.size,
+            uin: step.uins[0] ?? taken[0]?.uin ?? null,
+            status: "pending",
+            error: null,
+            exemplarStatus: step.exemplarStatus || null,
+            note: step.note,
+            shipPostings: step.shipPostings ?? null,
+          });
+          validating += 1;
+          continue;
+        }
+
+        await upsertLabel(db, {
+          marketplaceId,
+          externalOrderId: first.externalOrderId,
+          taskId: input.taskId,
+          article: articles,
+          size: multi ? null : first.size,
+          uin: step.uins[0] ?? taken[0]?.uin ?? null,
+          status: "ready",
+          contentType: "application/pdf",
+          storageKey: step.storageKey,
+          error: null,
+          note: null,
+          shipPostings: step.shipPostings,
+        });
+        prepared += 1;
+        continue;
+      }
+
+      if (marketplaceId === "yandex") {
+        const { storageKey, warning } = await prepareYandexLabel(db, runtime, {
+          orderId: first.externalOrderId,
+          products: taken.map((entry) => ({
+            externalSku: entry.item.externalSku,
+            quantity: entry.item.quantity,
+            uin: entry.uin,
+          })),
+        });
+        if (warning) messages.push(warning);
         await upsertLabel(db, {
           marketplaceId,
           externalOrderId: first.externalOrderId,
@@ -335,7 +458,7 @@ export async function prepareLabelsForTask(
           status: "ready",
           contentType: "application/pdf",
           storageKey,
-          error: null,
+          error: warning ?? null,
         });
       } else {
         const { storageKey, warning } = await prepareWildberriesLabel(db, runtime, {
@@ -360,17 +483,7 @@ export async function prepareLabelsForTask(
         });
       }
 
-      for (const entry of taken) {
-        await markUinUsed(db, {
-          uin: entry.uin,
-          marketplaceId,
-          externalOrderId: first.externalOrderId,
-          taskId: input.taskId,
-          actorEmail: input.actorEmail,
-        });
-        await db.prepare("UPDATE pick_task_items SET uin = COALESCE(uin, ?) WHERE id = ?")
-          .bind(entry.uin, entry.item.id).run();
-      }
+      await persistUins(taken.map((entry) => ({ itemId: entry.item.id, uin: entry.uin })));
       prepared += 1;
     } catch (error) {
       for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
@@ -384,6 +497,7 @@ export async function prepareLabelsForTask(
         uin: taken[0]?.uin ?? null,
         status: "error",
         error: message.slice(0, 500),
+        note: null,
       });
       failed += 1;
     }
@@ -394,18 +508,42 @@ export async function prepareLabelsForTask(
       kind: "labels_prepared",
       taskId: input.taskId,
       actorEmail: input.actorEmail,
-      payload: { prepared, failed, ready, waiting, total: postings.size },
+      payload: { prepared, failed, ready, waiting, validating, total: postings.size },
     });
   }
 
-  return { prepared, failed, skipped, waiting, ready, total: postings.size, messages };
+  return { prepared, failed, skipped, waiting, validating, ready, total: postings.size, messages };
 }
 
+/**
+ * Шаг подготовки отправления Ozon.
+ *
+ * `waiting` — не ошибка: УИН у площадки на проверке, и следующий заход
+ * продолжит с того же места. Настоящие отказы по-прежнему бросаются
+ * исключением и оседают в строке этикетки красным.
+ */
+type OzonStep =
+  | { kind: "waiting"; exemplarStatus: string; note: string; uins: string[]; shipPostings?: string[] }
+  | { kind: "ready"; storageKey: string; uins: string[]; shipPostings: string[] };
+
+/**
+ * Один шаг цепочки Ozon: экземпляры → проверка → сборка → этикетка.
+ *
+ * Функция никогда не ждёт площадку в цикле. Проверка УИН идёт через «Честный
+ * ЗНАК» и занимает минуты — столько держать HTTP-запрос стола нельзя, а
+ * прежние 9 секунд ожидания почти всегда заканчивались ложной ошибкой. Вместо
+ * ожидания возвращается `waiting`, и состояние остаётся в строке этикетки:
+ * следующий заход спросит статус ещё раз, ничего не передавая заново.
+ */
 async function prepareOzonLabel(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { postingNumber: string; products: Array<{ externalSku: string; article: string; size: string | null; uin: string }> },
-) {
+  input: {
+    postingNumber: string;
+    products: Array<{ externalSku: string; article: string; size: string | null; uin: string }>;
+    shipPostings: string[];
+  },
+): Promise<OzonStep> {
   const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
   if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Ключи Ozon не добавлены.");
   const clientId = credentials.OZON_CLIENT_ID;
@@ -440,26 +578,72 @@ async function prepareOzonLabel(
     payload: Record<string, unknown>;
     problems: string[];
     marks: number;
+    assigned: Array<{ productId: number; offerId: string; uin: string; reused: boolean }>;
   };
   if (build.problems.length > 0) throw new Error(build.problems.join(" "));
+  // УИН, которые сейчас стоят на экземплярах в Ozon. Именно их закрепляет за
+  // изделиями вызывающая сторона — иначе следующий заход возьмёт из УПД другой.
+  const uins = build.assigned.map((entry) => entry.uin);
+
+  const finish = async (postings: string[]): Promise<OzonStep> => {
+    const label = await ozonPackageLabel(clientId, apiKey, postings);
+    // «Этикетка ещё не готова» — не отказ: отправление уже собрано. Номера
+    // сборки возвращаются вместе с ожиданием, иначе следующий заход начал бы
+    // цепочку с экземпляров — по собранному отправлению это заведомо ошибка.
+    if (!label.ok) {
+      if (label.notReady) {
+        return { kind: "waiting", exemplarStatus: "", note: label.message, uins, shipPostings: postings };
+      }
+      throw new Error(label.message);
+    }
+
+    // Впечатываем «артикул / размер» в нижнюю белую полосу этикетки. Строки идут
+    // в том же порядке, что и упаковки при сборке, поэтому каждая попадает на свою
+    // страницу PDF. Сбой впечатывания не должен ронять уже готовую этикетку —
+    // тогда сохраняем исходный PDF от Ozon, как было раньше.
+    let pdf: Uint8Array = label.pdf;
+    try {
+      const lines = buildLabelLines(created, input.products, input.products.length > 1) as Array<{ article: string; size: string | null }>;
+      pdf = (await stampLabelLines(label.pdf, lines)) as Uint8Array;
+    } catch (error) {
+      console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, error);
+    }
+    const storageKey = await storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
+    return { kind: "ready", storageKey, uins, shipPostings: postings };
+  };
+
+  // Отправление уже собрано на прошлом заходе: номера известны, остаётся файл.
+  if (input.shipPostings.length > 0) return finish(input.shipPostings);
 
   if (build.mustSet) {
-    await ozonExemplarSet(clientId, apiKey, build.payload);
-    let lastStatus = "";
-    let approved = false;
-    for (let round = 0; round < EXEMPLAR_STATUS_ROUNDS; round += 1) {
-      const status = await ozonExemplarStatus(clientId, apiKey, input.postingNumber);
-      lastStatus = String(status.status ?? "");
-      if (lastStatus === "ship_available") {
-        approved = true;
-        break;
-      }
-      if (lastStatus === "ship_not_available") {
-        throw new Error(`Ozon отклонил УИН: ${exemplarStatusErrors(status)}`);
-      }
-      await sleep(EXEMPLAR_STATUS_DELAY_MS);
+    try {
+      await ozonExemplarSet(clientId, apiKey, build.payload);
+    } catch (error) {
+      // Отправление могли собрать руками в кабинете Ozon: экземпляры там уже
+      // приняты, и менять их поздно — остаётся забрать этикетку.
+      const status = await ozonPostingStatus(clientId, apiKey, input.postingNumber).catch(() => "");
+      if (!(OZON_SHIPPED_STATUSES as string[]).includes(status)) throw error;
+      return finish([input.postingNumber]);
     }
-    if (!approved) throw new Error(`Ozon всё ещё проверяет УИН (статус ${lastStatus || "пустой"}). Повторите подготовку.`);
+    return {
+      kind: "waiting",
+      exemplarStatus: "",
+      note: "УИН переданы, Ozon начал проверку.",
+      uins,
+    };
+  }
+
+  const progress = readExemplarProgress(
+    await ozonExemplarStatus(clientId, apiKey, input.postingNumber),
+  ) as { decision: "ship" | "wait" | "resend" | "fail"; status: string; message: string };
+
+  if (progress.decision === "fail") throw new Error(progress.message);
+  if (progress.decision === "resend") {
+    await ozonExemplarSet(clientId, apiKey, build.payload);
+    return { kind: "waiting", exemplarStatus: progress.status, note: progress.message, uins };
+  }
+  if (progress.decision === "wait") {
+    return { kind: "waiting", exemplarStatus: progress.status, note: progress.message, uins };
   }
 
   let labelPostings: string[] = [input.postingNumber];
@@ -485,21 +669,7 @@ async function prepareOzonLabel(
     }
   }
 
-  const label = await ozonPackageLabel(clientId, apiKey, labelPostings);
-  if (!label.ok) throw new Error(label.message);
-
-  // Впечатываем «артикул / размер» в нижнюю белую полосу этикетки. Строки идут
-  // в том же порядке, что и упаковки при сборке, поэтому каждая попадает на свою
-  // страницу PDF. Сбой впечатывания не должен ронять уже готовую этикетку —
-  // тогда сохраняем исходный PDF от Ozon, как было раньше.
-  let pdf: Uint8Array = label.pdf;
-  try {
-    const lines = buildLabelLines(created, input.products, input.products.length > 1) as Array<{ article: string; size: string | null }>;
-    pdf = (await stampLabelLines(label.pdf, lines)) as Uint8Array;
-  } catch (error) {
-    console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, error);
-  }
-  return storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
+  return finish(labelPostings);
 }
 
 async function prepareWildberriesLabel(
@@ -555,6 +725,68 @@ async function prepareWildberriesLabel(
   const bytes = Uint8Array.from(Buffer.from(sticker.file, "base64"));
   const storageKey = await storeLabelFile(runtime, "wildberries", input.orderId, bytes, "png");
   return { storageKey, warning };
+}
+
+/**
+ * Ярлык Яндекс Маркета на заказ DBS.
+ *
+ * Порядок задан площадкой: состав грузовых мест → «готов к отгрузке» → ярлык.
+ * Без переданного состава Маркет ярлык не отдаёт, а УИН изделия попадает в
+ * заказ именно здесь, в instances грузового места.
+ *
+ * В доставку заказ на этом шаге не переводится: курьер Яндекс Доставки ещё не
+ * вызван, а статус DELIVERY без трек-номера означал бы, что посылка уже едет.
+ */
+async function prepareYandexLabel(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { orderId: string; products: Array<{ externalSku: string; quantity: number; uin: string }> },
+) {
+  const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+  const apiKey = credentials.YANDEX_API_KEY;
+  const campaignId = credentials.YANDEX_CAMPAIGN_ID;
+  if (!apiKey || !campaignId) throw new Error("Ключи Яндекс Маркета не добавлены.");
+
+  const order = await getYandexOrder(apiKey, campaignId, input.orderId);
+  if (!order) throw new Error(`Яндекс Маркет не нашёл заказ ${input.orderId}.`);
+
+  // Состав передаётся по идентификаторам строк заказа Маркета, а не по нашим:
+  // сопоставляем их с артикулами задания по offerId.
+  const remoteByOffer = new Map<string, Array<{ id: number; count: number }>>();
+  for (const item of order.items ?? []) {
+    const offerId = String(item.offerId ?? "");
+    if (!offerId) continue;
+    const rows = remoteByOffer.get(offerId) ?? [];
+    rows.push({ id: Number(item.id), count: Math.max(1, Number(item.count ?? 1)) });
+    remoteByOffer.set(offerId, rows);
+  }
+
+  const boxItems: Array<{ id: number; count: number; uin: string | null }> = [];
+  const warnings: string[] = [];
+  for (const product of input.products) {
+    const remote = (remoteByOffer.get(product.externalSku) ?? []).shift();
+    if (!remote) {
+      throw new Error(`В заказе ${input.orderId} нет артикула ${product.externalSku}. Обновите заказы.`);
+    }
+    // Один УИН — одно изделие. Когда в строке несколько штук, маркировку
+    // придётся проставить в кабинете руками: угадывать остальные УИН нельзя.
+    const single = remote.count === 1;
+    if (!single) {
+      warnings.push(`Заказ ${input.orderId}: в строке ${product.externalSku} ${remote.count} шт., УИН передан не был.`);
+    }
+    boxItems.push({ id: remote.id, count: remote.count, uin: single ? product.uin : null });
+  }
+
+  await setYandexOrderBoxes(apiKey, campaignId, input.orderId, buildYandexBoxes(boxItems));
+
+  const current = parseYandexStatus(yandexStatusKey(order.status, order.substatus));
+  if (current.status === "PROCESSING" && current.substatus !== "READY_TO_SHIP") {
+    await updateYandexOrderStatus(apiKey, campaignId, input.orderId, "PROCESSING", "READY_TO_SHIP");
+  }
+
+  const pdf = await getYandexOrderLabels(apiKey, campaignId, input.orderId, "A7");
+  const storageKey = await storeLabelFile(runtime, "yandex", input.orderId, pdf, "pdf");
+  return { storageKey, warning: warnings.length > 0 ? warnings.join(" ") : null };
 }
 
 /**
@@ -871,7 +1103,9 @@ export async function resolveScan(
   ).bind(target.marketplaceId, target.externalOrderId).first<LabelRow>();
 
   if (!label || label.status !== "ready" || !label.storageKey) {
-    return { status: "label_not_ready", uin, item: target, error: label?.error ?? null };
+    // Пояснение про идущую проверку УИН — такая же полезная подсказка, как и
+    // ошибка: кладовщик должен понимать, ждать ему или звать старшего.
+    return { status: "label_not_ready", uin, item: target, error: label?.error ?? label?.note ?? null };
   }
 
   await db.batch(writes);
@@ -946,6 +1180,20 @@ export async function readScanSummary(db: D1Database, taskId: number) {
 export async function readLabelErrors(db: D1Database, taskId: number) {
   const rows = await db.prepare(
     `SELECT ${LABEL_COLUMNS} FROM shipment_labels WHERE task_id = ? AND status = 'error' ORDER BY id LIMIT 50`,
+  ).bind(taskId).all<LabelRow>();
+  return rows.results;
+}
+
+/**
+ * Отправления, по которым УИН переданы и идёт проверка в Ozon.
+ *
+ * Это не ошибка, поэтому на столе они показываются отдельно от красного
+ * списка: кладовщику важно видеть, что работа идёт и делать ничего не надо.
+ */
+export async function readLabelWaiting(db: D1Database, taskId: number) {
+  const rows = await db.prepare(
+    `SELECT ${LABEL_COLUMNS} FROM shipment_labels
+     WHERE task_id = ? AND status = 'pending' AND note IS NOT NULL ORDER BY id LIMIT 50`,
   ).bind(taskId).all<LabelRow>();
   return rows.results;
 }

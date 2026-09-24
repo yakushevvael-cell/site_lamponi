@@ -4,6 +4,7 @@ import { authorizeApi } from "@/lib/app-auth";
 import {
   matchOzonCatalog,
   matchWildberriesCatalog,
+  matchYandexCatalog,
   type LocalProductIdentity,
   type MarketplaceMapping,
 } from "@/lib/product-matching";
@@ -19,6 +20,14 @@ import {
   type WildberriesOrder,
   type WildberriesOrderStatus,
 } from "@/lib/wildberries";
+import { getYandexOfferMappings, getYandexOrders, type YandexOrder } from "@/lib/yandex";
+import { cancelDeliveryRequest } from "@/lib/yandex-delivery";
+import {
+  isoFromMarketDate,
+  yandexOrderAmount,
+  yandexShipmentDeadline,
+  yandexStatusInfo,
+} from "@/lib/yandex-core.mjs";
 
 type NormalizedItem = {
   externalSku: string;
@@ -101,7 +110,7 @@ function combineItems(items: NormalizedItem[]) {
 
 async function persistOrders(
   db: D1Database,
-  marketplaceId: "wildberries" | "ozon",
+  marketplaceId: "wildberries" | "ozon" | "yandex",
   marketplaceName: string,
   orders: NormalizedOrder[],
 ) {
@@ -362,6 +371,124 @@ async function syncOzon(db: D1Database, runtime: ReturnType<typeof getRuntimeEnv
   return { marketplace: "ozon", skipped: false, orders: normalized.length };
 }
 
+/**
+ * Заказы Яндекс Маркета (DBS).
+ *
+ * Адрес покупателя здесь не сохраняется: он нужен только в момент вызова
+ * курьера и берётся тогда прямо из Маркета. В базе остаётся регион и город —
+ * этого хватает аналитике, а лишние персональные данные не копятся.
+ */
+async function syncYandex(db: D1Database, runtime: ReturnType<typeof getRuntimeEnv>, days: number) {
+  const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+  const apiKey = credentials.YANDEX_API_KEY;
+  const campaignId = credentials.YANDEX_CAMPAIGN_ID;
+  if (!apiKey || !campaignId) return { marketplace: "yandex", skipped: true, reason: "Ключи не добавлены" };
+
+  await db.prepare(
+    `INSERT INTO marketplaces (id, name, enabled, connection_status)
+     VALUES ('yandex', 'Яндекс Маркет', 1, 'connected')
+     ON CONFLICT(id) DO NOTHING`,
+  ).run();
+
+  const localProducts = await readLocalProducts(db);
+  if (credentials.YANDEX_BUSINESS_ID) {
+    try {
+      const offers = await getYandexOfferMappings(apiKey, credentials.YANDEX_BUSINESS_ID);
+      await saveMappings(db, "yandex", matchYandexCatalog(localProducts, offers));
+    } catch {
+      // Без права на каталог заказы всё равно загружаются: артикул придёт в offerId.
+    }
+  }
+  const mappingIndex = await readMappingIndex(db, "yandex");
+
+  const remoteOrders = await getYandexOrders(apiKey, campaignId, days);
+  const syncedAt = new Date().toISOString();
+  const normalized = remoteOrders.map((order: YandexOrder): NormalizedOrder => {
+    const info = yandexStatusInfo(order.status, order.substatus);
+    const items = (order.items ?? []).map((item): NormalizedItem => {
+      const externalSku = String(item.offerId ?? item.id ?? "");
+      const mapping = mappingIndex.get(externalSku);
+      return {
+        externalSku,
+        productSku: mapping?.sourceSku ?? null,
+        sellerArticle: mapping?.article ?? externalSku,
+        size: mapping?.size ?? null,
+        quantity: Math.max(1, Number(item.count ?? 1)),
+        unitPrice: Number(item.buyerPrice ?? item.price ?? 0),
+      };
+    });
+    const orderedAt = isoFromMarketDate(order.creationDate) ?? syncedAt;
+    const realDelivery = isoFromMarketDate(order.delivery?.dates?.realDeliveryDate ?? null);
+    return {
+      externalOrderId: String(order.id),
+      status: info.status,
+      amount: Number(order.buyerTotal ?? 0) || yandexOrderAmount(order),
+      orderedAt,
+      shippedAt: info.shipped ? syncedAt : null,
+      deliveredAt: info.delivered ? (realDelivery ?? syncedAt) : null,
+      buyoutAt: info.delivered ? (realDelivery ?? syncedAt) : null,
+      canceledAt: info.canceled ? syncedAt : null,
+      cancellationSource: info.cancellationSource,
+      sellerCancelled: info.sellerCancelled,
+      region: order.delivery?.region?.name ?? null,
+      city: order.delivery?.address?.city ?? null,
+      // На DBS склад один — магазин, и его номер совпадает с campaignId.
+      warehouseExternalId: String(campaignId),
+      shipmentDeadline: yandexShipmentDeadline(order),
+      // Маркет не сообщает момент передачи курьеру — запоминаем, когда увидели.
+      handedOverAt: null,
+      handedOverSeenAt: info.shipped ? syncedAt : null,
+      final: info.delivered || info.canceled,
+      items,
+    };
+  });
+
+  await persistOrders(db, "yandex", "Яндекс Маркет", normalized);
+
+  // Отменённый заказ не должен оставлять вызванного курьера: заявка Яндекс
+  // Доставки по нему отменяется сразу, иначе машина приедет за посылкой,
+  // которой уже нет.
+  const cancelled = normalized.filter((order) => order.canceledAt).map((order) => order.externalOrderId);
+  const cancelledRequests = await readConfirmedDeliveryRequests(db, cancelled);
+  for (const row of cancelledRequests) {
+    if (!credentials.YANDEX_DELIVERY_TOKEN) break;
+    try {
+      await cancelDeliveryRequest(credentials.YANDEX_DELIVERY_TOKEN, row.requestId);
+      await db.prepare(
+        "UPDATE delivery_requests SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP WHERE id = ?",
+      ).bind(row.id).run();
+    } catch (error) {
+      await db.prepare("UPDATE delivery_requests SET error = ? WHERE id = ?")
+        .bind((error instanceof Error ? error.message : "Заявку не удалось отменить").slice(0, 500), row.id).run();
+    }
+  }
+
+  return {
+    marketplace: "yandex",
+    skipped: false,
+    orders: normalized.length,
+    cancelledDeliveries: cancelledRequests.length,
+  };
+}
+
+/** Заявки Доставки, которые ещё живы, по списку заказов. */
+async function readConfirmedDeliveryRequests(db: D1Database, orderIds: string[]) {
+  if (orderIds.length === 0) return [];
+  const rows: Array<{ id: number; requestId: string }> = [];
+  // Список отменённых заказов за раз бывает длинным — режем на пачки,
+  // чтобы не упереться в ограничение на число параметров запроса.
+  for (let start = 0; start < orderIds.length; start += 100) {
+    const chunk = orderIds.slice(start, start + 100);
+    const result = await db.prepare(
+      `SELECT id, request_id AS requestId FROM delivery_requests
+       WHERE marketplace_id = 'yandex' AND status = 'confirmed' AND request_id IS NOT NULL
+         AND external_order_id IN (${chunk.map(() => "?").join(",")})`,
+    ).bind(...chunk).all<{ id: number; requestId: string }>();
+    rows.push(...result.results);
+  }
+  return rows;
+}
+
 export async function POST(request: Request) {
   const auth = await authorizeApi(true);
   if ("response" in auth) return auth.response;
@@ -389,10 +516,12 @@ export async function POST(request: Request) {
 
   const results: unknown[] = [];
   const errors: Array<{ marketplace: string; message: string }> = [];
-  for (const [marketplace, sync] of [
+  const tasks = [
     ["wildberries", () => syncWildberries(runtime.DB!, runtime, days)],
     ["ozon", () => syncOzon(runtime.DB!, runtime, days)],
-  ] as const) {
+    ["yandex", () => syncYandex(runtime.DB!, runtime, days)],
+  ] as const;
+  for (const [marketplace, sync] of tasks) {
     try {
       results.push(await sync());
     } catch (error) {
@@ -400,9 +529,10 @@ export async function POST(request: Request) {
     }
   }
 
-  // Единый пересчёт резервов по обеим площадкам сразу после загрузки заказов.
+  // Единый пересчёт резервов по всем площадкам сразу после загрузки заказов.
+  // Если не ответила ни одна, пересчитывать нечего: заказы остались вчерашними.
   let reservations = null;
-  if (errors.length < 2) {
+  if (errors.length < tasks.length) {
     try {
       reservations = await rebuildReservations(runtime.DB);
     } catch (error) {

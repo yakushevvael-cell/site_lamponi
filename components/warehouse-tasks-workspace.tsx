@@ -48,7 +48,7 @@ import { formatAge, formatMoment } from "@/lib/utils";
 type Task = {
   id: number;
   number: string;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: "created" | "issued" | "picked" | "shipped" | "cancelled";
   assigneeEmail: string | null;
@@ -69,7 +69,7 @@ type Task = {
 };
 
 type WaitingGroup = {
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseExternalId: string | null;
   warehouseName: string;
   postingCount: number;
@@ -92,6 +92,7 @@ const STATUS_LABEL: Record<Task["status"], string> = {
 const MARKETPLACE_LABEL: Record<Task["marketplaceId"], string> = {
   ozon: "Ozon",
   wildberries: "Wildberries",
+  yandex: "Яндекс Маркет",
 };
 
 function StatusBadge({ task }: { task: Task }) {
@@ -116,8 +117,8 @@ export function WarehouseTasksWorkspace() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [waiting, setWaiting] = useState<WaitingGroup[]>([]);
   const [pickers, setPickers] = useState<Picker[]>([]);
-  const [batchSizes, setBatchSizes] = useState({ ozon: 30, wildberries: 0 });
-  const [draftBatch, setDraftBatch] = useState({ ozon: "30", wildberries: "0" });
+  const [batchSizes, setBatchSizes] = useState({ ozon: 30, wildberries: 0, yandex: 30 });
+  const [draftBatch, setDraftBatch] = useState({ ozon: "30", wildberries: "0", yandex: "30" });
   const [blockedCount, setBlockedCount] = useState(0);
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
@@ -133,7 +134,7 @@ export function WarehouseTasksWorkspace() {
     const data = await tasksResponse.json() as {
       tasks?: Task[];
       waiting?: WaitingGroup[];
-      batchSizes?: { ozon: number; wildberries: number };
+      batchSizes?: { ozon: number; wildberries: number; yandex: number };
       blockedCount?: number;
       error?: string;
     };
@@ -143,7 +144,11 @@ export function WarehouseTasksWorkspace() {
     setBlockedCount(data.blockedCount ?? 0);
     if (data.batchSizes) {
       setBatchSizes(data.batchSizes);
-      setDraftBatch({ ozon: String(data.batchSizes.ozon), wildberries: String(data.batchSizes.wildberries) });
+      setDraftBatch({
+        ozon: String(data.batchSizes.ozon),
+        wildberries: String(data.batchSizes.wildberries),
+        yandex: String(data.batchSizes.yandex),
+      });
     }
     if (pickersResponse.ok) {
       const pickerData = await pickersResponse.json() as { pickers?: Picker[] };
@@ -169,7 +174,7 @@ export function WarehouseTasksWorkspace() {
     }
   }
 
-  async function createTasks(marketplaceId: "ozon" | "wildberries", warehouseExternalId?: string | null, maxBatches?: number) {
+  async function createTasks(marketplaceId: "ozon" | "wildberries" | "yandex", warehouseExternalId?: string | null, maxBatches?: number) {
     const key = `create:${marketplaceId}:${warehouseExternalId ?? "all"}:${maxBatches ?? 0}`;
     setBusy(key);
     try {
@@ -221,13 +226,21 @@ export function WarehouseTasksWorkspace() {
       const response = await fetch("/api/warehouse/settings", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ozon: Number(draftBatch.ozon), wildberries: Number(draftBatch.wildberries) }),
+        body: JSON.stringify({
+          ozon: Number(draftBatch.ozon),
+          wildberries: Number(draftBatch.wildberries),
+          yandex: Number(draftBatch.yandex),
+        }),
       });
-      const data = await response.json() as { batchSizes?: { ozon: number; wildberries: number }; error?: string };
+      const data = await response.json() as { batchSizes?: { ozon: number; wildberries: number; yandex: number }; error?: string };
       if (!response.ok) throw new Error(data.error ?? "Не удалось сохранить.");
       if (data.batchSizes) {
         setBatchSizes(data.batchSizes);
-        setDraftBatch({ ozon: String(data.batchSizes.ozon), wildberries: String(data.batchSizes.wildberries) });
+        setDraftBatch({
+          ozon: String(data.batchSizes.ozon),
+          wildberries: String(data.batchSizes.wildberries),
+          yandex: String(data.batchSizes.yandex),
+        });
       }
       toast.success("Размер партии сохранён");
     } catch (error) {
@@ -239,8 +252,10 @@ export function WarehouseTasksWorkspace() {
 
   const ozonWaiting = waiting.filter((group) => group.marketplaceId === "ozon");
   const wbWaiting = waiting.filter((group) => group.marketplaceId === "wildberries");
+  const yandexWaiting = waiting.filter((group) => group.marketplaceId === "yandex");
   const ozonPostings = ozonWaiting.reduce((sum, group) => sum + group.postingCount, 0);
   const wbPostings = wbWaiting.reduce((sum, group) => sum + group.postingCount, 0);
+  const yandexPostings = yandexWaiting.reduce((sum, group) => sum + group.postingCount, 0);
   const withoutCell = waiting.reduce((sum, group) => sum + group.withoutCell, 0);
 
   if (loading) {
@@ -262,7 +277,7 @@ export function WarehouseTasksWorkspace() {
         </Link>
       ) : null}
 
-      <section className="grid gap-4 lg:grid-cols-2">
+      <section className="grid gap-4 lg:grid-cols-3">
         <Card>
           <CardHeader className="pb-3">
             <CardTitle className="flex items-center justify-between gap-2 text-base">
@@ -344,13 +359,49 @@ export function WarehouseTasksWorkspace() {
             ) : null}
           </CardContent>
         </Card>
+
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center justify-between gap-2 text-base">
+              <span className="flex items-center gap-2"><PackagePlus className="size-4" /> Яндекс Маркет</span>
+              <Badge variant={yandexPostings ? "default" : "secondary"}>{yandexPostings} заказов ждёт</Badge>
+            </CardTitle>
+            <CardDescription>
+              Партиями по {batchSizes.yandex} заказов. Доставку выполняет Яндекс Доставка — курьер вызывается на отгрузке.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3">
+            <div className="flex flex-col gap-2 sm:flex-row">
+              <Button
+                className="flex-1"
+                disabled={yandexPostings === 0 || busy !== null}
+                onClick={() => void createTasks("yandex")}
+              >
+                {busy === "create:yandex:all:0" ? <Loader2 className="size-4 animate-spin" /> : <PackagePlus className="size-4" />}
+                Сформировать партии из остатка
+              </Button>
+              <Button
+                variant="outline"
+                disabled={yandexPostings === 0 || busy !== null}
+                onClick={() => void createTasks("yandex", null, 1)}
+              >
+                Одну партию
+              </Button>
+            </div>
+            <p className="text-sm text-muted-foreground">
+              {yandexPostings > 0
+                ? `Получится партий: ${Math.ceil(yandexPostings / Math.max(1, batchSizes.yandex))}, последняя — ${yandexPostings % batchSizes.yandex || batchSizes.yandex} заказов.`
+                : "Новых заказов на сборку нет."}
+            </p>
+          </CardContent>
+        </Card>
       </section>
 
       <Card>
         <CardHeader className="flex flex-row items-start justify-between gap-3 pb-3">
           <div>
             <CardTitle className="flex items-center gap-2 text-base"><Settings2 className="size-4" /> Размер партии</CardTitle>
-            <CardDescription>Ozon делится на партии этого размера. У WB ноль — не делить, одно задание на склад.</CardDescription>
+            <CardDescription>Ozon и Яндекс делятся на партии этого размера. У WB ноль — не делить, одно задание на склад.</CardDescription>
           </div>
           <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void saveBatchSizes()}>
             {busy === "batch" ? <Loader2 className="size-4 animate-spin" /> : null} Сохранить
@@ -375,6 +426,16 @@ export function WarehouseTasksWorkspace() {
               inputMode="numeric"
               value={draftBatch.wildberries}
               onChange={(event) => setDraftBatch((current) => ({ ...current, wildberries: event.target.value }))}
+            />
+          </div>
+          <div className="space-y-1">
+            <Label htmlFor="batch-yandex" className="text-xs">Яндекс Маркет, заказов в партии</Label>
+            <Input
+              id="batch-yandex"
+              className="w-32"
+              inputMode="numeric"
+              value={draftBatch.yandex}
+              onChange={(event) => setDraftBatch((current) => ({ ...current, yandex: event.target.value }))}
             />
           </div>
         </CardContent>

@@ -672,6 +672,11 @@ export const shipmentLabels = sqliteTable(
     contentType: text("content_type"),
     storageKey: text("storage_key"),
     error: text("error"),
+    /** Последний ответ Ozon о проверке экземпляров и он же человеческим языком. */
+    exemplarStatus: text("exemplar_status"),
+    note: text("note"),
+    /** Номера отправлений после сборки, через запятую: по ним берётся этикетка. */
+    shipPostings: text("ship_postings"),
     attempts: integer("attempts").notNull().default(0),
     preparedAt: text("prepared_at"),
     printedAt: text("printed_at"),
@@ -904,3 +909,34 @@ export const dmdkRegistryUploads = sqliteTable("dmdk_registry_uploads", {
   uploadedBy: text("uploaded_by"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
+
+/**
+ * Заявка на курьера Яндекс Доставки по заказу Маркета (DBS).
+ *
+ * Номер заявки — это трек-номер, который уходит в Маркет: по нему покупатель
+ * видит доставку, а Маркет сам ставит заказу «доставлен» или «отменён».
+ * Одна заявка на заказ: повторное оформление отгрузки не должно вызывать
+ * второго курьера на ту же посылку.
+ */
+export const deliveryRequests = sqliteTable(
+  "delivery_requests",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    marketplaceId: text("marketplace_id").notNull(),
+    externalOrderId: text("external_order_id").notNull(),
+    taskId: integer("task_id"),
+    supplyId: integer("supply_id"),
+    offerId: text("offer_id"),
+    requestId: text("request_id"),
+    status: text("status", { enum: ["created", "confirmed", "cancelled", "error"] }).notNull().default("created"),
+    error: text("error"),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    confirmedAt: text("confirmed_at"),
+    cancelledAt: text("cancelled_at"),
+  },
+  (table) => [
+    uniqueIndex("delivery_request_order_unique").on(table.marketplaceId, table.externalOrderId),
+    index("delivery_request_task_idx").on(table.taskId),
+  ],
+);

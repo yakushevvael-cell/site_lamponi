@@ -185,7 +185,7 @@ export async function GET(request: Request) {
     `SELECT marketplace_id AS marketplaceId, handed_over_at AS handedOverAt
      FROM orders WHERE handed_over_at IS NOT NULL AND handed_over_at >= ?`,
   ).bind(new Date(Date.now() - (days + 1) * 86_400_000).toISOString()).all<{ marketplaceId: string; handedOverAt: string }>();
-  const shipmentMarketplaces = [...new Set(["ozon", "wildberries", ...shippedResult.results.map((row) => row.marketplaceId)])];
+  const shipmentMarketplaces = [...new Set(["ozon", "wildberries", "yandex", ...shippedResult.results.map((row) => row.marketplaceId)])];
   const shipments = shipmentsByDay(shippedResult.results, { days, marketplaces: shipmentMarketplaces });
 
   // Заказы, которые больше 40 часов ждут передачи в доставку. Окно — 30 дней:
@@ -201,7 +201,7 @@ export async function GET(request: Request) {
   ).bind(new Date(Date.now() - 30 * 86_400_000).toISOString()).all<{
     marketplaceId: string; status: string; orderedAt: string; canceledAt: string | null; handedOverAt: string | null; units: number;
   }>();
-  const overdue = overdueHandover(pendingResult.results, { marketplaces: ["wildberries", "ozon"], thresholdHours: 40 });
+  const overdue = overdueHandover(pendingResult.results, { marketplaces: ["wildberries", "ozon", "yandex"], thresholdHours: 40 });
 
   const syncRows = await runtime.DB.prepare(
     `SELECT marketplace_id AS marketplaceId, MAX(created_at) AS lastSyncAt

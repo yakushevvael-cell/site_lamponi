@@ -136,6 +136,8 @@ export async function GET() {
         publishingWarehouseCount: Number(state?.publishingWarehouseCount ?? 0),
         warehouses: warehouses.get(connector.id) ?? [],
         credentials: connector.credentials,
+        // Необязательные поля видно в форме, но без них ключи всё равно сохраняются.
+        required: connector.required,
       };
     }),
   });

@@ -126,6 +126,7 @@ export function DashboardOverview() {
         <div className="flex flex-col gap-4">
           <OverdueTile id="wildberries" value={analytics?.overdue?.wildberries} />
           <OverdueTile id="ozon" value={analytics?.overdue?.ozon} />
+          <OverdueTile id="yandex" value={analytics?.overdue?.yandex} />
         </div>
       </section>
       <section className="grid gap-4 xl:grid-cols-[1.4fr_0.8fr]"><Card><CardHeader><CardTitle className="text-base">Динамика заказов</CardTitle></CardHeader><CardContent className="h-[280px] px-2 sm:px-5">{chartData.length ? <ResponsiveContainer width="100%" height="100%"><AreaChart data={chartData} margin={{ left: -18, right: 12 }}><CartesianGrid vertical={false} strokeDasharray="4 4" /><XAxis dataKey="label" tick={{ fontSize: 11 }} /><YAxis tick={{ fontSize: 11 }} /><Tooltip /><Area dataKey="orders" name="Заказы" stroke="#8056d9" fill="#8056d9" fillOpacity={0.15} /><Area dataKey="buyouts" name="Выкупы" stroke="#228b63" fillOpacity={0} /><Area dataKey="cancellations" name="Отмены" stroke="#d24f63" fillOpacity={0} /></AreaChart></ResponsiveContainer> : <div className="grid h-full place-items-center text-sm text-muted-foreground">Загрузите заказы в разделе «Заказы».</div>}</CardContent></Card>

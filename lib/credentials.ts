@@ -6,13 +6,47 @@ export type MarketplaceCredentialValues = {
   OZON_CLIENT_ID?: string;
   OZON_API_KEY?: string;
   YANDEX_API_KEY?: string;
+  YANDEX_CAMPAIGN_ID?: string;
+  YANDEX_BUSINESS_ID?: string;
+  YANDEX_DELIVERY_TOKEN?: string;
+  YANDEX_DELIVERY_STATION_ID?: string;
+  YANDEX_DELIVERY_SERVICE_ID?: string;
 };
 
 const allowedKeys: Record<MarketplaceId, Array<keyof MarketplaceCredentialValues>> = {
   wildberries: ["WB_API_TOKEN"],
   ozon: ["OZON_CLIENT_ID", "OZON_API_KEY"],
-  yandex: ["YANDEX_API_KEY"],
+  yandex: [
+    "YANDEX_API_KEY",
+    "YANDEX_CAMPAIGN_ID",
+    "YANDEX_BUSINESS_ID",
+    "YANDEX_DELIVERY_TOKEN",
+    "YANDEX_DELIVERY_STATION_ID",
+    "YANDEX_DELIVERY_SERVICE_ID",
+  ],
 };
+
+/**
+ * Поля, без которых площадка не работает.
+ *
+ * У Яндекса реквизиты Доставки хранятся рядом с ключами Маркета, но нужны
+ * только на отгрузке: заказы читаются и собираются без них, поэтому требовать
+ * их при сохранении нельзя — иначе интеграцию не включить по частям.
+ */
+const requiredKeys: Record<MarketplaceId, Array<keyof MarketplaceCredentialValues>> = {
+  wildberries: ["WB_API_TOKEN"],
+  ozon: ["OZON_CLIENT_ID", "OZON_API_KEY"],
+  yandex: ["YANDEX_API_KEY", "YANDEX_CAMPAIGN_ID", "YANDEX_BUSINESS_ID"],
+};
+
+/** Заполнены ли реквизиты Яндекс Доставки — без них курьера не вызвать. */
+export function deliveryConfigured(values: MarketplaceCredentialValues) {
+  return Boolean(
+    values.YANDEX_DELIVERY_TOKEN?.trim()
+    && values.YANDEX_DELIVERY_STATION_ID?.trim()
+    && values.YANDEX_DELIVERY_SERVICE_ID?.trim(),
+  );
+}
 
 function bytesToBase64(bytes: Uint8Array) {
   let binary = "";
@@ -36,12 +70,15 @@ export function validateCredentialPayload(
   values: Record<string, unknown>,
 ): MarketplaceCredentialValues {
   const result: MarketplaceCredentialValues = {};
+  const required = new Set<string>(requiredKeys[marketplaceId]);
   for (const key of allowedKeys[marketplaceId]) {
     const value = values[key];
-    if (typeof value !== "string" || !value.trim()) {
-      throw new Error(`Заполните поле ${key}.`);
+    const filled = typeof value === "string" && value.trim().length > 0;
+    if (!filled) {
+      if (required.has(key)) throw new Error(`Заполните поле ${key}.`);
+      continue;
     }
-    (result as Record<string, string>)[key] = value.trim();
+    (result as Record<string, string>)[key] = (value as string).trim();
   }
   return result;
 }
@@ -79,7 +116,14 @@ function runtimeCredentials(runtime: AppRuntimeEnv, marketplaceId: MarketplaceId
   if (marketplaceId === "ozon") {
     return { OZON_CLIENT_ID: runtime.OZON_CLIENT_ID, OZON_API_KEY: runtime.OZON_API_KEY };
   }
-  return { YANDEX_API_KEY: runtime.YANDEX_API_KEY };
+  return {
+    YANDEX_API_KEY: runtime.YANDEX_API_KEY,
+    YANDEX_CAMPAIGN_ID: runtime.YANDEX_CAMPAIGN_ID,
+    YANDEX_BUSINESS_ID: runtime.YANDEX_BUSINESS_ID,
+    YANDEX_DELIVERY_TOKEN: runtime.YANDEX_DELIVERY_TOKEN,
+    YANDEX_DELIVERY_STATION_ID: runtime.YANDEX_DELIVERY_STATION_ID,
+    YANDEX_DELIVERY_SERVICE_ID: runtime.YANDEX_DELIVERY_SERVICE_ID,
+  };
 }
 
 /** Ключ настройки, которым администратор отзывает доступ к маркетплейсу (ТЗ, п. 11). */
@@ -122,7 +166,7 @@ export async function getMarketplaceCredentials(
 }
 
 export function credentialsAreComplete(marketplaceId: MarketplaceId, values: MarketplaceCredentialValues) {
-  return allowedKeys[marketplaceId].every((key) => Boolean(values[key]?.trim()));
+  return requiredKeys[marketplaceId].every((key) => Boolean(values[key]?.trim()));
 }
 
 export function hasRuntimeCredentials(runtime: AppRuntimeEnv, marketplaceId: MarketplaceId) {

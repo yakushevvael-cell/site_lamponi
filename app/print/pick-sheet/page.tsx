@@ -15,7 +15,7 @@ import { readTask, readTaskItems } from "@/lib/warehouse";
 
 export const dynamic = "force-dynamic";
 
-const MARKETPLACE_LABEL: Record<string, string> = { ozon: "Ozon", wildberries: "Wildberries" };
+const MARKETPLACE_LABEL: Record<string, string> = { ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс Маркет" };
 
 export default async function PickSheetPage({ searchParams }: { searchParams: Promise<{ task?: string }> }) {
   await requirePagePermission("/warehouse", ["warehouse.tasks", "warehouse.pick"]);
