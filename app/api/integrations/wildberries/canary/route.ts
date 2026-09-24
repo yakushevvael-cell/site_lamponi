@@ -1,4 +1,7 @@
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
+// Размер сравнивается по одному правилу во всём сервисе: 16, 16.0 и 16,0 —
+// один и тот же размер (lib/product-matching).
+import { normalizeSize } from "@/lib/product-matching";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { stockSyncBlocked } from "@/lib/sync-pause";
 import { authorizeApi } from "@/lib/app-auth";
@@ -32,11 +35,6 @@ type CanaryMapping = LocalProduct & {
 
 function normalize(value: string | null | undefined) {
   return (value ?? "").trim().toLocaleUpperCase("ru-RU");
-}
-
-function normalizeSize(value: string | null | undefined) {
-  const normalized = normalize(value).replace(",", ".");
-  return /^\d+\.0$/.test(normalized) ? normalized.slice(0, -2) : normalized;
 }
 
 function isUnsizedWbCard(card: WildberriesCard) {

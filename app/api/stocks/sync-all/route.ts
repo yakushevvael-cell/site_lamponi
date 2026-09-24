@@ -1,5 +1,5 @@
 import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
-import { stockSyncBlocked } from "@/lib/sync-pause";
+import { bulkStockSyncBlocked } from "@/lib/sync-pause";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
 import { getRuntimeEnv } from "@/lib/runtime-env";
@@ -701,11 +701,12 @@ export async function POST(request: Request) {
     warehouseId?: unknown;
     offset?: unknown;
   } | null;
-  // Стоп-кран: пока пауза включена, ни один шаг выгрузки не начинается.
-  // «Отмена» и «итог» разрешены — незакрытое задание надо уметь завершить.
+  // Полная выгрузка — массовое действие: её запрещают и «Остановлено», и
+  // «Ручной режим». «Отмена» и «итог» разрешены всегда — незакрытое задание
+  // надо уметь завершить в любом режиме.
   if (body?.action !== "cancel" && body?.action !== "finish") {
-    const paused = await stockSyncBlocked(runtime.DB);
-    if (paused) return paused;
+    const blocked = await bulkStockSyncBlocked(runtime.DB);
+    if (blocked) return blocked;
   }
   if (body?.action === "start") return startJob(runtime.DB, auth.user.email, body?.confirmMassZero === true);
 

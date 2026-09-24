@@ -220,7 +220,7 @@ async function main() {
 
 main().catch((error) => {
   if (error instanceof SyncPausedError) {
-    log(`Выгрузка остатков остановлена вручную — запуск пропущен. ${error.message}`);
+    log(`Выгрузка пропущена: ${error.message}`);
     process.exit(0);
   }
   fail(error instanceof Error ? error.message : String(error));

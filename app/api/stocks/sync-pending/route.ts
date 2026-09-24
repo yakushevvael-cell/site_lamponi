@@ -2,7 +2,7 @@ import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { pushStocksForSkus } from "@/lib/stock-push";
 import { clearDirtySkus, countDirtySkus, readDirtySkus } from "@/lib/stock-queue";
-import { stockSyncBlocked } from "@/lib/sync-pause";
+import { bulkStockSyncBlocked } from "@/lib/sync-pause";
 
 /**
  * Доотправка остатков по изменившимся позициям.
@@ -36,8 +36,10 @@ export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
   const db = runtime.DB;
-  const paused = await stockSyncBlocked(db);
-  if (paused) return paused;
+  // Доотправку ведёт таймер: в ручном режиме сервис не должен трогать площадки
+  // сам, даже «дёшево» и по нескольким позициям.
+  const blocked = await bulkStockSyncBlocked(db);
+  if (blocked) return blocked;
 
   const body = await request.json().catch(() => null) as { limit?: unknown } | null;
   const requested = Number(body?.limit);

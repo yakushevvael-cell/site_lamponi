@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Play, PowerOff, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
@@ -108,11 +108,41 @@ type SelectedSyncResult = {
   rows: SelectedSyncRow[];
 };
 
-type StockSyncPause = {
+type StockSyncMode = "auto" | "manual" | "stopped";
+
+type StockSyncState = {
+  mode: StockSyncMode;
   paused: boolean;
   changedAt: string | null;
   changedBy: string | null;
   reason: string | null;
+};
+
+/**
+ * Три режима вместо россыпи кнопок.
+ *
+ * Описание намеренно бытовое: человек за столом должен понять, что произойдёт
+ * с товаром на площадке, не разбираясь в устройстве синхронизации.
+ */
+const MODES: Record<StockSyncMode, { title: string; summary: string; detail: string; tone: string }> = {
+  auto: {
+    title: "Автоматический",
+    summary: "Сервис сам держит остатки на площадках в актуальном состоянии.",
+    detail: "Раз в час остатки уезжают на площадки по всему ассортименту, каждые 15 минут — по тем позициям, где прошли заказы. Обычный режим работы магазина.",
+    tone: "border-emerald-200 bg-emerald-50 text-emerald-950",
+  },
+  manual: {
+    title: "Ручной",
+    summary: "Сервис сам площадки не трогает — уходит только то, что вы отправили.",
+    detail: "Остатки на площадках остаются такими, какие есть. Уходят только позиции, которые вы отметили галочками и отправили кнопкой «Синхронизировать выбранные». Подходит, когда остатки выставлены вручную и перезаписывать их целиком нельзя.",
+    tone: "border-amber-200 bg-amber-50 text-amber-950",
+  },
+  stopped: {
+    title: "Остановлено",
+    summary: "На площадки не уходит ничего — ни само, ни по кнопке.",
+    detail: "Полная остановка выгрузки. Заказы продолжают загружаться, API-ключи и настройки складов сохраняются. Включайте, когда с данными что-то не так и нужно разобраться.",
+    tone: "border-red-200 bg-red-50 text-red-950",
+  },
 };
 
 const marketplaceLabel = { wildberries: "Wildberries", ozon: "Ozon" } as const;
@@ -209,7 +239,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [syncingSelected, setSyncingSelected] = useState(false);
   const [selectedResult, setSelectedResult] = useState<SelectedSyncResult | null>(null);
-  const [pause, setPause] = useState<StockSyncPause | null>(null);
+  const [pause, setPause] = useState<StockSyncState | null>(null);
+  const [modeOpen, setModeOpen] = useState(false);
   const [pending, setPending] = useState(0);
   const [unitsOpen, setUnitsOpen] = useState(false);
   const [unitsValue, setUnitsValue] = useState("2");
@@ -243,7 +274,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   useEffect(() => {
     void fetch("/api/stocks/pause", { cache: "no-store" })
       .then((response) => response.json())
-      .then((state: StockSyncPause) => setPause(state))
+      .then((state: StockSyncState) => setPause(state))
       .catch(() => undefined);
   }, []);
 
@@ -273,7 +304,10 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       })
       .catch(() => undefined);
   }, [canSyncAll]);
-  const paused = pause?.paused ?? false;
+  const mode: StockSyncMode = pause?.mode ?? "auto";
+  // «Остановлено» запрещает всё, «Ручной» — только массовые отправки.
+  const paused = mode === "stopped";
+  const bulkBlocked = mode !== "auto";
   const allSelected = stocks.length > 0 && stocks.slice(0, 50).every((row) => selected.has(row.variantKey));
   const selectedRows = useMemo(() => stocks.filter((row) => selected.has(row.variantKey)), [selected, stocks]);
   const canRestore = selectedRows.some((row) => Boolean(row.manualZero));
@@ -342,24 +376,24 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
     }
   }
 
-  /** Стоп-кран: включение и снятие общей паузы выгрузки остатков. */
-  async function toggleStockSync(next: boolean) {
+  /** Смена режима выгрузки: один переключатель вместо набора кнопок. */
+  async function changeMode(next: StockSyncMode) {
     setSwitching(true);
     try {
       const response = await fetch("/api/stocks/pause", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ paused: next }),
+        body: JSON.stringify({ mode: next }),
       });
-      const data = await response.json() as StockSyncPause & { error?: string };
+      const data = await response.json() as StockSyncState & { error?: string };
       if (!response.ok) throw new Error(data.error ?? "Не удалось изменить режим выгрузки.");
       setPause(data);
-      if (next) toast.success("Выгрузка остатков остановлена", { description: "Отправка на WB и Ozon прекращена. Ключи и настройки складов сохранены." });
-      else toast.success("Выгрузка остатков возобновлена", { description: "Отправка на площадки снова разрешена." });
+      toast.success(`Режим: ${MODES[next].title}`, { description: MODES[next].summary });
     } catch (error) {
-      toast.error("Не удалось переключить выгрузку", { description: error instanceof Error ? error.message : "Повторите попытку." });
+      toast.error("Режим не изменён", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSwitching(false);
+      setModeOpen(false);
     }
   }
 
@@ -487,22 +521,37 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
         ))}
       </section>
 
-      <section className="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4">
-        <p className="text-sm font-semibold text-blue-950">{canSyncAll ? "Полная синхронизация остатков доступна" : "Просмотр, загрузка ОСВ и ручное обнуление доступны"}</p>
-        <p className="mt-1 text-xs leading-5 text-blue-800">
-          Доступный остаток рассчитывается из ОСВ с учётом активных резервов, страхового запаса и ручного обнуления. Кнопка отправляет рассчитанные значения на все подключённые склады WB и Ozon.
-        </p>
-        <p className="mt-2 text-xs leading-5 text-blue-800">
-          После каждой загрузки заказов (каждые 15 минут) остаток по позициям, у которых изменился резерв, уходит на площадки отдельно — не дожидаясь часовой выгрузки.
-          {pending > 0 ? ` Сейчас ждут отправки: ${pending}.` : " Сейчас очередь пуста."}
-        </p>
-        {canSyncSelected && !paused ? (
+      <section className={`rounded-2xl border px-5 py-4 ${MODES[mode].tone}`}>
+        <div className="flex flex-wrap items-start justify-between gap-3">
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 text-sm font-semibold">
+              <ShieldAlert className="size-4" />Режим выгрузки: {MODES[mode].title}
+            </p>
+            <p className="mt-1 text-xs leading-5 opacity-90">{MODES[mode].detail}</p>
+            <p className="mt-2 text-xs leading-5 opacity-80">
+              Доступный остаток считается из ОСВ: минус активные резервы, минус страховой запас, с учётом ручного обнуления.
+              {pause?.changedAt ? ` Режим установлен ${new Date(pause.changedAt).toLocaleString("ru-RU")}` : ""}
+              {pause?.changedBy ? `, пользователь ${pause.changedBy}.` : pause?.changedAt ? "." : ""}
+            </p>
+          </div>
+          {canSyncAll ? (
+            <Button variant="outline" className="bg-white" disabled={switching} onClick={() => setModeOpen(true)}>
+              {switching ? <Loader2 className="animate-spin" /> : <SlidersHorizontal />}Сменить режим
+            </Button>
+          ) : null}
+        </div>
+        {mode === "auto" ? (
+          <p className="mt-2 text-xs leading-5 opacity-80">
+            Очередь доотправки: {pending > 0 ? `ждут отправки ${pending} позиций.` : "пусто."}
+          </p>
+        ) : null}
+        {canSyncSelected && mode === "auto" ? (
           <Button variant="outline" size="sm" className="mt-3 bg-white" onClick={() => void pushPendingStocks()} disabled={pushingPending || syncingAll || syncingSelected}>
             {pushingPending ? <Loader2 className="animate-spin" /> : <Zap />}
             {pushingPending ? "Отправляем…" : "Доотправить изменившиеся сейчас"}
           </Button>
         ) : null}
-        {syncProgress ? <p className="mt-2 flex items-center gap-2 text-xs font-medium text-blue-950"><Loader2 className="size-3.5 animate-spin" />{syncProgress}</p> : null}
+        {syncProgress ? <p className="mt-2 flex items-center gap-2 text-xs font-medium"><Loader2 className="size-3.5 animate-spin" />{syncProgress}</p> : null}
       </section>
 
       {unfinishedRun && !syncingAll ? (
@@ -521,37 +570,37 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
         </section>
       ) : null}
 
-      {paused ? (
-        <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-red-200 bg-red-50 px-5 py-4">
-          <div>
-            <p className="flex items-center gap-2 text-sm font-semibold text-red-950"><ShieldAlert className="size-4" />Выгрузка остатков на площадки остановлена</p>
-            <p className="mt-1 text-xs leading-5 text-red-900">
-              Сервис не отправляет остатки на Wildberries и Ozon: ни по расписанию, ни вручную. Заказы продолжают загружаться, API-ключи и настройки складов сохранены.
-              {pause?.changedAt ? ` Остановлено ${new Date(pause.changedAt).toLocaleString("ru-RU")}` : ""}
-              {pause?.changedBy ? `, пользователь ${pause.changedBy}.` : pause?.changedAt ? "." : ""}
-            </p>
+      <AlertDialog open={modeOpen} onOpenChange={(open) => { if (!switching) setModeOpen(open); }}>
+        <AlertDialogContent className="max-w-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Режим выгрузки остатков</AlertDialogTitle>
+            <AlertDialogDescription>
+              Один переключатель решает, кто управляет остатками на Wildberries и Ozon — сервис или вы.
+              Загрузка заказов идёт в любом режиме: она только читает данные с площадок.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <div className="space-y-2">
+            {(Object.keys(MODES) as StockSyncMode[]).map((value) => (
+              <button
+                key={value}
+                type="button"
+                disabled={switching}
+                onClick={() => { if (value !== mode) void changeMode(value); else setModeOpen(false); }}
+                className={`w-full rounded-xl border px-4 py-3 text-left transition disabled:opacity-60 ${value === mode ? MODES[value].tone : "bg-card hover:bg-accent"}`}
+              >
+                <span className="flex items-center gap-2 text-sm font-semibold">
+                  {MODES[value].title}
+                  {value === mode ? <Badge variant="outline" className="bg-white/70">сейчас</Badge> : null}
+                </span>
+                <span className="mt-1 block text-xs leading-5 opacity-90">{MODES[value].detail}</span>
+              </button>
+            ))}
           </div>
-          {canSyncAll ? (
-            <AlertDialog>
-              <AlertDialogTrigger asChild>
-                <Button disabled={switching}>{switching ? <Loader2 className="animate-spin" /> : <Play />}Возобновить выгрузку</Button>
-              </AlertDialogTrigger>
-              <AlertDialogContent>
-                <AlertDialogHeader>
-                  <AlertDialogTitle>Возобновить выгрузку остатков?</AlertDialogTitle>
-                  <AlertDialogDescription>
-                    Отправка остатков на WB и Ozon снова станет доступна — вручную и по расписанию. Сразу после включения площадки получат остатки при ближайшей синхронизации.
-                  </AlertDialogDescription>
-                </AlertDialogHeader>
-                <AlertDialogFooter>
-                  <AlertDialogCancel>Отмена</AlertDialogCancel>
-                  <AlertDialogAction onClick={() => void toggleStockSync(false)}><Play />Возобновить</AlertDialogAction>
-                </AlertDialogFooter>
-              </AlertDialogContent>
-            </AlertDialog>
-          ) : null}
-        </section>
-      ) : null}
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={switching}>Закрыть</AlertDialogCancel>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <Card className="gap-0 overflow-hidden border-border/80 py-0">
         <div className="flex flex-col gap-3 border-b px-4 py-4 xl:flex-row xl:items-center xl:justify-between">
@@ -622,7 +671,12 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             {canSyncAll ? (
                 <AlertDialog>
                   <AlertDialogTrigger asChild>
-                    <Button disabled={saving || syncingAll || syncingSelected || paused}>{syncingAll ? <Loader2 className="animate-spin" /> : <CloudUpload />}{syncingAll ? "Синхронизация…" : "Синхронизировать все остатки"}</Button>
+                    <Button
+                      disabled={saving || syncingAll || syncingSelected || bulkBlocked}
+                      title={bulkBlocked ? `Недоступно в режиме «${MODES[mode].title}»` : undefined}
+                    >
+                      {syncingAll ? <Loader2 className="animate-spin" /> : <CloudUpload />}{syncingAll ? "Синхронизация…" : "Синхронизировать все остатки"}
+                    </Button>
                   </AlertDialogTrigger>
                   <AlertDialogContent>
                     <AlertDialogHeader>
@@ -638,29 +692,6 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                     </AlertDialogFooter>
                   </AlertDialogContent>
                 </AlertDialog>
-            ) : null}
-            {canSyncAll && !paused ? (
-              <AlertDialog>
-                <AlertDialogTrigger asChild>
-                  <Button variant="outline" className="border-red-300 text-red-700 hover:bg-red-50 hover:text-red-800" disabled={switching || syncingAll || syncingSelected}>
-                    {switching ? <Loader2 className="animate-spin" /> : <PowerOff />}Остановить выгрузку
-                  </Button>
-                </AlertDialogTrigger>
-                <AlertDialogContent>
-                  <AlertDialogHeader>
-                    <AlertDialogTitle>Остановить выгрузку остатков на площадки?</AlertDialogTitle>
-                    <AlertDialogDescription>
-                      Сервис перестанет отправлять остатки по всем артикулам на все склады Wildberries и Ozon — и вручную, и по расписанию.
-                      API-ключи, склады и сопоставления остаются на месте, заказы продолжат загружаться. На площадках останутся те остатки, которые были отправлены последними.
-                      Включить обратно можно этой же кнопкой в любой момент.
-                    </AlertDialogDescription>
-                  </AlertDialogHeader>
-                  <AlertDialogFooter>
-                    <AlertDialogCancel>Отмена</AlertDialogCancel>
-                    <AlertDialogAction onClick={() => void toggleStockSync(true)} variant="destructive"><PowerOff />Остановить</AlertDialogAction>
-                  </AlertDialogFooter>
-                </AlertDialogContent>
-              </AlertDialog>
             ) : null}
             {canSyncSelected ? (
               <Button

@@ -19,9 +19,28 @@ export function normalizeProductKey(value: string | null | undefined) {
     .replace(/[^0-9A-ZА-Я]/g, "");
 }
 
-function normalizeSize(value: string | null | undefined) {
-  const normalized = (value ?? "").trim().toLocaleUpperCase("ru-RU").replace(",", ".");
-  return /^\d+\.0$/.test(normalized) ? normalized.slice(0, -2) : normalized;
+/**
+ * Канонический вид размера.
+ *
+ * Один и тот же размер кольца пишут по-разному: в ОСВ «16», на Wildberries
+ * «16.0», на Ozon «16,0», в старых карточках попадается «16,00». Посимвольное
+ * сравнение считало их разными размерами, и позиция оставалась без
+ * сопоставления — на площадку она не уходила вообще.
+ *
+ * Поэтому числовой размер приводим к числу, а не к строке: 16 = 16.0 = 16,00,
+ * при этом 16,5 остаётся отдельным размером. Нечисловые размеры (XL, Б/Р)
+ * трогаем только по регистру и пробелам — там подменять ничего нельзя.
+ */
+export function normalizeSize(value: string | null | undefined) {
+  const text = String(value ?? "")
+    .toLocaleUpperCase("ru-RU")
+    // \s покрывает и неразрывный пробел, который приходит из выгрузок 1С.
+    .replace(/\s+/g, "")
+    .replaceAll(",", ".");
+  if (!text) return "";
+  if (!/^\d+(?:\.\d+)?$/.test(text)) return text;
+  const numeric = Number(text);
+  return Number.isFinite(numeric) ? String(numeric) : text;
 }
 
 function sizeTokens(value: string | null) {
@@ -34,11 +53,36 @@ function sizeTokens(value: string | null) {
   return [...new Set([rawDigits, normalizedDigits])].filter(Boolean);
 }
 
+/**
+ * Те же цифры, но в других написаниях размера.
+ *
+ * В offerId разделитель съедается вместе с остальными знаками, поэтому «16»
+ * превращается в «16», а «16,0» — в «160»: одинаковые размеры дают разные
+ * ключи. Эти варианты пробуются вторым проходом, когда точного совпадения
+ * не нашлось, — так прежние сопоставления не меняются.
+ */
+function alternateSizeTokens(value: string | null) {
+  const normalized = normalizeSize(value);
+  if (!/^\d+(?:\.\d+)?$/.test(normalized)) return [];
+  const numeric = Number(normalized);
+  if (!Number.isFinite(numeric)) return [];
+  const primary = new Set(sizeTokens(value));
+  return [...new Set([numeric.toFixed(1), numeric.toFixed(2)].map((text) => text.replace(".", "")))]
+    .filter((token) => token && !primary.has(token));
+}
+
 export function expectedOfferKeys(product: LocalProductIdentity) {
   const article = normalizeProductKey(product.article);
   if (!article) return [];
   if (product.size === null) return [article];
   return sizeTokens(product.size).map((size) => `${article}${size}`);
+}
+
+/** Запасные ключи: те же размеры, записанные иначе. Пробуются вторым проходом. */
+function alternateOfferKeys(product: LocalProductIdentity) {
+  const article = normalizeProductKey(product.article);
+  if (!article || product.size === null) return [];
+  return alternateSizeTokens(product.size).map((size) => `${article}${size}`);
 }
 
 /**
@@ -53,29 +97,50 @@ function matchByOfferId(
   localProducts: LocalProductIdentity[],
   catalog: Array<{ offerId: string; archived?: boolean }>,
 ) {
-  const localByKey = new Map<string, LocalProductIdentity[]>();
-  for (const product of localProducts) {
-    for (const key of expectedOfferKeys(product)) {
-      const rows = localByKey.get(key) ?? [];
-      rows.push(product);
-      localByKey.set(key, rows);
-    }
-  }
-
-  const remoteByKey = new Map<string, Array<{ offerId: string }>>();
-  for (const product of catalog.filter((item) => !item.archived)) {
-    const key = normalizeProductKey(product.offerId);
-    const rows = remoteByKey.get(key) ?? [];
-    rows.push(product);
-    remoteByKey.set(key, rows);
-  }
-
+  const remote = catalog.filter((item) => !item.archived);
   const matches: MarketplaceMapping[] = [];
-  for (const [key, localRows] of localByKey) {
-    const remoteRows = remoteByKey.get(key) ?? [];
-    if (localRows.length !== 1 || remoteRows.length !== 1) continue;
-    matches.push({ ...localRows[0], externalSku: remoteRows[0].offerId });
-  }
+  const takenLocal = new Set<string>();
+  const takenRemote = new Set<string>();
+
+  // Два прохода: сначала точные ключи, потом другие написания размера.
+  // Порядок важен — иначе запасной ключ одной позиции мог бы перехватить
+  // товар, который точно совпадает с другой.
+  const pass = (keysOf: (product: LocalProductIdentity) => string[]) => {
+    const localByKey = new Map<string, LocalProductIdentity[]>();
+    for (const product of localProducts) {
+      if (takenLocal.has(product.sourceSku)) continue;
+      for (const key of keysOf(product)) {
+        const rows = localByKey.get(key) ?? [];
+        rows.push(product);
+        localByKey.set(key, rows);
+      }
+    }
+
+    const remoteByKey = new Map<string, Array<{ offerId: string }>>();
+    for (const product of remote) {
+      if (takenRemote.has(product.offerId)) continue;
+      const key = normalizeProductKey(product.offerId);
+      const rows = remoteByKey.get(key) ?? [];
+      rows.push(product);
+      remoteByKey.set(key, rows);
+    }
+
+    for (const [key, localRows] of localByKey) {
+      const remoteRows = remoteByKey.get(key) ?? [];
+      // Пара принимается, только если ключ однозначен с обеих сторон.
+      if (localRows.length !== 1 || remoteRows.length !== 1) continue;
+      const [local] = localRows;
+      const [match] = remoteRows;
+      if (takenLocal.has(local.sourceSku) || takenRemote.has(match.offerId)) continue;
+      matches.push({ ...local, externalSku: match.offerId });
+      takenLocal.add(local.sourceSku);
+      takenRemote.add(match.offerId);
+    }
+  };
+
+  pass(expectedOfferKeys);
+  pass(alternateOfferKeys);
+
   return [...new Map(matches.map((match) => [match.sourceSku, match])).values()];
 }
 

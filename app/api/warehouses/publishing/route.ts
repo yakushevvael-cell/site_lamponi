@@ -1,5 +1,5 @@
 import { authorizeApi } from "@/lib/app-auth";
-import { stockSyncBlocked } from "@/lib/sync-pause";
+import { bulkStockSyncBlocked } from "@/lib/sync-pause";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
 import { getRuntimeEnv } from "@/lib/runtime-env";
@@ -187,11 +187,12 @@ export async function POST(request: Request) {
   if ((marketplaceId !== "wildberries" && marketplaceId !== "ozon") || !warehouseId || typeof publishFullStock !== "boolean") {
     return Response.json({ error: "Некорректные параметры склада." }, { status: 400 });
   }
-  // Стоп-кран останавливает отправку, а не настройку: тихое переключение
-  // ничего не отправляет, поэтому под паузой оно разрешено.
+  // Режим ограничивает отправку, а не настройку: тихое переключение ничего не
+  // отправляет, поэтому разрешено в любом режиме. А вот включение с выгрузкой —
+  // это весь ассортимент разом, и в ручном режиме оно запрещено.
   if (pushStock) {
-    const paused = await stockSyncBlocked(db);
-    if (paused) return paused;
+    const blocked = await bulkStockSyncBlocked(db);
+    if (blocked) return blocked;
   }
   if (await hasActiveStockJob(db)) {
     return Response.json({ error: "Дождитесь завершения текущей синхронизации остатков." }, { status: 409 });
