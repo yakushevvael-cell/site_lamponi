@@ -34,6 +34,23 @@ PREVIOUS="$(git rev-parse HEAD)"
 sudo -u "$APP_USER" git fetch --depth 1 origin "$REPO_BRANCH"
 sudo -u "$APP_USER" git reset --hard "origin/$REPO_BRANCH"
 
+# Запускается не то, что собралось, а standalone-копия: статику и public нужно
+# перенести в неё руками. Раньше перенос стоял только на удачном пути, и это
+# стоило рабочего дня: сборка нового кода стирает .next целиком, включая
+# копию, которой пользуется уже запущенный сервис. Восемь неудачных попыток
+# подряд — и на работающем сайте каждый скрипт отвечает 500, хотя код в
+# репозитории цел и откат прошёл. Поэтому перенос вынесен сюда и делается на
+# обоих путях, а после отката сервис ещё и перезапускается.
+publish_build() {
+  rm -rf "$RELEASE_DIR/.next/standalone/.next/static"
+  cp -r "$RELEASE_DIR/.next/static" "$RELEASE_DIR/.next/standalone/.next/static"
+  if [[ -d "$RELEASE_DIR/public" ]]; then
+    rm -rf "$RELEASE_DIR/.next/standalone/public"
+    cp -r "$RELEASE_DIR/public" "$RELEASE_DIR/.next/standalone/public"
+  fi
+  chown -R "$APP_USER:$APP_USER" "$RELEASE_DIR/.next"
+}
+
 log "Собираю"
 if ! sudo -u "$APP_USER" env HOME="$APP_ROOT" npm install --no-audit --no-fund >/dev/null ||
    ! sudo -u "$APP_USER" env HOME="$APP_ROOT" NODE_ENV=production npm run build; then
@@ -41,13 +58,15 @@ if ! sudo -u "$APP_USER" env HOME="$APP_ROOT" npm install --no-audit --no-fund >
   sudo -u "$APP_USER" git reset --hard "$PREVIOUS"
   sudo -u "$APP_USER" env HOME="$APP_ROOT" npm install --no-audit --no-fund >/dev/null
   sudo -u "$APP_USER" env HOME="$APP_ROOT" NODE_ENV=production npm run build
+  publish_build
+  # Перезапуск обязателен: процесс держит в памяти прежнюю сборку, а файлы на
+  # диске уже другие — без него сайт останется без скриптов и стилей.
+  systemctl restart lamponi.service || warn "Сервис не перезапустился после отката."
   systemctl start lamponi-sync-orders.timer lamponi-sync-stocks.timer
   die "Обновление отменено, работает прежняя версия."
 fi
 
-cp -r "$RELEASE_DIR/.next/static" "$RELEASE_DIR/.next/standalone/.next/static"
-[[ -d "$RELEASE_DIR/public" ]] && cp -r "$RELEASE_DIR/public" "$RELEASE_DIR/.next/standalone/public"
-chown -R "$APP_USER:$APP_USER" "$RELEASE_DIR/.next"
+publish_build
 
 # Описания служб и расписания лежат рядом с кодом, в deploy/. Раньше их
 # приходилось переустанавливать руками через консоль сервера: код обновлялся
