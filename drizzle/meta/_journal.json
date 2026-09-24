@@ -169,6 +169,13 @@
       "when": 1789800000000,
       "tag": "0023_yandex_delivery",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1789900000000,
+      "tag": "0024_ozon_exemplar_stage",
+      "breakpoints": true
     }
   ]
 }

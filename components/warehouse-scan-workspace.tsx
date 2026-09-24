@@ -85,6 +85,15 @@ type BoardRow = {
 
 type LabelError = { id: number; externalOrderId: string; article: string | null; error: string | null };
 
+/** Отправление, по которому УИН уже у площадки и идёт проверка. */
+type LabelWaiting = {
+  id: number;
+  externalOrderId: string;
+  article: string | null;
+  note: string | null;
+  exemplarStatus: string | null;
+};
+
 type ScanItem = {
   itemId: number;
   taskId: number;
@@ -151,6 +160,7 @@ export function WarehouseScanWorkspace() {
   const [sheetCode, setSheetCode] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [labelErrors, setLabelErrors] = useState<LabelError[]>([]);
+  const [labelWaiting, setLabelWaiting] = useState<LabelWaiting[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [pendingSize, setPendingSize] = useState<{ uin: string; item: ScanItem; orderSize: string } | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
@@ -185,10 +195,13 @@ export function WarehouseScanWorkspace() {
 
   const loadLabels = useCallback(async (id: number) => {
     const response = await fetch(`/api/warehouse/labels?task=${id}`, { cache: "no-store" });
-    const data = await response.json() as { summary?: Summary; errors?: LabelError[]; board?: BoardRow[]; error?: string };
+    const data = await response.json() as {
+      summary?: Summary; errors?: LabelError[]; waitingLabels?: LabelWaiting[]; board?: BoardRow[]; error?: string;
+    };
     if (!response.ok) throw new Error(data.error ?? "Состояние этикеток не загрузилось.");
     setSummary(data.summary ?? null);
     setLabelErrors(data.errors ?? []);
+    setLabelWaiting(data.waitingLabels ?? []);
     setBoard(data.board ?? []);
   }, []);
 
@@ -244,12 +257,13 @@ export function WarehouseScanWorkspace() {
         body: JSON.stringify({ taskId: id, limit }),
       });
       const data = await response.json() as {
-        prepared?: number; failed?: number; waiting?: number; summary?: Summary;
-        errors?: LabelError[]; board?: BoardRow[]; messages?: string[]; error?: string;
+        prepared?: number; failed?: number; validating?: number; summary?: Summary;
+        errors?: LabelError[]; waitingLabels?: LabelWaiting[]; board?: BoardRow[]; messages?: string[]; error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Подготовка не прошла.");
       setSummary(data.summary ?? null);
       setLabelErrors(data.errors ?? []);
+      setLabelWaiting(data.waitingLabels ?? []);
       setBoard(data.board ?? []);
       for (const message of data.messages ?? []) toast.warning(message);
       return data;
@@ -266,9 +280,13 @@ export function WarehouseScanWorkspace() {
     // отсканировано целиком: пока не собрано, дёргать площадку нечем.
     const left = summary.preparable - summary.labelsReady - summary.labelsError;
     if (left <= 0) return;
+    // Проверка УИН в Ozon идёт минутами. Пока весь остаток — это ожидание
+    // площадки, спрашивать чаще незачем: работы от этого не прибавится, а
+    // запросы к API тратятся впустую.
+    const onlyWaiting = summary.labelsPending > 0 && summary.labelsPending >= left;
     const timer = setTimeout(() => {
       void prepare(taskId).catch(() => undefined);
-    }, 1500);
+    }, onlyWaiting ? 6000 : 1500);
     return () => clearTimeout(timer);
   }, [taskId, summary, preparing, offline, prepare]);
 
@@ -752,6 +770,34 @@ export function WarehouseScanWorkspace() {
                 </div>
               );
             })}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {/* Ожидание проверки УИН — не ошибка, поэтому и список отдельный: иначе
+          кладовщик видит красное и зовёт старшего там, где надо просто ждать. */}
+      {labelWaiting.length > 0 ? (
+        <Card>
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base">
+              <Loader2 className="size-4 animate-spin" /> Ozon проверяет УИН
+            </CardTitle>
+            <CardDescription>
+              Делать ничего не нужно: проверка идёт на стороне площадки и занимает несколько минут.
+              Этикетки напечатаются сами, как только Ozon разрешит сборку.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-2 px-5">
+            {labelWaiting.map((row) => (
+              <div key={row.id} className="rounded-lg border px-3 py-2 text-sm">
+                <span className="font-mono">{row.externalOrderId}</span>
+                {row.article ? <span className="ml-2 font-mono text-xs text-muted-foreground">{row.article}</span> : null}
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {row.note}
+                  {row.exemplarStatus ? ` (статус ${row.exemplarStatus})` : ""}
+                </p>
+              </div>
+            ))}
           </CardContent>
         </Card>
       ) : null}

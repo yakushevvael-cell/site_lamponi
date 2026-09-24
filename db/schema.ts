@@ -672,6 +672,11 @@ export const shipmentLabels = sqliteTable(
     contentType: text("content_type"),
     storageKey: text("storage_key"),
     error: text("error"),
+    /** Последний ответ Ozon о проверке экземпляров и он же человеческим языком. */
+    exemplarStatus: text("exemplar_status"),
+    note: text("note"),
+    /** Номера отправлений после сборки, через запятую: по ним берётся этикетка. */
+    shipPostings: text("ship_postings"),
     attempts: integer("attempts").notNull().default(0),
     preparedAt: text("prepared_at"),
     printedAt: text("printed_at"),
