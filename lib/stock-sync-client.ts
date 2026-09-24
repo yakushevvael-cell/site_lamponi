@@ -173,6 +173,9 @@ export async function runFullStockSync(options: SyncRunnerOptions = {}): Promise
   }
 }
 
+/** Масштаб полной выгрузки на одну площадку: что именно будет перезаписано. */
+export type SyncScopeEntry = { mappingCount: number; warehouseCount: number };
+
 export type SyncState = {
   running: boolean;
   jobId: string | null;
@@ -180,6 +183,7 @@ export type SyncState = {
   ownedByMe: boolean;
   stale: boolean;
   lastResult: FullSyncSummary | null;
+  scope: { wildberries: SyncScopeEntry; ozon: SyncScopeEntry };
 };
 
 /** Состояние задания: используется для автоподхвата незавершённого запуска. */

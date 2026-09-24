@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
-import { describeSummary, readSyncState, runFullStockSync } from "@/lib/stock-sync-client";
+import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
 
 import {
   AlertDialog,
@@ -102,6 +102,41 @@ const emptyTotals: StockTotals = {
   manualZeroCount: 0,
 };
 
+/**
+ * Счётчик масштаба полной выгрузки.
+ *
+ * Одно нажатие «Синхронизировать все остатки» перезаписывает каждую пару
+ * «товар — склад», а до этой вставки цена нажатия была видна только в итоговом
+ * отчёте, когда на площадках уже стояли новые числа.
+ */
+function SyncScopeSummary({ scope }: { scope: SyncState["scope"] }) {
+  const entries = [
+    { name: "Wildberries", entry: scope.wildberries },
+    { name: "Ozon", entry: scope.ozon },
+  ];
+  const total = entries.reduce((sum, item) => sum + item.entry.mappingCount * item.entry.warehouseCount, 0);
+  return (
+    <div className="rounded-xl border bg-muted/50 px-4 py-3 text-xs leading-5">
+      <p className="font-semibold">Что будет перезаписано</p>
+      <ul className="mt-1.5 space-y-1 text-muted-foreground">
+        {entries.map(({ name, entry }) => (
+          <li key={name}>
+            <span className="font-medium text-foreground">{name}:</span>{" "}
+            {entry.warehouseCount === 0
+              ? "склады с выгрузкой не включены — ничего не уйдёт"
+              : entry.mappingCount === 0
+                ? "нет активных сопоставлений товаров — ничего не уйдёт"
+                : `${entry.mappingCount.toLocaleString("ru-RU")} позиций × ${entry.warehouseCount.toLocaleString("ru-RU")} склад(ов) = ${(entry.mappingCount * entry.warehouseCount).toLocaleString("ru-RU")} значений`}
+          </li>
+        ))}
+      </ul>
+      {total > 0 ? (
+        <p className="mt-2 font-medium text-foreground">Всего значений к отправке: {total.toLocaleString("ru-RU")}.</p>
+      ) : null}
+    </div>
+  );
+}
+
 function StatusBadge({ row }: { row: StockRow }) {
   if (row.manualZero) return <Badge variant="destructive">Обнулено вручную</Badge>;
   if (row.availableQuantity <= 0) return <Badge variant="secondary">Нет в наличии</Badge>;
@@ -128,6 +163,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [savingUnits, setSavingUnits] = useState(false);
   const [pushingPending, setPushingPending] = useState(false);
   const [switching, setSwitching] = useState(false);
+  /** Масштаб полной выгрузки: показываем цену нажатия до запуска, а не после. */
+  const [scope, setScope] = useState<SyncState["scope"] | null>(null);
 
   const load = useCallback(async (search: string) => {
     setLoading(true);
@@ -175,7 +212,9 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
     if (!canSyncAll) return;
     void readSyncState()
       .then((state) => {
-        if (state?.jobId && state.ownedByMe) setUnfinishedRun({ startedAt: state.startedAt, stale: state.stale });
+        if (!state) return;
+        if (state.jobId && state.ownedByMe) setUnfinishedRun({ startedAt: state.startedAt, stale: state.stale });
+        if (state.scope) setScope(state.scope);
       })
       .catch(() => undefined);
   }, [canSyncAll]);
@@ -498,6 +537,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                         Сервис перезапишет остатки всех сопоставленных товаров на всех подключённых складах WB и Ozon. Будут использованы текущая ОСВ, активные резервы, страховой запас и ручные обнуления.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
+                    {scope ? <SyncScopeSummary scope={scope} /> : null}
                     <AlertDialogFooter>
                       <AlertDialogCancel>Отмена</AlertDialogCancel>
                       <AlertDialogAction onClick={() => void syncAllStocks()}><CloudUpload />Начать синхронизацию</AlertDialogAction>

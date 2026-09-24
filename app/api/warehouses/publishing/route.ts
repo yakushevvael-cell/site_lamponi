@@ -44,6 +44,15 @@ async function hasActiveStockJob(db: D1Database) {
   }
 }
 
+/** Сколько складов маркетплейса реально участвуют в выгрузке. */
+async function readPublishingCount(db: D1Database, marketplaceId: MarketplaceId) {
+  const row = await db.prepare(
+    `SELECT COUNT(*) AS count FROM marketplace_warehouses
+     WHERE marketplace_id = ? AND remote_active = 1 AND publish_full_stock = 1`,
+  ).bind(marketplaceId).first<{ count: number }>();
+  return Number(row?.count ?? 0);
+}
+
 async function readStockBasis(db: D1Database, marketplaceId: MarketplaceId) {
   const rows = await db.prepare(
     `SELECT p.source_sku AS sourceSku,
@@ -153,20 +162,36 @@ export async function POST(request: Request) {
   if ("response" in auth) return auth.response;
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
-  const paused = await stockSyncBlocked(runtime.DB);
-  if (paused) return paused;
   const db = runtime.DB;
 
   const body = await request.json().catch(() => null) as {
     marketplaceId?: unknown;
     warehouseId?: unknown;
     publishFullStock?: unknown;
+    pushStock?: unknown;
   } | null;
   const marketplaceId = body?.marketplaceId;
   const warehouseId = typeof body?.warehouseId === "string" ? body.warehouseId.trim() : "";
   const publishFullStock = body?.publishFullStock;
+  /**
+   * Тихое переключение: флаг меняется, но на площадку ничего не уходит.
+   *
+   * Нужно, когда остатки на складе выставлены вручную и трогать их нельзя:
+   * склад включается молча, а нужные артикулы догоняются кнопкой
+   * «Синхронизировать выбранные». Плата за это — склад числится включённым,
+   * хотя по большинству SKU на площадке лежат числа, которых сервис не ставил.
+   * Поэтому тихий режим не трогает ни last_stock_sync_at, ни статус склада:
+   * «последняя успешная выгрузка» должна означать реальную отправку.
+   */
+  const pushStock = body?.pushStock !== false;
   if ((marketplaceId !== "wildberries" && marketplaceId !== "ozon") || !warehouseId || typeof publishFullStock !== "boolean") {
     return Response.json({ error: "Некорректные параметры склада." }, { status: 400 });
+  }
+  // Стоп-кран останавливает отправку, а не настройку: тихое переключение
+  // ничего не отправляет, поэтому под паузой оно разрешено.
+  if (pushStock) {
+    const paused = await stockSyncBlocked(db);
+    if (paused) return paused;
   }
   if (await hasActiveStockJob(db)) {
     return Response.json({ error: "Дождитесь завершения текущей синхронизации остатков." }, { status: 409 });
@@ -187,6 +212,48 @@ export async function POST(request: Request) {
   }
   if (Boolean(warehouse.publishFullStock) === publishFullStock) {
     return Response.json({ ok: true, marketplaceId, warehouseId, publishFullStock, unchanged: true });
+  }
+
+  if (!pushStock) {
+    await db.batch([
+      db.prepare(
+        `UPDATE marketplace_warehouses
+         SET publish_full_stock = ?,
+             publish_enabled_by = CASE WHEN ? = 1 THEN ? ELSE NULL END,
+             publish_enabled_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE NULL END
+         WHERE marketplace_id = ? AND external_id = ?`,
+      ).bind(
+        publishFullStock ? 1 : 0,
+        publishFullStock ? 1 : 0,
+        auth.user.email,
+        publishFullStock ? 1 : 0,
+        marketplaceId,
+        warehouseId,
+      ),
+      db.prepare(
+        `INSERT INTO sync_events (marketplace_id, direction, kind, status, item_count, message)
+         VALUES (?, 'outbound', 'warehouses', 'success', 0, ?)`,
+      ).bind(
+        marketplaceId,
+        publishFullStock
+          ? `Выгрузка включена для склада «${warehouse.name}» без отправки остатков (${auth.user.email}). Значения на площадке не изменялись.`
+          : `Выгрузка отключена для склада «${warehouse.name}» без обнуления (${auth.user.email}). Значения на площадке остались прежними.`,
+      ),
+    ]);
+
+    return Response.json({
+      ok: true,
+      marketplaceId,
+      warehouseId,
+      publishFullStock,
+      pushed: false,
+      sent: 0,
+      zeroed: 0,
+      publishingCount: await readPublishingCount(db, marketplaceId),
+      warning: publishFullStock
+        ? "Остатки на площадку не отправлялись: на складе остались прежние значения. Пришлите их кнопкой «Синхронизировать выбранные» на вкладке «Остатки»."
+        : "Остатки на площадке не обнулялись: прежние значения остались на складе. Склад больше не участвует в синхронизации.",
+    });
   }
 
   const runId = newRunId();
@@ -261,17 +328,14 @@ export async function POST(request: Request) {
   ]);
   await finishSyncRun(db, runId, "success", null);
 
-  const publishing = await db.prepare(
-    `SELECT COUNT(*) AS count FROM marketplace_warehouses
-     WHERE marketplace_id = ? AND remote_active = 1 AND publish_full_stock = 1`,
-  ).bind(marketplaceId).first<{ count: number }>();
-  const publishingCount = Number(publishing?.count ?? 0);
+  const publishingCount = await readPublishingCount(db, marketplaceId);
 
   return Response.json({
     ok: true,
     marketplaceId,
     warehouseId,
     publishFullStock,
+    pushed: true,
     runId,
     sent,
     zeroed: publishFullStock ? 0 : sent,

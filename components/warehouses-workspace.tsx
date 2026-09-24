@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import { Building2, CheckCircle2, CircleDashed, Loader2, RefreshCw, Warehouse } from "lucide-react";
 import { toast } from "sonner";
 import {
@@ -16,7 +16,38 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Switch } from "@/components/ui/switch";
+
+/**
+ * Выбор «переключить флаг, не трогая остатки на площадке».
+ *
+ * Отдельный компонент, потому что вариант нужен симметрично в обоих диалогах:
+ * и при включении (не перезаписывать выставленные вручную остатки), и при
+ * отключении (не рассылать нули по всему ассортименту).
+ */
+function SilentSwitchOption({
+  checked,
+  onChange,
+  label,
+  hint,
+}: {
+  checked: boolean;
+  onChange: (value: boolean) => void;
+  label: string;
+  hint: string;
+}) {
+  const id = useId();
+  return (
+    <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
+      <Checkbox id={id} checked={checked} onCheckedChange={(value) => onChange(value === true)} className="mt-0.5" />
+      <label htmlFor={id} className="cursor-pointer text-xs leading-5">
+        <span className="font-semibold text-amber-950">{label}</span>
+        <span className="mt-1 block text-amber-900">{hint}</span>
+      </label>
+    </div>
+  );
+}
 
 type WarehouseItem = {
   id: string;
@@ -60,6 +91,8 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
   const [saving, setSaving] = useState<string | null>(null);
   const [pendingDisable, setPendingDisable] = useState<PendingDisable | null>(null);
   const [pendingEnable, setPendingEnable] = useState<PendingEnable | null>(null);
+  /** Переключить флаг, ничего не отправляя на площадку (ручные остатки не трогаем). */
+  const [silent, setSilent] = useState(false);
 
   const load = useCallback(async () => {
     const [statusResponse, stockResponse] = await Promise.all([
@@ -105,30 +138,42 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
     }
   }
 
-  async function changePublishing(marketplaceId: string, warehouse: WarehouseItem, publishFullStock: boolean) {
+  async function changePublishing(
+    marketplaceId: string,
+    warehouse: WarehouseItem,
+    publishFullStock: boolean,
+    pushStock: boolean,
+  ) {
     const key = `${marketplaceId}:${warehouse.id}`;
     setSaving(key);
     try {
       const response = await fetch("/api/warehouses/publishing", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ marketplaceId, warehouseId: warehouse.id, publishFullStock }),
+        body: JSON.stringify({ marketplaceId, warehouseId: warehouse.id, publishFullStock, pushStock }),
       });
-      const data = await response.json() as { error?: string; zeroed?: number; sent?: number; warning?: string | null };
+      const data = await response.json() as { error?: string; zeroed?: number; sent?: number; warning?: string | null; pushed?: boolean };
       if (!response.ok) throw new Error(data.error ?? "Не удалось изменить настройку склада.");
       await load();
-      toast.success(publishFullStock ? "Выгрузка включена" : "Выгрузка отключена", {
-        description: publishFullStock
-          ? `Текущий остаток отправлен${data.sent ? ` по ${data.sent.toLocaleString("ru-RU")} позициям` : ""}. Склад участвует в синхронизации.`
-          : `Доступный остаток обнулён${data.zeroed ? ` для ${data.zeroed.toLocaleString("ru-RU")} позиций` : ""}.`,
-      });
-      if (data.warning) toast.warning("Несколько складов одного маркетплейса", { description: data.warning });
+      const title = publishFullStock ? "Выгрузка включена" : "Выгрузка отключена";
+      if (data.pushed === false) {
+        // Тихое переключение: важно не дать подумать, что остатки уехали.
+        toast.success(title, { description: "Остатки на площадку не отправлялись — значения на складе прежние." });
+      } else {
+        toast.success(title, {
+          description: publishFullStock
+            ? `Текущий остаток отправлен${data.sent ? ` по ${data.sent.toLocaleString("ru-RU")} позициям` : ""}. Склад участвует в синхронизации.`
+            : `Доступный остаток обнулён${data.zeroed ? ` для ${data.zeroed.toLocaleString("ru-RU")} позиций` : ""}.`,
+        });
+      }
+      if (data.warning) toast.warning("Обратите внимание", { description: data.warning });
     } catch (error) {
       toast.error("Настройка не изменена", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setSaving(null);
       setPendingDisable(null);
       setPendingEnable(null);
+      setSilent(false);
     }
   }
 
@@ -147,6 +192,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
     <div className="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4">
       <p className="text-sm font-semibold text-blue-950">Остатки отправляются только на выбранные склады</p>
       <p className="mt-1 text-xs leading-5 text-blue-800">Формула доступного остатка для каждого SKU: ОСВ − активные резервы WB и Ozon − страховой запас. Архивные и отключённые склады в синхронизации не участвуют.</p>
+      <p className="mt-2 text-xs leading-5 text-blue-800">Если остатки на складе выставлены вручную, при переключении отметьте «не отправлять»: флаг изменится, а значения на площадке останутся прежними. У такого склада строка «Последняя успешная выгрузка» не обновляется — по ней видно, что сервис его ещё не наполнял.</p>
     </div>
 
     <section className="grid gap-4 lg:grid-cols-3">{integrations.map((integration) => <Card key={integration.id}>
@@ -202,21 +248,19 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
                   checked={warehouse.publishFullStock}
                   disabled={!warehouse.remoteActive || isSaving || Boolean(saving)}
                   onCheckedChange={(checked) => {
+                    // Оба направления идут через диалог: там же выбирается,
+                    // отправлять остатки или только переключить флаг.
+                    setSilent(false);
                     if (!checked) {
                       setPendingDisable({ marketplaceId: integration.id, marketplaceName: integration.name, warehouse });
                       return;
                     }
-                    // ТЗ, п. 10: перед включением второго склада показываем предупреждение.
-                    if (integration.publishingWarehouseCount > 0) {
-                      setPendingEnable({
-                        marketplaceId: integration.id,
-                        marketplaceName: integration.name,
-                        warehouse,
-                        alreadyPublishing: integration.publishingWarehouseCount,
-                      });
-                      return;
-                    }
-                    void changePublishing(integration.id, warehouse, true);
+                    setPendingEnable({
+                      marketplaceId: integration.id,
+                      marketplaceName: integration.name,
+                      warehouse,
+                      alreadyPublishing: integration.publishingWarehouseCount,
+                    });
                   }}
                 />
               </div> : <Badge variant="secondary">{warehouse.publishFullStock ? "Включено" : "Выключено"}</Badge>}
@@ -238,43 +282,62 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
       </CardContent>
     </Card>)}</section>
 
-    <AlertDialog open={Boolean(pendingEnable)} onOpenChange={(open) => { if (!open) setPendingEnable(null); }}>
+    <AlertDialog open={Boolean(pendingEnable)} onOpenChange={(open) => { if (!open) { setPendingEnable(null); setSilent(false); } }}>
       <AlertDialogContent>
         <AlertDialogHeader>
-          <AlertDialogTitle>Включить выгрузку ещё на один склад?</AlertDialogTitle>
+          <AlertDialogTitle>Включить выгрузку на этот склад?</AlertDialogTitle>
           <AlertDialogDescription>
             {pendingEnable
-              ? `На каждый выбранный склад ${pendingEnable.marketplaceName} будет передан полный доступный остаток. Остаток между складами не распределяется. Сейчас выгрузка включена на ${pendingEnable.alreadyPublishing} складе(ах), станет ${pendingEnable.alreadyPublishing + 1}.`
+              ? silent
+                ? `Склад «${pendingEnable.warehouse.name}» начнёт участвовать в синхронизации, но прямо сейчас на ${pendingEnable.marketplaceName} ничего не уйдёт: значения на складе останутся такими, как есть.`
+                // ТЗ, п. 10: остаток между складами не делится — предупреждаем явно.
+                : `На склад «${pendingEnable.warehouse.name}» будет передан полный доступный остаток по всему сопоставленному ассортименту. ${pendingEnable.alreadyPublishing > 0 ? `Остаток между складами не распределяется: сейчас выгрузка включена на ${pendingEnable.alreadyPublishing} складе(ах), станет ${pendingEnable.alreadyPublishing + 1}.` : "Текущие значения на складе будут перезаписаны."}`
               : ""}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        <SilentSwitchOption
+          checked={silent}
+          onChange={setSilent}
+          label="Только включить, ничего не отправлять"
+          hint="Значения на складе останутся прежними. Нужные артикулы потом отправьте кнопкой «Синхронизировать выбранные» на вкладке «Остатки»."
+        />
         <AlertDialogFooter>
           <AlertDialogCancel>Отмена</AlertDialogCancel>
           <AlertDialogAction
             onClick={() => {
-              if (pendingEnable) void changePublishing(pendingEnable.marketplaceId, pendingEnable.warehouse, true);
+              if (pendingEnable) void changePublishing(pendingEnable.marketplaceId, pendingEnable.warehouse, true, !silent);
             }}
-          >Включить выгрузку</AlertDialogAction>
+          >{silent ? "Включить без выгрузки" : "Включить и отправить остаток"}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>
 
-    <AlertDialog open={Boolean(pendingDisable)} onOpenChange={(open) => { if (!open) setPendingDisable(null); }}>
+    <AlertDialog open={Boolean(pendingDisable)} onOpenChange={(open) => { if (!open) { setPendingDisable(null); setSilent(false); } }}>
       <AlertDialogContent>
         <AlertDialogHeader>
           <AlertDialogTitle>Отключить выгрузку на этот склад?</AlertDialogTitle>
           <AlertDialogDescription>
-            {pendingDisable ? `На складе «${pendingDisable.warehouse.name}» (${pendingDisable.marketplaceName}) сначала будет обнулён доступный остаток, затем склад перестанет участвовать в синхронизации. Текущие заказы и их резервы сохранятся.` : ""}
+            {pendingDisable
+              ? silent
+                ? `Склад «${pendingDisable.warehouse.name}» (${pendingDisable.marketplaceName}) перестанет участвовать в синхронизации, но остаток на площадке обнулён не будет: товар останется доступным к заказу с текущими значениями.`
+                : `На складе «${pendingDisable.warehouse.name}» (${pendingDisable.marketplaceName}) сначала будет обнулён доступный остаток, затем склад перестанет участвовать в синхронизации. Текущие заказы и их резервы сохранятся.`
+              : ""}
           </AlertDialogDescription>
         </AlertDialogHeader>
+        <SilentSwitchOption
+          checked={silent}
+          onChange={setSilent}
+          label="Только отключить, не обнулять остаток"
+          hint="Товар останется доступным к заказу с теми значениями, что сейчас стоят на площадке. Снимать его с продажи придётся вручную в кабинете."
+        />
         <AlertDialogFooter>
           <AlertDialogCancel>Отмена</AlertDialogCancel>
           <AlertDialogAction
-            variant="destructive"
+            variant={silent ? "default" : "destructive"}
             onClick={() => {
-              if (pendingDisable) void changePublishing(pendingDisable.marketplaceId, pendingDisable.warehouse, false);
+              if (pendingDisable) void changePublishing(pendingDisable.marketplaceId, pendingDisable.warehouse, false, !silent);
             }}
-          >Обнулить и отключить</AlertDialogAction>
+          >{silent ? "Отключить без обнуления" : "Обнулить и отключить"}</AlertDialogAction>
         </AlertDialogFooter>
       </AlertDialogContent>
     </AlertDialog>

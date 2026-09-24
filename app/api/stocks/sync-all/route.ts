@@ -659,6 +659,16 @@ export async function GET() {
     try { lastResult = JSON.parse(lastResultRow.value); } catch { lastResult = null; }
   }
 
+  // Масштаб полной выгрузки: сколько позиций и на сколько складов уедет.
+  // Нужен до запуска — человек должен видеть цену нажатия, а не узнавать её
+  // из итогового отчёта, когда остатки на площадках уже перезаписаны.
+  const [wbWarehouses, ozonWarehouses, wbMappingCount, ozonMappingCount] = await Promise.all([
+    readWarehouses(runtime.DB, "wildberries"),
+    readWarehouses(runtime.DB, "ozon"),
+    readMappingCount(runtime.DB, "wildberries"),
+    readMappingCount(runtime.DB, "ozon"),
+  ]);
+
   const startedAt = job ? Date.parse(job.startedAt) : Number.NaN;
   const stale = Number.isFinite(startedAt) && Date.now() - startedAt >= JOB_TTL_MS;
   return Response.json({
@@ -668,6 +678,10 @@ export async function GET() {
     ownedByMe: job?.ownerEmail === auth.user.email,
     stale,
     lastResult,
+    scope: {
+      wildberries: { mappingCount: wbMappingCount, warehouseCount: wbWarehouses.length },
+      ozon: { mappingCount: ozonMappingCount, warehouseCount: ozonWarehouses.length },
+    },
   });
 }
 
