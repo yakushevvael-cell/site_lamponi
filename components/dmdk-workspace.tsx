@@ -58,6 +58,7 @@ function DictionaryField({
   valueId,
   valueName,
   onChange,
+  idPlaceholder = "Учётный номер в ГИИС",
 }: {
   label: string;
   hint: string;
@@ -65,6 +66,7 @@ function DictionaryField({
   valueId: string;
   valueName: string;
   onChange: (id: string, name: string) => void;
+  idPlaceholder?: string;
 }) {
   return (
     <div className="space-y-2">
@@ -87,7 +89,7 @@ function DictionaryField({
         </NativeSelect>
       ) : (
         <div className="grid gap-2 sm:grid-cols-2">
-          <Input value={valueId} placeholder="Учётный номер в ГИИС" onChange={(event) => onChange(event.target.value, valueName)} />
+          <Input value={valueId} placeholder={idPlaceholder} onChange={(event) => onChange(event.target.value, valueName)} />
           <Input value={valueName} placeholder="Название для экрана" onChange={(event) => onChange(valueId, event.target.value)} />
         </div>
       )}
@@ -135,35 +137,39 @@ function MarketplaceCard({
       <div className="grid gap-5 lg:grid-cols-2">
         <DictionaryField
           label="Грузоотправитель"
-          hint="Ваша организация — она же отправитель по спецификации."
+          hint="Ваша организация — она же отправитель по спецификации. Укажите её ОГРН."
           items={dictionaries.contractor}
           valueId={draft.shipperOgrn}
           valueName={draft.shipperName}
           onChange={(id, name) => patch({ shipperOgrn: id, shipperName: name })}
+          idPlaceholder="ОГРН организации (13 цифр, 15 для ИП)"
         />
         <DictionaryField
           label="Грузополучатель"
-          hint="Головное юрлицо площадки. В адрес обособленных подразделений спецификации по договору на доставку не принимаются."
+          hint="ОГРН головного юрлица площадки (для WB — ООО «РВБ», для Ozon — юрлицо Ozon). В адрес обособленных подразделений спецификации по договору на доставку не принимаются, поэтому не СЦ."
           items={dictionaries.contractor}
           valueId={draft.consigneeOgrn}
           valueName={draft.consigneeName}
           onChange={(id, name) => patch({ consigneeOgrn: id, consigneeName: name })}
+          idPlaceholder="ОГРН организации (13 цифр, 15 для ИП)"
         />
         <DictionaryField
           label="Номер контракта"
-          hint="Договор на доставку с этой площадкой, учётный номер в ГИИС."
+          hint="Договор на доставку с этой площадкой. Укажите его идентификатор (учётный номер) в ГИИС."
           items={dictionaries.deal}
           valueId={draft.dealId}
           valueName={draft.dealNumber}
           onChange={(id, name) => patch({ dealId: id, dealNumber: name })}
+          idPlaceholder="Идентификатор контракта в ГИИС"
         />
         <DictionaryField
           label="Перевозчик"
-          hint="Кто везёт. Обычно ваша же организация."
+          hint="Курьерская компания по договору на доставку (для WB — ООО «РВБ», для Ozon — юрлицо Ozon). Укажите её ОГРН."
           items={dictionaries.contractor}
           valueId={draft.carrierOgrn}
           valueName={draft.carrierName}
           onChange={(id, name) => patch({ carrierOgrn: id, carrierName: name })}
+          idPlaceholder="ОГРН организации (13 цифр, 15 для ИП)"
         />
       </div>
 
