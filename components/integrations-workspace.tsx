@@ -14,11 +14,23 @@ import { credentialLabels } from "@/lib/marketplaces";
 type Integration = { id: "wildberries" | "ozon" | "yandex"; name: string; shortName: string; configured: boolean; connected: boolean; credentialsMessage: string | null; lastCheckedAt: string | null; warehouseCount: number; publishingWarehouseCount?: number; warehouses: Array<{ id: string; name: string }>; credentials: string[]; required?: string[] };
 type Canary = { mode: string; items: Array<{ sourceSku: string; article: string; size: string | null; availableQuantity: number; offerId?: string }>; lastResult: null | { ok: boolean; testedAt: string; skuCount: number; verifiedWarehouseCount?: number; warehouseCount?: number; verifiedSkuCount?: number; pairCount?: number; verifiedPairCount?: number } };
 const colors: Record<string, string> = { wildberries: "bg-violet-600", ozon: "bg-blue-600", yandex: "bg-amber-500" };
+/** Что прячем звёздочками. Номера магазина, кабинета и станции — не секрет, и
+ * вводить их вслепую значит ошибиться цифрой и потом искать причину. */
+const SECRET_CREDENTIALS = new Set(["WB_API_TOKEN", "OZON_API_KEY", "YANDEX_API_KEY", "YANDEX_DELIVERY_TOKEN"]);
 
 function CredentialDialog({ integration, onSaved }: { integration: Integration; onSaved: () => Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [values, setValues] = useState<Record<string, string>>({});
+  // Код службы доставки руками не набирают: его подставляет справочник Маркета.
+  const [services, setServices] = useState<Array<{ id: number; name: string }>>([]);
+  useEffect(() => {
+    if (!open || integration.id !== "yandex" || !integration.configured) return;
+    void fetch("/api/integrations/yandex/delivery-services", { cache: "no-store" })
+      .then(async (response) => response.ok ? await response.json() as { suggested?: Array<{ id: number; name: string }> } : null)
+      .then((data) => setServices(data?.suggested ?? []))
+      .catch(() => setServices([]));
+  }, [open, integration.id, integration.configured]);
   async function save() {
     setSaving(true);
     try {
@@ -30,7 +42,7 @@ function CredentialDialog({ integration, onSaved }: { integration: Integration; 
     } catch (error) { toast.error("Ключи не сохранены", { description: error instanceof Error ? error.message : "Повторите попытку." }); }
     finally { setSaving(false); }
   }
-  return <Dialog open={open} onOpenChange={setOpen}><DialogTrigger asChild><Button variant="outline" className="w-full"><KeyRound />{integration.configured ? "Заменить API-ключи" : "Добавить API-ключи"}</Button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>{integration.name}: API-доступ</DialogTitle><DialogDescription>Значения шифруются на сервере и после сохранения не показываются в интерфейсе.</DialogDescription></DialogHeader><div className="space-y-4 py-2">{integration.credentials.map((credential) => { const optional = Boolean(integration.required) && !integration.required?.includes(credential); return <div key={credential} className="space-y-2"><Label htmlFor={`${integration.id}-${credential}`}>{credentialLabels[credential] ?? credential}{optional && <span className="ml-2 text-[11px] font-normal text-muted-foreground">необязательно</span>}</Label><Input id={`${integration.id}-${credential}`} type="password" autoComplete="off" value={values[credential] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [credential]: event.target.value }))} placeholder={credential} /></div>; })}</div><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Отмена</Button><Button onClick={() => void save()} disabled={saving || (integration.required ?? integration.credentials).some((key) => !values[key]?.trim())}>{saving ? <Loader2 className="animate-spin" /> : <LockKeyhole />}Сохранить защищённо</Button></DialogFooter></DialogContent></Dialog>;
+  return <Dialog open={open} onOpenChange={setOpen}><DialogTrigger asChild><Button variant="outline" className="w-full"><KeyRound />{integration.configured ? "Заменить API-ключи" : "Добавить API-ключи"}</Button></DialogTrigger><DialogContent><DialogHeader><DialogTitle>{integration.name}: API-доступ</DialogTitle><DialogDescription>Значения шифруются на сервере и после сохранения не показываются в интерфейсе.{integration.configured ? " Сохранение заменяет весь набор: заполните все поля заново, включая те, что уже добавляли." : ""}</DialogDescription></DialogHeader><div className="space-y-4 py-2">{integration.credentials.map((credential) => { const optional = Boolean(integration.required) && !integration.required?.includes(credential); return <div key={credential} className="space-y-2"><Label htmlFor={`${integration.id}-${credential}`}>{credentialLabels[credential] ?? credential}{optional && <span className="ml-2 text-[11px] font-normal text-muted-foreground">необязательно</span>}</Label><Input id={`${integration.id}-${credential}`} type={SECRET_CREDENTIALS.has(credential) ? "password" : "text"} autoComplete="off" value={values[credential] ?? ""} onChange={(event) => setValues((current) => ({ ...current, [credential]: event.target.value }))} placeholder={credential} />{credential === "YANDEX_DELIVERY_SERVICE_ID" && services.length > 0 ? <div className="flex flex-wrap gap-2 pt-1">{services.map((service) => <button key={service.id} type="button" className="rounded-full border px-3 py-1 text-[11px] hover:bg-muted" onClick={() => setValues((current) => ({ ...current, YANDEX_DELIVERY_SERVICE_ID: String(service.id) }))}>{service.name} · {service.id}</button>)}</div> : null}</div>; })}</div><DialogFooter><Button variant="outline" onClick={() => setOpen(false)}>Отмена</Button><Button onClick={() => void save()} disabled={saving || (integration.required ?? integration.credentials).some((key) => !values[key]?.trim())}>{saving ? <Loader2 className="animate-spin" /> : <LockKeyhole />}Сохранить защищённо</Button></DialogFooter></DialogContent></Dialog>;
 }
 
 export function IntegrationsWorkspace() {
