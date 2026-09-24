@@ -1,0 +1,35 @@
+# Проверка кода до выката.
+#
+# Раньше единственной проверкой была сборка на сервере: неудача означала
+# остановку синхронизации, копию базы и откат — и всё это на работающем
+# складе. Здесь то же самое происходит заранее и никому не мешает.
+name: Проверка
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Зависимости
+        run: npm install --no-audit --no-fund
+
+      - name: Типы
+        run: npx tsc --noEmit
+
+      - name: Тесты
+        run: npm test
+
+      - name: Сборка
+        run: npm run build
+        env:
+          NODE_ENV: production
