@@ -21,6 +21,7 @@ import {
   type WildberriesOrderStatus,
 } from "@/lib/wildberries";
 import { getYandexOfferMappings, getYandexOrders, type YandexOrder } from "@/lib/yandex";
+import { cancelDeliveryRequest } from "@/lib/yandex-delivery";
 import {
   isoFromMarketDate,
   yandexOrderAmount,
@@ -443,7 +444,49 @@ async function syncYandex(db: D1Database, runtime: ReturnType<typeof getRuntimeE
   });
 
   await persistOrders(db, "yandex", "Яндекс Маркет", normalized);
-  return { marketplace: "yandex", skipped: false, orders: normalized.length };
+
+  // Отменённый заказ не должен оставлять вызванного курьера: заявка Яндекс
+  // Доставки по нему отменяется сразу, иначе машина приедет за посылкой,
+  // которой уже нет.
+  const cancelled = normalized.filter((order) => order.canceledAt).map((order) => order.externalOrderId);
+  const cancelledRequests = await readConfirmedDeliveryRequests(db, cancelled);
+  for (const row of cancelledRequests) {
+    if (!credentials.YANDEX_DELIVERY_TOKEN) break;
+    try {
+      await cancelDeliveryRequest(credentials.YANDEX_DELIVERY_TOKEN, row.requestId);
+      await db.prepare(
+        "UPDATE delivery_requests SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP WHERE id = ?",
+      ).bind(row.id).run();
+    } catch (error) {
+      await db.prepare("UPDATE delivery_requests SET error = ? WHERE id = ?")
+        .bind((error instanceof Error ? error.message : "Заявку не удалось отменить").slice(0, 500), row.id).run();
+    }
+  }
+
+  return {
+    marketplace: "yandex",
+    skipped: false,
+    orders: normalized.length,
+    cancelledDeliveries: cancelledRequests.length,
+  };
+}
+
+/** Заявки Доставки, которые ещё живы, по списку заказов. */
+async function readConfirmedDeliveryRequests(db: D1Database, orderIds: string[]) {
+  if (orderIds.length === 0) return [];
+  const rows: Array<{ id: number; requestId: string }> = [];
+  // Список отменённых заказов за раз бывает длинным — режем на пачки,
+  // чтобы не упереться в ограничение на число параметров запроса.
+  for (let start = 0; start < orderIds.length; start += 100) {
+    const chunk = orderIds.slice(start, start + 100);
+    const result = await db.prepare(
+      `SELECT id, request_id AS requestId FROM delivery_requests
+       WHERE marketplace_id = 'yandex' AND status = 'confirmed' AND request_id IS NOT NULL
+         AND external_order_id IN (${chunk.map(() => "?").join(",")})`,
+    ).bind(...chunk).all<{ id: number; requestId: string }>();
+    rows.push(...result.results);
+  }
+  return rows;
 }
 
 export async function POST(request: Request) {

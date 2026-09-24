@@ -10,7 +10,7 @@
  * Ozon: акт приёма-передачи по методу доставки; готовится не мгновенно,
  * статус опрашивается, поэтому документы докладываются кнопкой «Обновить».
  */
-import { getMarketplaceCredentials } from "@/lib/credentials";
+import { deliveryConfigured, getMarketplaceCredentials } from "@/lib/credentials";
 import {
   checkOzonActStatus,
   createOzonAct,
@@ -35,6 +35,20 @@ import {
 } from "@/lib/wildberries";
 import { logWarehouseEvent, readTask } from "@/lib/warehouse";
 import { moscowDate, normalizeCity, pickShippingPoint, sameCity } from "@/lib/shipping-point-core.mjs";
+import {
+  getYandexOrder,
+  setYandexOrderTrack,
+  updateYandexOrderStatus,
+  type YandexOrderAddress,
+} from "@/lib/yandex";
+import {
+  confirmDeliveryOffer,
+  createDeliveryOffers,
+  createDeliveryRequest,
+  generateDeliveryLabels,
+  getDeliveryHandoverAct,
+} from "@/lib/yandex-delivery";
+import { buildDeliveryRequest, yandexHandoverSteps, yandexStatusKey } from "@/lib/yandex-core.mjs";
 
 export type SupplyDocument = {
   kind: "supply_qr" | "box_sticker" | "act" | "act_barcode";
@@ -45,7 +59,7 @@ export type SupplyDocument = {
 
 export type SupplyRow = {
   id: number;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   taskId: number | null;
   externalId: string | null;
   name: string | null;
@@ -581,6 +595,13 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
         shippingPointName: dropoff?.name ?? null,
         shippingDate: input.departureDate ?? null,
       });
+    } else if (task.marketplaceId === "yandex") {
+      await createYandexSupplyFlow(db, runtime, {
+        supplyId,
+        taskId: input.taskId,
+        orderIds: postings.results.map((row) => row.externalOrderId),
+        actorEmail: input.actorEmail,
+      });
     } else {
       await createOzonSupplyFlow(db, runtime, {
         supplyId,
@@ -773,6 +794,172 @@ async function createOzonSupplyFlow(
 
   // Акт готовится не мгновенно: ждём немного, дальше документы докладываются кнопкой.
   await collectOzonActDocuments(db, runtime, input.supplyId, actId, 4);
+}
+
+/**
+ * Отгрузка заказов Яндекс Маркета: вызов курьера Яндекс Доставки.
+ *
+ * Поставки в привычном смысле на DBS нет — есть заявка на курьера по каждому
+ * заказу. Порядок по каждому заказу: оффер → бронь → трек-номер в Маркет →
+ * статус «передан в доставку». Номер заявки сохраняется, чтобы повторное
+ * оформление не вызвало второго курьера на ту же посылку.
+ *
+ * Один сорвавшийся заказ не отменяет остальные: ошибки копятся и показываются
+ * текстом, а ярлыки и акт печатаются по тем заявкам, которые создались.
+ */
+async function createYandexSupplyFlow(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { supplyId: number; taskId: number; orderIds: string[]; actorEmail: string },
+) {
+  const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+  const apiKey = credentials.YANDEX_API_KEY;
+  const campaignId = credentials.YANDEX_CAMPAIGN_ID;
+  if (!apiKey || !campaignId) throw new Error("Ключи Яндекс Маркета не добавлены.");
+  if (!deliveryConfigured(credentials)) {
+    throw new Error("Не заполнены реквизиты Яндекс Доставки: токен, станция отправления и код службы доставки.");
+  }
+  const token = credentials.YANDEX_DELIVERY_TOKEN as string;
+  const stationId = credentials.YANDEX_DELIVERY_STATION_ID as string;
+  const deliveryServiceId = Number(credentials.YANDEX_DELIVERY_SERVICE_ID);
+  if (!Number.isFinite(deliveryServiceId)) throw new Error("Код службы доставки в Маркете должен быть числом.");
+
+  const existingRows = await db.prepare(
+    `SELECT external_order_id AS externalOrderId, request_id AS requestId
+     FROM delivery_requests
+     WHERE marketplace_id = 'yandex' AND request_id IS NOT NULL AND status <> 'cancelled'`,
+  ).all<{ externalOrderId: string; requestId: string }>();
+  const existing = new Map(existingRows.results.map((row) => [row.externalOrderId, row.requestId]));
+
+  const requestIds: string[] = [];
+  const failures: string[] = [];
+
+  for (const orderId of input.orderIds) {
+    const ready = existing.get(orderId);
+    if (ready) {
+      requestIds.push(ready);
+      continue;
+    }
+
+    try {
+      const order = await getYandexOrder(apiKey, campaignId, orderId);
+      if (!order) throw new Error("заказ не найден в Маркете");
+
+      const request = buildDeliveryRequest({
+        orderId,
+        items: (order.items ?? []).map((item) => ({
+          article: String(item.offerId ?? ""),
+          name: item.offerName ?? null,
+          count: Number(item.count ?? 1),
+          price: Number(item.buyerPrice ?? item.price ?? 0),
+        })),
+        recipient: {
+          name: [order.delivery?.address?.recipient, order.buyer?.lastName, order.buyer?.firstName]
+            .filter(Boolean).join(" ") || null,
+          phone: order.delivery?.address?.phone ?? order.buyer?.phone ?? null,
+          email: order.buyer?.email ?? null,
+        },
+        address: { full: formatYandexAddress(order.delivery?.address ?? null) },
+        stationId,
+        barcode: orderId,
+      });
+
+      // Оффер — это забронированное время вывоза с ценой. Если офферов нет
+      // (например, поздно для сегодняшнего вывоза), Доставка подбирает
+      // ближайшее время сама методом request/create.
+      const offers = await createDeliveryOffers(token, request).catch(() => []);
+      const offer = offers[0] ?? null;
+      const requestId = offer
+        ? await confirmDeliveryOffer(token, offer.offerId)
+        : await createDeliveryRequest(token, request);
+
+      await db.prepare(
+        `INSERT INTO delivery_requests
+           (marketplace_id, external_order_id, task_id, supply_id, offer_id, request_id, status, created_by, confirmed_at)
+         VALUES ('yandex', ?, ?, ?, ?, ?, 'confirmed', ?, CURRENT_TIMESTAMP)
+         ON CONFLICT(marketplace_id, external_order_id) DO UPDATE SET
+           task_id = excluded.task_id,
+           supply_id = excluded.supply_id,
+           offer_id = excluded.offer_id,
+           request_id = excluded.request_id,
+           status = 'confirmed',
+           error = NULL,
+           confirmed_at = CURRENT_TIMESTAMP`,
+      ).bind(orderId, input.taskId, input.supplyId, offer?.offerId ?? null, requestId, input.actorEmail).run();
+
+      // Трек-номер связывает заказ с заявкой: дальше Маркет сам доводит его
+      // до «доставлен» и показывает покупателю отслеживание.
+      await setYandexOrderTrack(apiKey, campaignId, orderId, requestId, deliveryServiceId);
+      for (const step of yandexHandoverSteps(yandexStatusKey(order.status, order.substatus))) {
+        await updateYandexOrderStatus(apiKey, campaignId, orderId, step.status, step.substatus);
+      }
+
+      requestIds.push(requestId);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "неизвестная ошибка";
+      failures.push(`${orderId}: ${message}`);
+      await db.prepare(
+        `INSERT INTO delivery_requests (marketplace_id, external_order_id, task_id, supply_id, status, error, created_by)
+         VALUES ('yandex', ?, ?, ?, 'error', ?, ?)
+         ON CONFLICT(marketplace_id, external_order_id) DO UPDATE SET
+           task_id = excluded.task_id,
+           supply_id = excluded.supply_id,
+           status = 'error',
+           error = excluded.error`,
+      ).bind(orderId, input.taskId, input.supplyId, message.slice(0, 500), input.actorEmail).run();
+    }
+  }
+
+  if (requestIds.length === 0) {
+    throw new Error(`Яндекс Доставка не приняла ни одной заявки. ${failures.join("; ")}`.slice(0, 500));
+  }
+
+  await db.prepare("UPDATE supplies SET external_id = ?, posting_count = ? WHERE id = ?")
+    .bind(requestIds[0], requestIds.length, input.supplyId).run();
+
+  const documents: SupplyDocument[] = [];
+  const labels = await generateDeliveryLabels(token, requestIds).catch(() => null);
+  if (labels) {
+    documents.push({
+      kind: "box_sticker",
+      label: `Ярлыки Яндекс Доставки, заявок: ${requestIds.length}`,
+      storageKey: await storeDocument(runtime, input.supplyId, "box_sticker", 1, Buffer.from(labels).toString("base64"), "application/pdf"),
+      contentType: "application/pdf",
+    });
+  }
+  const act = await getDeliveryHandoverAct(token, requestIds).catch(() => null);
+  if (act) {
+    documents.push({
+      kind: "act",
+      label: `Акт приёма-передачи, заявок: ${requestIds.length}`,
+      storageKey: await storeDocument(runtime, input.supplyId, "act", 1, Buffer.from(act).toString("base64"), "application/pdf"),
+      contentType: "application/pdf",
+    });
+  }
+  await saveDocuments(db, input.supplyId, documents);
+
+  // Частичный отказ не прячем: остальные заказы уехали, а эти остались на складе.
+  if (failures.length > 0) {
+    await db.prepare("UPDATE supplies SET error = ? WHERE id = ?")
+      .bind(`Не оформлены заказы — ${failures.join("; ")}`.slice(0, 500), input.supplyId).run();
+  }
+}
+
+/** Адрес доставки одной строкой: Яндекс Доставка принимает его текстом. */
+function formatYandexAddress(address: YandexOrderAddress | null) {
+  if (!address) return "";
+  const parts = [
+    address.postcode,
+    address.country,
+    address.city,
+    address.street,
+    address.house ? `д. ${address.house}` : null,
+    address.block ? `корп. ${address.block}` : null,
+    address.entrance ? `подъезд ${address.entrance}` : null,
+    address.floor ? `этаж ${address.floor}` : null,
+    address.apartment ? `кв. ${address.apartment}` : null,
+  ];
+  return parts.filter(Boolean).join(", ");
 }
 
 /** Догружает документы Ozon: акт и штрихкод отгрузки, когда они готовы. */

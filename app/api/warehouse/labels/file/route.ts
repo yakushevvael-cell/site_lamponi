@@ -16,7 +16,8 @@ export async function GET(request: Request) {
   if (!runtime.DB || !runtime.BUCKET) return new Response("Хранилище недоступно.", { status: 500 });
 
   const url = new URL(request.url);
-  const marketplaceId = url.searchParams.get("marketplace") === "wildberries" ? "wildberries" : "ozon";
+  const requested = url.searchParams.get("marketplace");
+  const marketplaceId = requested === "wildberries" || requested === "yandex" ? requested : "ozon";
   const posting = (url.searchParams.get("posting") ?? "").trim();
   if (!posting) return new Response("Не указано отправление.", { status: 400 });
 

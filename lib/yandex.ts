@@ -77,6 +77,8 @@ export type YandexOrder = {
   buyer?: { firstName?: string | null; lastName?: string | null; middleName?: string | null; phone?: string | null; email?: string | null } | null;
 };
 
+export type YandexOrderAddress = NonNullable<NonNullable<YandexOrder["delivery"]>["address"]>;
+
 export type YandexBox = {
   items: Array<{ id: number; fullCount: number; instances?: Array<Record<string, string>> }>;
 };
@@ -179,10 +181,7 @@ async function yandexRequest<T>(path: string, apiKey: string, options: RequestOp
  * руками: ключ знает свои магазины сам. Заодно это проверка связи.
  */
 export async function getYandexCampaigns(apiKey: string): Promise<YandexCampaign[]> {
-  const payload = await yandexRequest<{ campaigns?: Array<Record<string, unknown>> }>(
-    "/v2/campaigns?page=1&pageSize=50",
-    apiKey,
-  );
+  const payload = await yandexRequest<{ campaigns?: Array<Record<string, unknown>> }>("/v2/campaigns", apiKey);
   return (payload.campaigns ?? []).map((campaign) => {
     const business = asObject(campaign.business);
     return {

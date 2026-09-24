@@ -31,6 +31,20 @@ export const credentialLabels: Record<string, string> = {
   YANDEX_DELIVERY_SERVICE_ID: "Код службы доставки в Маркете",
 };
 
+/**
+ * Название площадки для экрана.
+ *
+ * Пока площадок было две, в интерфейсе хватало «Ozon или WB» тернарником.
+ * С третьей такие выражения молча показывают чужое имя, поэтому имя площадки
+ * берётся отсюда — в одном месте на всё приложение.
+ */
+export function marketplaceLabel(id: string | null | undefined, short = false) {
+  if (id === "ozon") return "Ozon";
+  if (id === "wildberries") return short ? "WB" : "Wildberries";
+  if (id === "yandex") return short ? "YM" : "Яндекс Маркет";
+  return id || "—";
+}
+
 export const marketplaceConnectors: MarketplaceConnector[] = [
   {
     id: "wildberries",

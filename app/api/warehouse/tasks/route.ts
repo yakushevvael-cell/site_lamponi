@@ -61,10 +61,10 @@ export async function POST(request: Request) {
     warehouseExternalId?: unknown;
     maxBatches?: unknown;
   } | null;
-  const marketplaceId = body?.marketplaceId === "ozon" || body?.marketplaceId === "wildberries"
+  const marketplaceId = body?.marketplaceId === "ozon" || body?.marketplaceId === "wildberries" || body?.marketplaceId === "yandex"
     ? body.marketplaceId as MarketplaceId
     : null;
-  if (!marketplaceId) return Response.json({ error: "Укажите площадку: ozon или wildberries." }, { status: 400 });
+  if (!marketplaceId) return Response.json({ error: "Укажите площадку: ozon, wildberries или yandex." }, { status: 400 });
 
   const warehouseExternalId = typeof body?.warehouseExternalId === "string" && body.warehouseExternalId.trim()
     ? body.warehouseExternalId.trim()

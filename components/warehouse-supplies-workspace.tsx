@@ -33,12 +33,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { NativeSelect } from "@/components/ui/native-select";
+import { marketplaceLabel } from "@/lib/marketplaces";
 import { formatMoment } from "@/lib/utils";
 
 type Task = {
   id: number;
   number: string;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: string;
   itemCount: number;
@@ -58,7 +59,7 @@ type SupplyDocument = { kind: string; label: string; storageKey: string; content
 
 type Supply = {
   id: number;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   taskId: number | null;
   externalId: string | null;
   name: string | null;
@@ -369,7 +370,7 @@ export function WarehouseSuppliesWorkspace() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-xl font-bold">{task.number}</span>
                   <Badge variant="secondary">
-                    {task.marketplaceId === "ozon" ? "Ozon" : "WB"}
+                    {marketplaceLabel(task.marketplaceId, true)}
                     {task.warehouseName ? ` · ${task.warehouseName}` : ""}
                   </Badge>
                   <span className="font-mono text-xs text-muted-foreground">лист {sheetCode}</span>
@@ -403,7 +404,7 @@ export function WarehouseSuppliesWorkspace() {
                 />
               )}
             </div>
-            {task?.marketplaceId !== "ozon" ? <div className="space-y-1">
+            {task?.marketplaceId === "wildberries" ? <div className="space-y-1">
               <Label className="text-xs">Пункт отгрузки — куда фактически повезёте коробки</Label>
               <NativeSelect
                 className="w-[28rem] max-w-full"
@@ -426,12 +427,14 @@ export function WarehouseSuppliesWorkspace() {
                 ))}
               </NativeSelect>
             </div> : null}
-            <div className="space-y-1">
+            {/* У Яндекса место считается по заказу: курьер забирает по посылке на каждый. */}
+            {task?.marketplaceId === "yandex" ? null : <div className="space-y-1">
               <Label className="text-xs">Коробов</Label>
               <Input className="w-24" inputMode="numeric" value={boxCount} onChange={(event) => setBoxCount(event.target.value)} />
-            </div>
+            </div>}
             <Button disabled={!taskId || !sheetCode || Boolean(blocker) || busy !== null || !canManage} onClick={() => void createSupply()}>
-              {busy === "create" ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />} Оформить поставку
+              {busy === "create" ? <Loader2 className="size-4 animate-spin" /> : <Truck className="size-4" />}
+              {task?.marketplaceId === "yandex" ? "Вызвать курьера Яндекс Доставки" : "Оформить поставку"}
             </Button>
           </div>
 
@@ -538,11 +541,12 @@ export function WarehouseSuppliesWorkspace() {
                   <p className="font-mono text-lg font-bold">
                     {supply.externalId ?? `№${supply.id}`}
                     <span className="ml-2 text-sm font-normal text-muted-foreground">
-                      {supply.marketplaceId === "ozon" ? "Ozon" : "Wildberries"}
+                      {marketplaceLabel(supply.marketplaceId)}
                     </span>
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    задание {supply.name ?? "—"} · {supply.postingCount} отправлений · {supply.boxCount} коробов
+                    задание {supply.name ?? "—"} · {supply.postingCount}
+                    {supply.marketplaceId === "yandex" ? " заявок в Яндекс Доставку" : ` отправлений · ${supply.boxCount} коробов`}
                     {supply.dropoffName ? ` · ${supply.dropoffName}` : ""}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">

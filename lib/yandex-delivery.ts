@@ -35,8 +35,8 @@ export type DeliveryOffer = {
 export type DeliveryRequestInfo = {
   requestId: string;
   status: string | null;
+  /** Ссылка на отслеживание — её же видит покупатель. */
   sharingUrl: string | null;
-  /** Номер, который видит покупатель и по которому ищут посылку в поддержке. */
   fullItemsPrice: string | null;
 };
 

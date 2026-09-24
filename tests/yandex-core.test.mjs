@@ -146,7 +146,7 @@ test("заявка Доставки: одно место, оплата уже п
   assert.equal(request.destination.custom_location.details.full_address, "Москва, ул. Ленина, 1, кв. 2");
   assert.equal(request.items[0].place_barcode, "LM123456");
   assert.equal(request.items[0].billing_details.unit_price, 420000);
-  assert.equal(request.items[0].billing_details.nds, -1);
+  assert.equal(request.items[0].billing_details.nds, 22);
   assert.equal(request.places.length, 1);
   assert.equal(request.places[0].barcode, "LM123456");
   assert.equal(request.places[0].physical_dims.weight_gross, 500);

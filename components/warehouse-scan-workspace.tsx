@@ -44,12 +44,13 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { parsePickSheetScan } from "@/lib/barcode39.mjs";
+import { marketplaceLabel } from "@/lib/marketplaces";
 import { formatMoment } from "@/lib/utils";
 
 type Task = {
   id: number;
   number: string;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: string;
   itemCount: number;
@@ -486,7 +487,7 @@ export function WarehouseScanWorkspace() {
                 <div className="flex flex-wrap items-center gap-2">
                   <span className="font-mono text-xl font-bold">{task.number}</span>
                   <Badge variant="secondary">
-                    {task.marketplaceId === "ozon" ? "Ozon" : "WB"} · {task.itemCount} поз.
+                    {marketplaceLabel(task.marketplaceId, true)} · {task.itemCount} поз.
                   </Badge>
                   <span className="font-mono text-xs text-muted-foreground">лист {sheetCode}</span>
                   <Button
@@ -584,7 +585,7 @@ export function WarehouseScanWorkspace() {
                 <p className="flex items-center gap-2 text-xl font-bold"><CheckCircle2 className="size-6" /> Этикетка на печать</p>
                 <p className="font-mono text-2xl font-bold">{outcome.item.article}{outcome.item.size ? ` / ${outcome.item.size}` : ""}</p>
                 <p className="text-sm">
-                  {outcome.item.marketplaceId === "ozon" ? "Ozon" : "Wildberries"} · отправление{" "}
+                  {marketplaceLabel(outcome.item.marketplaceId)} · отправление{" "}
                   <span className="font-mono">{outcome.item.externalOrderId}</span>
                 </p>
                 <Button
@@ -722,7 +723,7 @@ export function WarehouseScanWorkspace() {
                           {row.externalOrderId}
                         </button>
                         <p className="text-xs text-muted-foreground">
-                          {row.marketplaceId === "ozon" ? "Ozon" : "Wildberries"} · отсканировано {row.scanned} из {row.total}
+                          {marketplaceLabel(row.marketplaceId)} · отсканировано {row.scanned} из {row.total}
                           {row.printCount > 0 ? ` · печаталась ${row.printCount} раз` : ""}
                         </p>
                       </div>

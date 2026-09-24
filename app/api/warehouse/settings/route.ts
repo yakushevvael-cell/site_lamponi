@@ -17,8 +17,8 @@ export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
 
-  const body = await request.json().catch(() => null) as { ozon?: unknown; wildberries?: unknown } | null;
-  if (!body || (body.ozon === undefined && body.wildberries === undefined)) {
+  const body = await request.json().catch(() => null) as { ozon?: unknown; wildberries?: unknown; yandex?: unknown } | null;
+  if (!body || (body.ozon === undefined && body.wildberries === undefined && body.yandex === undefined)) {
     return Response.json({ error: "Нечего менять." }, { status: 400 });
   }
   const batchSizes = await writeBatchSizes(runtime.DB, body, auth.user.email);

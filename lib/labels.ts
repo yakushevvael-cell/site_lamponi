@@ -43,10 +43,17 @@ import {
   setWildberriesUin,
 } from "@/lib/wildberries";
 import { logWarehouseEvent } from "@/lib/warehouse";
+import {
+  getYandexOrder,
+  getYandexOrderLabels,
+  setYandexOrderBoxes,
+  updateYandexOrderStatus,
+} from "@/lib/yandex";
+import { buildYandexBoxes, parseYandexStatus, yandexStatusKey } from "@/lib/yandex-core.mjs";
 
 export type LabelRow = {
   id: number;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   externalOrderId: string;
   taskId: number | null;
   article: string | null;
@@ -79,7 +86,7 @@ function sleep(ms: number) {
 type TaskItemRow = {
   id: number;
   taskId: number;
-  marketplaceId: "ozon" | "wildberries";
+  marketplaceId: "ozon" | "wildberries" | "yandex";
   externalOrderId: string;
   externalSku: string;
   article: string;
@@ -337,6 +344,28 @@ export async function prepareLabelsForTask(
           storageKey,
           error: null,
         });
+      } else if (marketplaceId === "yandex") {
+        const { storageKey, warning } = await prepareYandexLabel(db, runtime, {
+          orderId: first.externalOrderId,
+          products: taken.map((entry) => ({
+            externalSku: entry.item.externalSku,
+            quantity: entry.item.quantity,
+            uin: entry.uin,
+          })),
+        });
+        if (warning) messages.push(warning);
+        await upsertLabel(db, {
+          marketplaceId,
+          externalOrderId: first.externalOrderId,
+          taskId: input.taskId,
+          article: articles,
+          size: multi ? null : first.size,
+          uin: taken[0]?.uin ?? null,
+          status: "ready",
+          contentType: "application/pdf",
+          storageKey,
+          error: warning ?? null,
+        });
       } else {
         const { storageKey, warning } = await prepareWildberriesLabel(db, runtime, {
           orderId: first.externalOrderId,
@@ -555,6 +584,68 @@ async function prepareWildberriesLabel(
   const bytes = Uint8Array.from(Buffer.from(sticker.file, "base64"));
   const storageKey = await storeLabelFile(runtime, "wildberries", input.orderId, bytes, "png");
   return { storageKey, warning };
+}
+
+/**
+ * Ярлык Яндекс Маркета на заказ DBS.
+ *
+ * Порядок задан площадкой: состав грузовых мест → «готов к отгрузке» → ярлык.
+ * Без переданного состава Маркет ярлык не отдаёт, а УИН изделия попадает в
+ * заказ именно здесь, в instances грузового места.
+ *
+ * В доставку заказ на этом шаге не переводится: курьер Яндекс Доставки ещё не
+ * вызван, а статус DELIVERY без трек-номера означал бы, что посылка уже едет.
+ */
+async function prepareYandexLabel(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { orderId: string; products: Array<{ externalSku: string; quantity: number; uin: string }> },
+) {
+  const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+  const apiKey = credentials.YANDEX_API_KEY;
+  const campaignId = credentials.YANDEX_CAMPAIGN_ID;
+  if (!apiKey || !campaignId) throw new Error("Ключи Яндекс Маркета не добавлены.");
+
+  const order = await getYandexOrder(apiKey, campaignId, input.orderId);
+  if (!order) throw new Error(`Яндекс Маркет не нашёл заказ ${input.orderId}.`);
+
+  // Состав передаётся по идентификаторам строк заказа Маркета, а не по нашим:
+  // сопоставляем их с артикулами задания по offerId.
+  const remoteByOffer = new Map<string, Array<{ id: number; count: number }>>();
+  for (const item of order.items ?? []) {
+    const offerId = String(item.offerId ?? "");
+    if (!offerId) continue;
+    const rows = remoteByOffer.get(offerId) ?? [];
+    rows.push({ id: Number(item.id), count: Math.max(1, Number(item.count ?? 1)) });
+    remoteByOffer.set(offerId, rows);
+  }
+
+  const boxItems: Array<{ id: number; count: number; uin: string | null }> = [];
+  const warnings: string[] = [];
+  for (const product of input.products) {
+    const remote = (remoteByOffer.get(product.externalSku) ?? []).shift();
+    if (!remote) {
+      throw new Error(`В заказе ${input.orderId} нет артикула ${product.externalSku}. Обновите заказы.`);
+    }
+    // Один УИН — одно изделие. Когда в строке несколько штук, маркировку
+    // придётся проставить в кабинете руками: угадывать остальные УИН нельзя.
+    const single = remote.count === 1;
+    if (!single) {
+      warnings.push(`Заказ ${input.orderId}: в строке ${product.externalSku} ${remote.count} шт., УИН передан не был.`);
+    }
+    boxItems.push({ id: remote.id, count: remote.count, uin: single ? product.uin : null });
+  }
+
+  await setYandexOrderBoxes(apiKey, campaignId, input.orderId, buildYandexBoxes(boxItems));
+
+  const current = parseYandexStatus(yandexStatusKey(order.status, order.substatus));
+  if (current.status === "PROCESSING" && current.substatus !== "READY_TO_SHIP") {
+    await updateYandexOrderStatus(apiKey, campaignId, input.orderId, "PROCESSING", "READY_TO_SHIP");
+  }
+
+  const pdf = await getYandexOrderLabels(apiKey, campaignId, input.orderId, "A7");
+  const storageKey = await storeLabelFile(runtime, "yandex", input.orderId, pdf, "pdf");
+  return { storageKey, warning: warnings.length > 0 ? warnings.join(" ") : null };
 }
 
 /**

@@ -28,6 +28,7 @@ import {
 import { NativeSelect } from "@/components/ui/native-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Textarea } from "@/components/ui/textarea";
+import { marketplaceLabel } from "@/lib/marketplaces";
 import { formatAge, formatMoment } from "@/lib/utils";
 
 type Problem = {
@@ -174,7 +175,7 @@ export function WarehouseProblemsWorkspace() {
                         {item.taskNumber ? <span className="block font-mono">{item.taskNumber}</span> : null}
                       </TableCell>
                       <TableCell className="text-xs">
-                        {item.marketplaceId === "ozon" ? "Ozon" : item.marketplaceId === "wildberries" ? "Wildberries" : "—"}
+                        {marketplaceLabel(item.marketplaceId)}
                         {item.externalOrderId ? <span className="block font-mono text-muted-foreground">{item.externalOrderId}</span> : null}
                       </TableCell>
                       <TableCell className="text-xs">
