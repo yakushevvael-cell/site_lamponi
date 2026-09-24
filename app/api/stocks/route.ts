@@ -24,6 +24,12 @@ export async function GET(request: Request) {
        p.manual_zero_at AS manualZeroAt,
        -- Та же формула, что и в lib/stock-math: MAX(0; ОСВ − резерв − страховой), целое.
        CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(${OSV_UNITS_SQL} - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock AS INTEGER)) END AS availableQuantity,
+       -- Сопоставление с площадками берём подзапросами, а не вторым JOIN:
+       -- лишнее соединение размножило бы строки и удвоило SUM по резерву.
+       (SELECT sm.external_sku FROM sku_mappings sm
+         WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'wildberries' AND sm.active = 1 LIMIT 1) AS wbSku,
+       (SELECT sm.external_sku FROM sku_mappings sm
+         WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'ozon' AND sm.active = 1 LIMIT 1) AS ozonSku,
        p.updated_at AS updatedAt
      FROM products p
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku

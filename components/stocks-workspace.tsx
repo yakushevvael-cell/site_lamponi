@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Play, PowerOff, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Play, PowerOff, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
@@ -35,7 +35,40 @@ type StockRow = {
   availableQuantity: number;
   manualZero: number | boolean;
   manualZeroAt: string | null;
+  /** Внешний код позиции на площадке; null — сопоставления нет, отправлять некуда. */
+  wbSku: string | null;
+  ozonSku: string | null;
   updatedAt: string;
+};
+
+/** Фактический остаток на одном складе площадки — то, что там лежит прямо сейчас. */
+type RemoteWarehouseStock = {
+  warehouseId: string;
+  warehouseName: string;
+  publishing: boolean;
+  amount: number;
+  reserved: number | null;
+};
+
+type RemoteStockRow = {
+  sourceSku: string;
+  article: string | null;
+  size: string | null;
+  availableQuantity: number;
+  marketplaces: Array<{
+    marketplaceId: "wildberries" | "ozon";
+    externalSku: string;
+    warehouses: RemoteWarehouseStock[];
+  }>;
+};
+
+type RemoteCheckResult = {
+  ok: boolean;
+  checkedAt: string;
+  selected: number;
+  unmapped: string[];
+  rows: RemoteStockRow[];
+  failures: string[];
 };
 
 type StockTotals = {
@@ -137,6 +170,26 @@ function SyncScopeSummary({ scope }: { scope: SyncState["scope"] }) {
   );
 }
 
+/**
+ * Есть ли позиция на площадках.
+ *
+ * Без этой колонки человек отмечал строки, жал отправку и только из отчёта
+ * узнавал, что часть позиций «без сопоставления» — то есть на площадку они
+ * не уходили никогда. Внешний код показываем подсказкой: по нему позицию
+ * ищут в кабинете.
+ */
+function MappingBadges({ row }: { row: StockRow }) {
+  if (!row.wbSku && !row.ozonSku) {
+    return <Badge variant="outline" className="border-dashed text-muted-foreground">Не сопоставлен</Badge>;
+  }
+  return (
+    <span className="flex flex-wrap gap-1">
+      {row.wbSku ? <Badge className="bg-violet-100 text-violet-900 hover:bg-violet-100" title={`chrtId ${row.wbSku}`}>WB</Badge> : null}
+      {row.ozonSku ? <Badge className="bg-blue-100 text-blue-900 hover:bg-blue-100" title={`offer_id ${row.ozonSku}`}>Ozon</Badge> : null}
+    </span>
+  );
+}
+
 function StatusBadge({ row }: { row: StockRow }) {
   if (row.manualZero) return <Badge variant="destructive">Обнулено вручную</Badge>;
   if (row.availableQuantity <= 0) return <Badge variant="secondary">Нет в наличии</Badge>;
@@ -165,6 +218,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [switching, setSwitching] = useState(false);
   /** Масштаб полной выгрузки: показываем цену нажатия до запуска, а не после. */
   const [scope, setScope] = useState<SyncState["scope"] | null>(null);
+  const [remoteCheck, setRemoteCheck] = useState<RemoteCheckResult | null>(null);
+  const [checkingRemote, setCheckingRemote] = useState(false);
 
   const load = useCallback(async (search: string) => {
     setLoading(true);
@@ -222,6 +277,33 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const allSelected = stocks.length > 0 && stocks.slice(0, 50).every((row) => selected.has(row.variantKey));
   const selectedRows = useMemo(() => stocks.filter((row) => selected.has(row.variantKey)), [selected, stocks]);
   const canRestore = selectedRows.some((row) => Boolean(row.manualZero));
+  // Сколько из отмеченных вообще есть на площадках: раньше это выяснялось
+  // только из ответа после отправки, когда половина позиций оказывалась «unmapped».
+  const selectedMapping = useMemo(() => ({
+    wildberries: selectedRows.filter((row) => Boolean(row.wbSku)).length,
+    ozon: selectedRows.filter((row) => Boolean(row.ozonSku)).length,
+    unmapped: selectedRows.filter((row) => !row.wbSku && !row.ozonSku).length,
+  }), [selectedRows]);
+
+  /** Читает фактические остатки с площадок: маршрут только смотрит, ничего не шлёт. */
+  async function checkRemoteStocks() {
+    if (selected.size === 0) return;
+    setCheckingRemote(true);
+    try {
+      const response = await fetch("/api/stocks/remote", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ sourceSkus: [...selected] }),
+      });
+      const data = await response.json() as RemoteCheckResult & { error?: string };
+      if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Не удалось прочитать остатки с площадок.");
+      setRemoteCheck(data);
+    } catch (error) {
+      toast.error("Остатки площадок не прочитаны", { description: error instanceof Error ? error.message : "Повторите попытку." });
+    } finally {
+      setCheckingRemote(false);
+    }
+  }
 
   function toggle(key: string, checked: boolean) {
     setSelected((current) => {
@@ -518,6 +600,18 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                       Остальной ассортимент не затрагивается.
                     </AlertDialogDescription>
                   </AlertDialogHeader>
+                  <div className="rounded-xl border bg-muted/50 px-4 py-3 text-xs leading-5">
+                    <p className="font-semibold">Куда уйдут выбранные позиции</p>
+                    <ul className="mt-1.5 space-y-1 text-muted-foreground">
+                      <li>Wildberries: {selectedMapping.wildberries} из {selected.size}</li>
+                      <li>Ozon: {selectedMapping.ozon} из {selected.size}</li>
+                    </ul>
+                    {selectedMapping.unmapped > 0 ? (
+                      <p className="mt-2 font-medium text-amber-700">
+                        {selectedMapping.unmapped} позиций не сопоставлены ни с одной площадкой — они будут пропущены.
+                      </p>
+                    ) : null}
+                  </div>
                   <AlertDialogFooter>
                     <AlertDialogCancel>Отмена</AlertDialogCancel>
                     <AlertDialogAction onClick={() => void syncSelectedStocks()}><PackageCheck />Отправить выбранные</AlertDialogAction>
@@ -569,6 +663,16 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               </AlertDialog>
             ) : null}
             {canSyncSelected ? (
+              <Button
+                variant="outline"
+                onClick={() => void checkRemoteStocks()}
+                disabled={selected.size === 0 || checkingRemote || syncingAll || syncingSelected}
+              >
+                {checkingRemote ? <Loader2 className="animate-spin" /> : <Radar />}
+                {checkingRemote ? "Смотрим…" : "Что на площадке"}
+              </Button>
+            ) : null}
+            {canSyncSelected ? (
               <Button variant="outline" onClick={() => setUnitsOpen(true)} disabled={loading || savingUnits}><Layers />Кратность позиции</Button>
             ) : null}
             <Button variant="outline" onClick={() => void load(query)} disabled={loading || syncingAll || syncingSelected}><RefreshCw className={loading ? "animate-spin" : ""} />Обновить</Button>
@@ -585,7 +689,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               <TableHeader>
                 <TableRow>
                   <TableHead className="w-12 pl-5"><Checkbox checked={allSelected} onCheckedChange={(checked) => setSelected(checked ? new Set(stocks.slice(0, 50).map((row) => row.variantKey)) : new Set())} aria-label="Выбрать строки" /></TableHead>
-                  <TableHead>Артикул из 1С</TableHead><TableHead>Размер</TableHead><TableHead className="text-right">Физически</TableHead><TableHead className="text-right">Ед. в товаре</TableHead><TableHead className="text-right">Резерв</TableHead><TableHead className="text-right">Доступно</TableHead><TableHead className="pr-5 text-right">Статус</TableHead>
+                  <TableHead>Артикул из 1С</TableHead><TableHead>Размер</TableHead><TableHead>Площадки</TableHead><TableHead className="text-right">Физически</TableHead><TableHead className="text-right">Ед. в товаре</TableHead><TableHead className="text-right">Резерв</TableHead><TableHead className="text-right">Доступно</TableHead><TableHead className="pr-5 text-right">Статус</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -594,6 +698,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                     <TableCell className="pl-5"><Checkbox checked={selected.has(row.variantKey)} disabled={!selected.has(row.variantKey) && selected.size >= 50} onCheckedChange={(checked) => toggle(row.variantKey, Boolean(checked))} aria-label={`Выбрать ${row.sku} ${row.size ?? "без размера"}`} /></TableCell>
                     <TableCell className="font-mono text-xs font-semibold">{row.sku}</TableCell>
                     <TableCell>{row.size ? <Badge variant="outline">{row.size}</Badge> : <span className="text-xs text-muted-foreground">Без размера</span>}</TableCell>
+                    <TableCell><MappingBadges row={row} /></TableCell>
                     <TableCell className="text-right">{Number(row.physicalQuantity).toLocaleString("ru-RU")}</TableCell>
                     <TableCell className="text-right">
                       {Number(row.unitsPerItem ?? 1) > 1
@@ -718,6 +823,97 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
 
           <AlertDialogFooter>
             <AlertDialogAction onClick={() => setSelectedResult(null)}>Закрыть</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(remoteCheck)} onOpenChange={(open) => { if (!open) setRemoteCheck(null); }}>
+        <AlertDialogContent className="max-w-4xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Что сейчас лежит на площадках</AlertDialogTitle>
+            <AlertDialogDescription>
+              Прочитано напрямую из API — это фактические числа в кабинетах, а не расчёт сервиса.
+              Проверено позиций: {remoteCheck?.selected ?? 0}.
+              {remoteCheck?.checkedAt ? ` Время: ${new Date(remoteCheck.checkedAt).toLocaleString("ru-RU")}.` : ""}
+              {remoteCheck?.unmapped.length ? ` Без сопоставления: ${remoteCheck.unmapped.length}.` : ""}
+              {" "}Столбец «Расхождение» показывает, на сколько изменится остаток, если отправить эти позиции сейчас.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+
+          {remoteCheck?.failures.length ? (
+            <ul className="space-y-1 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-900">
+              {remoteCheck.failures.map((failure) => <li key={failure}>{failure}</li>)}
+            </ul>
+          ) : null}
+
+          <div className="max-h-[52vh] overflow-auto rounded-xl border">
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead>Артикул</TableHead>
+                  <TableHead>Площадка</TableHead>
+                  <TableHead>Склад</TableHead>
+                  <TableHead className="text-right">На площадке</TableHead>
+                  <TableHead className="text-right">Резерв площадки</TableHead>
+                  <TableHead className="text-right">Расчёт сервиса</TableHead>
+                  <TableHead className="text-right">Расхождение</TableHead>
+                </TableRow>
+              </TableHeader>
+              <TableBody>
+                {(remoteCheck?.rows ?? []).flatMap((row) => {
+                  const title = `${row.article ?? row.sourceSku}${row.size ? ` · ${row.size}` : ""}`;
+                  if (row.marketplaces.length === 0) {
+                    return [(
+                      <TableRow key={`${row.sourceSku}-none`}>
+                        <TableCell className="font-mono text-xs">{title}</TableCell>
+                        <TableCell colSpan={5} className="text-xs text-muted-foreground">Не сопоставлен ни с одной площадкой — отправлять некуда</TableCell>
+                        <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                      </TableRow>
+                    )];
+                  }
+                  return row.marketplaces.flatMap((marketplace) => {
+                    if (marketplace.warehouses.length === 0) {
+                      return [(
+                        <TableRow key={`${row.sourceSku}-${marketplace.marketplaceId}-empty`}>
+                          <TableCell className="font-mono text-xs">{title}</TableCell>
+                          <TableCell className="text-xs">{marketplaceLabel[marketplace.marketplaceId]}</TableCell>
+                          <TableCell colSpan={4} className="text-xs text-muted-foreground">Площадка не показывает эту позицию ни на одном складе</TableCell>
+                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
+                        </TableRow>
+                      )];
+                    }
+                    return marketplace.warehouses.map((warehouse) => {
+                      const delta = row.availableQuantity - warehouse.amount;
+                      return (
+                        <TableRow key={`${row.sourceSku}-${marketplace.marketplaceId}-${warehouse.warehouseId}`}>
+                          <TableCell className="font-mono text-xs">{title}</TableCell>
+                          <TableCell className="text-xs">{marketplaceLabel[marketplace.marketplaceId]}</TableCell>
+                          <TableCell className="text-xs text-muted-foreground">
+                            {warehouse.warehouseName}
+                            {warehouse.publishing ? null : <span className="ml-1 text-[10px] uppercase">· выгрузка выключена</span>}
+                          </TableCell>
+                          <TableCell className="text-right text-xs font-semibold">{warehouse.amount.toLocaleString("ru-RU")}</TableCell>
+                          <TableCell className="text-right text-xs text-violet-700">
+                            {warehouse.reserved === null ? "—" : warehouse.reserved.toLocaleString("ru-RU")}
+                          </TableCell>
+                          <TableCell className="text-right text-xs">{row.availableQuantity.toLocaleString("ru-RU")}</TableCell>
+                          <TableCell className={`text-right text-xs font-medium ${delta === 0 ? "text-muted-foreground" : delta < 0 ? "text-rose-600" : "text-emerald-700"}`}>
+                            {delta === 0 ? "совпадает" : `${delta > 0 ? "+" : ""}${delta.toLocaleString("ru-RU")}`}
+                          </TableCell>
+                        </TableRow>
+                      );
+                    });
+                  });
+                })}
+                {(remoteCheck?.rows.length ?? 0) === 0 ? (
+                  <TableRow><TableCell colSpan={7} className="h-24 text-center text-sm text-muted-foreground">Нечего показать.</TableCell></TableRow>
+                ) : null}
+              </TableBody>
+            </Table>
+          </div>
+
+          <AlertDialogFooter>
+            <AlertDialogAction onClick={() => setRemoteCheck(null)}>Закрыть</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
