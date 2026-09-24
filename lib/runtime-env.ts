@@ -20,6 +20,11 @@ export type AppRuntimeEnv = {
   OZON_CLIENT_ID?: string;
   OZON_API_KEY?: string;
   YANDEX_API_KEY?: string;
+  YANDEX_CAMPAIGN_ID?: string;
+  YANDEX_BUSINESS_ID?: string;
+  YANDEX_DELIVERY_TOKEN?: string;
+  YANDEX_DELIVERY_STATION_ID?: string;
+  YANDEX_DELIVERY_SERVICE_ID?: string;
   CREDENTIALS_MASTER_KEY?: string;
   /** Секрет для запуска фоновой синхронизации без входа пользователя. */
   SYNC_TASK_TOKEN?: string;
@@ -135,6 +140,11 @@ export function getRuntimeEnv(): AppRuntimeEnv {
     OZON_CLIENT_ID: process.env.OZON_CLIENT_ID || undefined,
     OZON_API_KEY: process.env.OZON_API_KEY || undefined,
     YANDEX_API_KEY: process.env.YANDEX_API_KEY || undefined,
+    YANDEX_CAMPAIGN_ID: process.env.YANDEX_CAMPAIGN_ID || undefined,
+    YANDEX_BUSINESS_ID: process.env.YANDEX_BUSINESS_ID || undefined,
+    YANDEX_DELIVERY_TOKEN: process.env.YANDEX_DELIVERY_TOKEN || undefined,
+    YANDEX_DELIVERY_STATION_ID: process.env.YANDEX_DELIVERY_STATION_ID || undefined,
+    YANDEX_DELIVERY_SERVICE_ID: process.env.YANDEX_DELIVERY_SERVICE_ID || undefined,
     CREDENTIALS_MASTER_KEY: process.env.CREDENTIALS_MASTER_KEY || undefined,
     SYNC_TASK_TOKEN: process.env.SYNC_TASK_TOKEN || undefined,
   };
