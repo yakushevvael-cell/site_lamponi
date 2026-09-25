@@ -111,6 +111,16 @@ test("состав коробки: все изделия в одном мест�
   assert.deepEqual(buildYandexBoxes([]), []);
 });
 
+test("строке Маркета «4 шт.» передаются четыре УИН", () => {
+  const boxes = buildYandexBoxes([{ id: 21, count: 4, uins: ["u1", "u2", "u3", "u4"] }]);
+  assert.deepEqual(boxes[0].items[0], {
+    id: 21,
+    fullCount: 4,
+    instances: [{ uin: "u1" }, { uin: "u2" }, { uin: "u3" }, { uin: "u4" }],
+  });
+  assert.deepEqual(buildYandexBoxes([{ id: 22, count: 2, uins: [] }])[0].items[0], { id: 22, fullCount: 2 });
+});
+
 test("имя получателя разбирается на фамилию и имя", () => {
   assert.deepEqual(splitRecipientName("Иванова Мария Петровна"), {
     first_name: "Мария",

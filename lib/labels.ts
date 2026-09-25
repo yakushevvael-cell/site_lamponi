@@ -761,20 +761,33 @@ async function prepareYandexLabel(
     remoteByOffer.set(offerId, rows);
   }
 
-  const boxItems: Array<{ id: number; count: number; uin: string | null }> = [];
-  const warnings: string[] = [];
+  // У нас строка задания — одно изделие, у Маркета строка заказа — товар с
+  // количеством. Поэтому УИН собираются по артикулу и раздаются строкам
+  // Маркета по их количеству: строке «4 шт.» — четыре УИН.
+  const uinsBySku = new Map<string, string[]>();
   for (const product of input.products) {
-    const remote = (remoteByOffer.get(product.externalSku) ?? []).shift();
-    if (!remote) {
-      throw new Error(`В заказе ${input.orderId} нет артикула ${product.externalSku}. Обновите заказы.`);
+    const list = uinsBySku.get(product.externalSku) ?? [];
+    for (let unit = 0; unit < Math.max(1, Number(product.quantity ?? 1)); unit += 1) list.push(product.uin);
+    uinsBySku.set(product.externalSku, list);
+  }
+
+  const boxItems: Array<{ id: number; count: number; uins: string[] }> = [];
+  const warnings: string[] = [];
+  for (const [sku, uins] of uinsBySku) {
+    const remotes = remoteByOffer.get(sku) ?? [];
+    if (remotes.length === 0) {
+      throw new Error(`В заказе ${input.orderId} нет артикула ${sku}. Обновите заказы.`);
     }
-    // Один УИН — одно изделие. Когда в строке несколько штук, маркировку
-    // придётся проставить в кабинете руками: угадывать остальные УИН нельзя.
-    const single = remote.count === 1;
-    if (!single) {
-      warnings.push(`Заказ ${input.orderId}: в строке ${product.externalSku} ${remote.count} шт., УИН передан не был.`);
+    for (const remote of remotes) {
+      const own = uins.splice(0, remote.count);
+      // Один УИН — одно изделие. Если на строку не хватило разных УИН,
+      // маркировку придётся проставить в кабинете руками: угадывать нельзя.
+      const complete = own.length === remote.count && new Set(own).size === own.length;
+      if (!complete) {
+        warnings.push(`Заказ ${input.orderId}: в строке ${sku} ${remote.count} шт., УИН передан не был.`);
+      }
+      boxItems.push({ id: remote.id, count: remote.count, uins: complete ? own : [] });
     }
-    boxItems.push({ id: remote.id, count: remote.count, uin: single ? product.uin : null });
   }
 
   await setYandexOrderBoxes(apiKey, campaignId, input.orderId, buildYandexBoxes(boxItems));
@@ -1033,6 +1046,11 @@ export async function resolveScan(
     }
     return { status: "not_in_task", uin, article: known.article, size: known.size };
   }
+
+  // Тот же УИН уже отсканирован: одинаковых изделий в отправлении может быть
+  // несколько, и без этой проверки повторный скан занял бы соседнюю строку.
+  const sameUin = inTask.find((row) => row.scannedAt && row.itemUin === uin);
+  if (sameUin) return { status: "repeat", uin, item: sameUin };
 
   const already = inTask.find((row) => row.scannedAt);
   const target = inTask.find((row) => !row.scannedAt);

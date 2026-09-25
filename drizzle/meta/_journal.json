@@ -176,6 +176,13 @@
       "when": 1789900000000,
       "tag": "0024_ozon_exemplar_stage",
       "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "6",
+      "when": 1790000000000,
+      "tag": "0025_pick_item_units",
+      "breakpoints": true
     }
   ]
 }

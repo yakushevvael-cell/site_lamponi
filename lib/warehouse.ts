@@ -475,14 +475,22 @@ async function insertTask(
     return null;
   }
 
+  // Строка задания — одно изделие: у каждого свой УИН и свой скан. Товар в
+  // количестве 4 шт. даёт четыре строки, и отправление собирается в ячейке,
+  // как отправление из разных артикулов.
+  const units = routed.flatMap((item) => Array.from(
+    { length: Math.min(200, Math.max(1, Math.round(Number(item.quantity ?? 1)))) },
+    (_, unitNo) => ({ ...item, unitNo }),
+  ));
+
   // ON CONFLICT DO NOTHING: если тот же товар успел уйти в другое задание,
   // строка просто не добавится, а задание пересчитает свои счётчики по факту.
-  const statements = routed.map((item) => db.prepare(
+  const statements = units.map((item) => db.prepare(
     `INSERT INTO pick_task_items
        (task_id, marketplace_id, external_order_id, external_sku, product_sku, article, size, quantity,
-        cell_code, cell_sort, status, ordered_at, shipment_deadline)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
-     ON CONFLICT(marketplace_id, external_order_id, external_sku) DO NOTHING`,
+        cell_code, cell_sort, status, ordered_at, shipment_deadline, unit_no)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 'pending', ?, ?, ?)
+     ON CONFLICT(marketplace_id, external_order_id, external_sku, unit_no) DO NOTHING`,
   ).bind(
     taskId,
     item.marketplaceId,
@@ -491,11 +499,11 @@ async function insertTask(
     item.productSku,
     item.article,
     item.size,
-    Number(item.quantity ?? 1),
     item.cellCode,
     item.cellSort,
     item.orderedAt,
     item.shipmentDeadline,
+    item.unitNo,
   ));
   for (let start = 0; start < statements.length; start += 100) {
     await db.batch(statements.slice(start, start + 100));

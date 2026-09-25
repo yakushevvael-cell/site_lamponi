@@ -526,10 +526,17 @@ export const pickTaskItems = sqliteTable(
     sizeConfirmedAt: text("size_confirmed_at"),
     sizeConfirmedBy: text("size_confirmed_by"),
     sizeConfirmedValue: text("size_confirmed_value"),
+    // Номер штуки внутри товара отправления (миграция 0025): строка — одно изделие.
+    unitNo: integer("unit_no").notNull().default(0),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
   (table) => [
-    uniqueIndex("pick_task_item_posting_unique").on(table.marketplaceId, table.externalOrderId, table.externalSku),
+    uniqueIndex("pick_task_item_posting_unique").on(
+      table.marketplaceId,
+      table.externalOrderId,
+      table.externalSku,
+      table.unitNo,
+    ),
     index("pick_task_item_task_idx").on(table.taskId, table.cellSort),
     index("pick_task_item_article_idx").on(table.article, table.size),
   ],
