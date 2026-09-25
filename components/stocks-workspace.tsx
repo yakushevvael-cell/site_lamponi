@@ -742,7 +742,12 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                 title="Пилотный список: с этими позициями автоматика работает в пилотном режиме"
               >
                 <FlaskConical />
-                {selectedPilot.outside > 0 ? `В пилот (${selectedPilot.outside})` : `Убрать из пилота (${selectedPilot.inPilot})`}
+                {/* Без выделения предлагаем основное действие, а не «убрать 0 позиций». */}
+                {selected.size === 0
+                  ? "В пилот"
+                  : selectedPilot.outside > 0
+                    ? `В пилот (${selectedPilot.outside})`
+                    : `Убрать из пилота (${selectedPilot.inPilot})`}
               </Button>
             ) : null}
             <Button variant="outline" onClick={() => void applyManualZero("restore")} disabled={!canRestore || saving || syncingAll || syncingSelected || paused}>
