@@ -31,19 +31,33 @@ function SilentSwitchOption({
   onChange,
   label,
   hint,
+  locked,
 }: {
   checked: boolean;
   onChange: (value: boolean) => void;
   label: string;
   hint: string;
+  /** Режим выгрузки не «Автоматический»: массовая отправка запрещена сервером. */
+  locked: boolean;
 }) {
   const id = useId();
   return (
     <div className="flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3">
-      <Checkbox id={id} checked={checked} onCheckedChange={(value) => onChange(value === true)} className="mt-0.5" />
-      <label htmlFor={id} className="cursor-pointer text-xs leading-5">
+      <Checkbox
+        id={id}
+        checked={checked}
+        disabled={locked}
+        onCheckedChange={(value) => onChange(value === true)}
+        className="mt-0.5"
+      />
+      <label htmlFor={id} className={`text-xs leading-5 ${locked ? "" : "cursor-pointer"}`}>
         <span className="font-semibold text-amber-950">{label}</span>
         <span className="mt-1 block text-amber-900">{hint}</span>
+        {locked ? (
+          <span className="mt-1 block font-medium text-amber-950">
+            Выбрано за вас: режим выгрузки не «Автоматический», сервис сейчас не отправляет остатки по всему ассортименту.
+          </span>
+        ) : null}
       </label>
     </div>
   );
@@ -93,6 +107,17 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
   const [pendingEnable, setPendingEnable] = useState<PendingEnable | null>(null);
   /** Переключить флаг, ничего не отправляя на площадку (ручные остатки не трогаем). */
   const [silent, setSilent] = useState(false);
+
+  // Режим выгрузки решает, можно ли вообще отправлять остаток при включении
+  // склада: в ручном и остановленном сервис массово на площадки не ходит.
+  const [bulkAllowed, setBulkAllowed] = useState(true);
+
+  useEffect(() => {
+    void fetch("/api/stocks/pause", { cache: "no-store" })
+      .then((response) => response.json())
+      .then((state: { mode?: string }) => setBulkAllowed(state?.mode === undefined || state.mode === "auto"))
+      .catch(() => undefined);
+  }, []);
 
   const load = useCallback(async () => {
     const [statusResponse, stockResponse] = await Promise.all([
@@ -250,7 +275,9 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
                   onCheckedChange={(checked) => {
                     // Оба направления идут через диалог: там же выбирается,
                     // отправлять остатки или только переключить флаг.
-                    setSilent(false);
+                    // В ручном и остановленном режиме массовая отправка запрещена
+                    // сервером, поэтому вариант тут один — тихое переключение.
+                    setSilent(!bulkAllowed);
                     if (!checked) {
                       setPendingDisable({ marketplaceId: integration.id, marketplaceName: integration.name, warehouse });
                       return;
@@ -300,6 +327,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
           onChange={setSilent}
           label="Только включить, ничего не отправлять"
           hint="Значения на складе останутся прежними. Нужные артикулы потом отправьте кнопкой «Синхронизировать выбранные» на вкладке «Остатки»."
+          locked={!bulkAllowed}
         />
         <AlertDialogFooter>
           <AlertDialogCancel>Отмена</AlertDialogCancel>
@@ -329,6 +357,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
           onChange={setSilent}
           label="Только отключить, не обнулять остаток"
           hint="Товар останется доступным к заказу с теми значениями, что сейчас стоят на площадке. Снимать его с продажи придётся вручную в кабинете."
+          locked={!bulkAllowed}
         />
         <AlertDialogFooter>
           <AlertDialogCancel>Отмена</AlertDialogCancel>

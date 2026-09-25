@@ -220,6 +220,71 @@ function MappingBadges({ row }: { row: StockRow }) {
   );
 }
 
+/**
+ * Одна позиция в отчёте «Что на площадке».
+ *
+ * Плоская таблица здесь не годится: у Wildberries FBS-складов бывает полтора
+ * десятка, и одна позиция превращалась в полтора десятка строк с повторяющимся
+ * артикулом, а нужные колонки уезжали за горизонтальную прокрутку. Поэтому
+ * позиция — заголовок, склады — короткие строки под ним, и сначала те, где
+ * значение расходится с расчётом: именно с ними нужно что-то делать.
+ */
+function RemoteRowCard({ row }: { row: RemoteStockRow }) {
+  const title = `${row.article ?? row.sourceSku}${row.size ? ` · ${row.size}` : ""}`;
+  const entries = row.marketplaces.flatMap((marketplace) => marketplace.warehouses.map((warehouse) => ({
+    marketplaceId: marketplace.marketplaceId,
+    warehouse,
+    delta: row.availableQuantity - warehouse.amount,
+  })));
+  // Расхождения наверх, среди них — склады с включённой выгрузкой:
+  // только они получат новое значение при отправке.
+  const sorted = [...entries].sort((a, b) => {
+    if ((a.delta !== 0) !== (b.delta !== 0)) return a.delta !== 0 ? -1 : 1;
+    if (a.warehouse.publishing !== b.warehouse.publishing) return a.warehouse.publishing ? -1 : 1;
+    return a.warehouse.warehouseName.localeCompare(b.warehouse.warehouseName, "ru");
+  });
+  const mismatched = entries.filter((entry) => entry.delta !== 0).length;
+
+  return (
+    <div className="rounded-xl border bg-card">
+      <div className="flex flex-wrap items-baseline justify-between gap-2 border-b px-4 py-2.5">
+        <span className="font-mono text-sm font-semibold">{title}</span>
+        <span className="text-xs text-muted-foreground">
+          Расчёт сервиса: <b className="text-foreground">{row.availableQuantity.toLocaleString("ru-RU")}</b>
+          {entries.length > 0 ? ` · складов: ${entries.length}` : ""}
+          {mismatched > 0 ? ` · расходится: ${mismatched}` : entries.length > 0 ? " · всё совпадает" : ""}
+        </span>
+      </div>
+      {row.marketplaces.length === 0 ? (
+        <p className="px-4 py-3 text-xs text-muted-foreground">Не сопоставлен ни с одной площадкой — отправлять некуда.</p>
+      ) : entries.length === 0 ? (
+        <p className="px-4 py-3 text-xs text-muted-foreground">Площадки не показывают эту позицию ни на одном складе.</p>
+      ) : (
+        <ul className="divide-y text-xs">
+          {sorted.map((entry) => (
+            <li key={`${entry.marketplaceId}-${entry.warehouse.warehouseId}`} className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-2">
+              <span className="w-24 shrink-0 font-medium">{marketplaceLabel[entry.marketplaceId]}</span>
+              <span className="min-w-0 flex-1 truncate text-muted-foreground" title={entry.warehouse.warehouseName}>
+                {entry.warehouse.warehouseName}
+              </span>
+              {entry.warehouse.publishing
+                ? <Badge variant="outline" className="border-emerald-200 bg-emerald-50 text-emerald-700">выгрузка вкл.</Badge>
+                : <Badge variant="outline" className="border-dashed text-muted-foreground">выгрузка выкл.</Badge>}
+              <span className="tabular-nums">
+                на площадке <b className="text-foreground">{entry.warehouse.amount.toLocaleString("ru-RU")}</b>
+                {entry.warehouse.reserved === null ? "" : `, из них в резерве ${entry.warehouse.reserved.toLocaleString("ru-RU")}`}
+              </span>
+              <span className={`tabular-nums font-medium ${entry.delta === 0 ? "text-muted-foreground" : entry.delta < 0 ? "text-rose-600" : "text-emerald-700"}`}>
+                {entry.delta === 0 ? "совпадает" : `${entry.delta > 0 ? "+" : ""}${entry.delta.toLocaleString("ru-RU")}`}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function StatusBadge({ row }: { row: StockRow }) {
   if (row.manualZero) return <Badge variant="destructive">Обнулено вручную</Badge>;
   if (row.availableQuantity <= 0) return <Badge variant="secondary">Нет в наличии</Badge>;
@@ -864,10 +929,11 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             <AlertDialogTitle>Что сейчас лежит на площадках</AlertDialogTitle>
             <AlertDialogDescription>
               Прочитано напрямую из API — это фактические числа в кабинетах, а не расчёт сервиса.
-              Проверено позиций: {remoteCheck?.selected ?? 0}.
-              {remoteCheck?.checkedAt ? ` Время: ${new Date(remoteCheck.checkedAt).toLocaleString("ru-RU")}.` : ""}
+              Проверено позиций: {remoteCheck?.selected ?? 0}
+              {remoteCheck?.checkedAt ? `, ${new Date(remoteCheck.checkedAt).toLocaleString("ru-RU")}` : ""}.
               {remoteCheck?.unmapped.length ? ` Без сопоставления: ${remoteCheck.unmapped.length}.` : ""}
-              {" "}Столбец «Расхождение» показывает, на сколько изменится остаток, если отправить эти позиции сейчас.
+              {" "}Последнее число в строке — на сколько изменится остаток, если отправить позицию сейчас.
+              Новое значение получат только склады с пометкой «выгрузка вкл.».
             </AlertDialogDescription>
           </AlertDialogHeader>
 
@@ -877,70 +943,11 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             </ul>
           ) : null}
 
-          <div className="max-h-[52vh] overflow-auto rounded-xl border">
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Артикул</TableHead>
-                  <TableHead>Площадка</TableHead>
-                  <TableHead>Склад</TableHead>
-                  <TableHead className="text-right">На площадке</TableHead>
-                  <TableHead className="text-right">Резерв площадки</TableHead>
-                  <TableHead className="text-right">Расчёт сервиса</TableHead>
-                  <TableHead className="text-right">Расхождение</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {(remoteCheck?.rows ?? []).flatMap((row) => {
-                  const title = `${row.article ?? row.sourceSku}${row.size ? ` · ${row.size}` : ""}`;
-                  if (row.marketplaces.length === 0) {
-                    return [(
-                      <TableRow key={`${row.sourceSku}-none`}>
-                        <TableCell className="font-mono text-xs">{title}</TableCell>
-                        <TableCell colSpan={5} className="text-xs text-muted-foreground">Не сопоставлен ни с одной площадкой — отправлять некуда</TableCell>
-                        <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                      </TableRow>
-                    )];
-                  }
-                  return row.marketplaces.flatMap((marketplace) => {
-                    if (marketplace.warehouses.length === 0) {
-                      return [(
-                        <TableRow key={`${row.sourceSku}-${marketplace.marketplaceId}-empty`}>
-                          <TableCell className="font-mono text-xs">{title}</TableCell>
-                          <TableCell className="text-xs">{marketplaceLabel[marketplace.marketplaceId]}</TableCell>
-                          <TableCell colSpan={4} className="text-xs text-muted-foreground">Площадка не показывает эту позицию ни на одном складе</TableCell>
-                          <TableCell className="text-right text-xs text-muted-foreground">—</TableCell>
-                        </TableRow>
-                      )];
-                    }
-                    return marketplace.warehouses.map((warehouse) => {
-                      const delta = row.availableQuantity - warehouse.amount;
-                      return (
-                        <TableRow key={`${row.sourceSku}-${marketplace.marketplaceId}-${warehouse.warehouseId}`}>
-                          <TableCell className="font-mono text-xs">{title}</TableCell>
-                          <TableCell className="text-xs">{marketplaceLabel[marketplace.marketplaceId]}</TableCell>
-                          <TableCell className="text-xs text-muted-foreground">
-                            {warehouse.warehouseName}
-                            {warehouse.publishing ? null : <span className="ml-1 text-[10px] uppercase">· выгрузка выключена</span>}
-                          </TableCell>
-                          <TableCell className="text-right text-xs font-semibold">{warehouse.amount.toLocaleString("ru-RU")}</TableCell>
-                          <TableCell className="text-right text-xs text-violet-700">
-                            {warehouse.reserved === null ? "—" : warehouse.reserved.toLocaleString("ru-RU")}
-                          </TableCell>
-                          <TableCell className="text-right text-xs">{row.availableQuantity.toLocaleString("ru-RU")}</TableCell>
-                          <TableCell className={`text-right text-xs font-medium ${delta === 0 ? "text-muted-foreground" : delta < 0 ? "text-rose-600" : "text-emerald-700"}`}>
-                            {delta === 0 ? "совпадает" : `${delta > 0 ? "+" : ""}${delta.toLocaleString("ru-RU")}`}
-                          </TableCell>
-                        </TableRow>
-                      );
-                    });
-                  });
-                })}
-                {(remoteCheck?.rows.length ?? 0) === 0 ? (
-                  <TableRow><TableCell colSpan={7} className="h-24 text-center text-sm text-muted-foreground">Нечего показать.</TableCell></TableRow>
-                ) : null}
-              </TableBody>
-            </Table>
+          <div className="max-h-[52vh] space-y-3 overflow-y-auto">
+            {(remoteCheck?.rows ?? []).map((row) => <RemoteRowCard key={row.sourceSku} row={row} />)}
+            {(remoteCheck?.rows.length ?? 0) === 0 ? (
+              <p className="py-10 text-center text-sm text-muted-foreground">Нечего показать.</p>
+            ) : null}
           </div>
 
           <AlertDialogFooter>
