@@ -28,17 +28,14 @@ test("шрифт встраивается целиком: без subset глиф
   assert.ok(!/\/BaseFont\s*\/[A-Z]{6}\+/.test(pdf), "урезанный шрифт теряет символы артикула");
 });
 
-test("альбомная страница: строка повёрнута вдоль правого края, над OZON", async () => {
-  const pdf = await stamp(340, 212);
-  // drawText с поворотом −90° пишет матрицу «~0 −1 1 ~0 x y Tm», x — у правого края.
-  const match = pdf.match(/(\S+) -1 1 \S+ ([\d.]+) ([\d.]+) Tm/);
-  assert.ok(match && Math.abs(Number(match[1])) < 1e-9, "текст должен быть повёрнут на −90°");
-  assert.ok(Number(match[2]) > 340 * 0.93, `x=${match[2]} должен быть у правого края`);
-});
-
-test("книжная страница: строка горизонтально у верхнего края", async () => {
-  const pdf = await stamp(212, 340);
-  const match = pdf.match(/1 0 0 1 ([\d.]+) ([\d.]+) Tm/);
-  assert.ok(match, "текст без поворота");
-  assert.ok(Number(match[2]) > 340 * 0.93, `y=${match[2]} должен быть у верхнего края`);
-});
+for (const [width, height] of [[164, 113], [340, 212], [212, 340]]) {
+  test(`страница ${width}×${height}: мелкая строка у нижнего края, ниже QR-кода`, async () => {
+    const pdf = await stamp(width, height);
+    const match = pdf.match(/1 0 0 1 ([\d.]+) ([\d.]+) Tm/);
+    assert.ok(match, "текст без поворота");
+    const size = Number(pdf.match(/([\d.]+) Tf/)[1]);
+    assert.ok(size <= 9, `кегль ${size} должен быть мелким`);
+    // Верх строки не выше нижних 11% страницы — там QR-кода нет.
+    assert.ok(Number(match[2]) + size <= height * 0.11 + 0.01, `y=${match[2]} должен быть внизу`);
+  });
+}
