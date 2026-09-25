@@ -752,7 +752,7 @@ export function WarehouseScanWorkspace() {
                       disabled={!complete || !ready}
                       onClick={() => printLabel(row.marketplaceId, row.externalOrderId)}
                     >
-                      <Printer className="size-4" /> {ready ? "Печать" : complete ? "Готовится…" : "Не собрано"}
+                      <Printer className="size-4" /> {ready ? "Печать" : row.labelStatus === "error" && complete ? "Ошибка" : complete ? "Готовится…" : "Не собрано"}
                     </Button>
                   </div>
                   <ul className="mt-2 space-y-1 text-sm">

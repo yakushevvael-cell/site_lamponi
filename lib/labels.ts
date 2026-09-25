@@ -26,6 +26,7 @@ import {
 } from "@/lib/ozon";
 import {
   OZON_SHIPPED_STATUSES,
+  describeOzonPostingState,
   buildExemplarSetPayload,
   buildLabelLines,
   buildShipPackages,
@@ -298,6 +299,8 @@ export async function prepareLabelsForTask(
       ready += 1;
       continue;
     }
+    // Отменено в Ozon — спрашивать площадку на каждом заходе незачем.
+    if (label?.status === "error" && label.exemplarStatus === "cancelled") continue;
 
     const first = group[0];
     const marketplaceId = first.marketplaceId;
@@ -387,6 +390,31 @@ export async function prepareLabelsForTask(
           })),
           shipPostings: splitPostings(label?.shipPostings),
         });
+
+        // Отменено в Ozon: УИН не закрепляем, а уже закреплённые за этим
+        // отправлением возвращаем в свободные — изделия уходят на полку.
+        if (step.kind === "cancelled") {
+          for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
+          await db.prepare(
+            `UPDATE uin_items
+             SET used_marketplace_id = NULL, used_external_order_id = NULL, used_task_id = NULL, used_at = NULL, used_by = NULL
+             WHERE used_marketplace_id = 'ozon' AND used_external_order_id = ?`,
+          ).bind(first.externalOrderId).run();
+          await upsertLabel(db, {
+            marketplaceId,
+            externalOrderId: first.externalOrderId,
+            taskId: input.taskId,
+            article: articles,
+            size: multi ? null : first.size,
+            uin: null,
+            status: "error",
+            error: step.message,
+            note: null,
+            exemplarStatus: "cancelled",
+          });
+          failed += 1;
+          continue;
+        }
 
         // Отправление из одного изделия могло уже получить УИН в Ozon на
         // прошлом заходе — тогда за изделием закрепляется именно он. У
@@ -524,7 +552,59 @@ export async function prepareLabelsForTask(
  */
 type OzonStep =
   | { kind: "waiting"; exemplarStatus: string; note: string; uins: string[]; shipPostings?: string[] }
-  | { kind: "ready"; storageKey: string; uins: string[]; shipPostings: string[] };
+  | { kind: "ready"; storageKey: string; uins: string[]; shipPostings: string[] }
+  | { kind: "cancelled"; message: string; uins: string[] };
+
+type OzonInput = {
+  postingNumber: string;
+  products: Array<{ externalSku: string; article: string; size: string | null; uin: string }>;
+  shipPostings: string[];
+};
+
+/**
+ * Шаг Ozon с разбором отказа.
+ *
+ * На отказ вроде «INVALID_POSTING_STATE» Ozon не говорит, что случилось, а
+ * склад видит непонятный код и кнопку «Готовится…» навсегда. Поэтому при
+ * любой ошибке спрашиваем статус отправления: отменённое — собирать не нужно,
+ * уже собранное (например, вручную в кабинете) — остаётся забрать этикетку,
+ * остальное — называем статус по-русски.
+ */
+async function prepareOzonLabel(db: D1Database, runtime: AppRuntimeEnv, input: OzonInput): Promise<OzonStep> {
+  try {
+    return await runOzonSteps(db, runtime, input);
+  } catch (error) {
+    const original = error instanceof Error ? error.message : "Ozon отказал в сборке.";
+    const credentials = await getMarketplaceCredentials(db, runtime, "ozon").catch(() => null);
+    if (!credentials?.OZON_CLIENT_ID || !credentials?.OZON_API_KEY) throw error;
+    const clientId = credentials.OZON_CLIENT_ID;
+    const apiKey = credentials.OZON_API_KEY;
+
+    const status = await ozonPostingStatus(clientId, apiKey, input.postingNumber).catch(() => "");
+    const state = describeOzonPostingState(status) as { kind: string; message: string };
+    if (state.kind === "unknown") throw error;
+    if (state.kind === "cancelled") return { kind: "cancelled", message: state.message, uins: [] };
+    if (state.kind === "other") throw new Error(`${state.message} Ответ Ozon: ${original}`);
+
+    // Уже собрано: забираем этикетку по номерам сборки, если они известны.
+    const postings = input.shipPostings.length > 0 ? input.shipPostings : [input.postingNumber];
+    const label = await ozonPackageLabel(clientId, apiKey, postings);
+    if (!label.ok) {
+      throw new Error(`${state.message} Этикетку Ozon не отдал: ${label.message} Распечатайте её в кабинете Ozon.`);
+    }
+    let pdf: Uint8Array = label.pdf;
+    try {
+      pdf = (await stampLabelLines(label.pdf, input.products.map((product) => ({
+        article: product.article,
+        size: product.size,
+      })))) as Uint8Array;
+    } catch (stampError) {
+      console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, stampError);
+    }
+    const storageKey = await storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
+    return { kind: "ready", storageKey, uins: input.products.map((product) => product.uin), shipPostings: postings };
+  }
+}
 
 /**
  * Один шаг цепочки Ozon: экземпляры → проверка → сборка → этикетка.
@@ -535,15 +615,7 @@ type OzonStep =
  * ожидания возвращается `waiting`, и состояние остаётся в строке этикетки:
  * следующий заход спросит статус ещё раз, ничего не передавая заново.
  */
-async function prepareOzonLabel(
-  db: D1Database,
-  runtime: AppRuntimeEnv,
-  input: {
-    postingNumber: string;
-    products: Array<{ externalSku: string; article: string; size: string | null; uin: string }>;
-    shipPostings: string[];
-  },
-): Promise<OzonStep> {
+async function runOzonSteps(db: D1Database, runtime: AppRuntimeEnv, input: OzonInput): Promise<OzonStep> {
   const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
   if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Ключи Ozon не добавлены.");
   const clientId = credentials.OZON_CLIENT_ID;
