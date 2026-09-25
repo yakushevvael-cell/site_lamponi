@@ -183,13 +183,6 @@
       "when": 1790000000000,
       "tag": "0025_pick_item_units",
       "breakpoints": true
-    },
-    {
-      "idx": 26,
-      "version": "6",
-      "when": 1790100000000,
-      "tag": "0026_stock_pilot",
-      "breakpoints": true
     }
   ]
 }

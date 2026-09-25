@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, FlaskConical, Layers, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, Zap } from "lucide-react";
+import { Ban, Boxes, CloudUpload, Layers, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
@@ -38,7 +38,6 @@ type StockRow = {
   /** Внешний код позиции на площадке; null — сопоставления нет, отправлять некуда. */
   wbSku: string | null;
   ozonSku: string | null;
-  pilot: number | boolean;
   updatedAt: string;
 };
 
@@ -81,7 +80,6 @@ type StockTotals = {
   availableQuantity: number;
   zeroStockCount: number;
   manualZeroCount: number;
-  pilotCount: number;
 };
 
 /** Строка отчёта выборочной синхронизации: что посчитали и что ушло на площадку. */
@@ -110,7 +108,7 @@ type SelectedSyncResult = {
   rows: SelectedSyncRow[];
 };
 
-type StockSyncMode = "auto" | "pilot" | "manual" | "stopped";
+type StockSyncMode = "auto" | "manual" | "stopped";
 
 type StockSyncState = {
   mode: StockSyncMode;
@@ -132,12 +130,6 @@ const MODES: Record<StockSyncMode, { title: string; summary: string; detail: str
     summary: "Сервис сам держит остатки на площадках в актуальном состоянии.",
     detail: "Раз в час остатки уезжают на площадки по всему ассортименту, каждые 15 минут — по тем позициям, где прошли заказы. Обычный режим работы магазина.",
     tone: "border-emerald-200 bg-emerald-50 text-emerald-950",
-  },
-  pilot: {
-    title: "Пилотный",
-    summary: "Сервис работает сам, но только по позициям из пилотного списка.",
-    detail: "Автоматика включена по тем же правилам, что и в обычном режиме, — но трогает только артикулы, отмеченные значком «Пилот». Остальной ассортимент на площадках не меняется вообще. Так проверяют автоматику на нескольких позициях, прежде чем отдать ей весь каталог.",
-    tone: "border-sky-200 bg-sky-50 text-sky-950",
   },
   manual: {
     title: "Ручной",
@@ -171,7 +163,6 @@ const emptyTotals: StockTotals = {
   availableQuantity: 0,
   zeroStockCount: 0,
   manualZeroCount: 0,
-  pilotCount: 0,
 };
 
 /**
@@ -218,19 +209,13 @@ function SyncScopeSummary({ scope }: { scope: SyncState["scope"] }) {
  * ищут в кабинете.
  */
 function MappingBadges({ row }: { row: StockRow }) {
+  if (!row.wbSku && !row.ozonSku) {
+    return <Badge variant="outline" className="border-dashed text-muted-foreground">Не сопоставлен</Badge>;
+  }
   return (
-    <span className="flex flex-wrap items-center gap-1">
-      {!row.wbSku && !row.ozonSku
-        ? <Badge variant="outline" className="border-dashed text-muted-foreground">Не сопоставлен</Badge>
-        : (
-          <>
-            {row.wbSku ? <Badge className="bg-violet-100 text-violet-900 hover:bg-violet-100" title={`chrtId ${row.wbSku}`}>WB</Badge> : null}
-            {row.ozonSku ? <Badge className="bg-blue-100 text-blue-900 hover:bg-blue-100" title={`offer_id ${row.ozonSku}`}>Ozon</Badge> : null}
-          </>
-        )}
-      {row.pilot ? (
-        <Badge className="bg-sky-600 text-white hover:bg-sky-600" title="В пилотном режиме автоматика работает с этой позицией">Пилот</Badge>
-      ) : null}
+    <span className="flex flex-wrap gap-1">
+      {row.wbSku ? <Badge className="bg-violet-100 text-violet-900 hover:bg-violet-100" title={`chrtId ${row.wbSku}`}>WB</Badge> : null}
+      {row.ozonSku ? <Badge className="bg-blue-100 text-blue-900 hover:bg-blue-100" title={`offer_id ${row.ozonSku}`}>Ozon</Badge> : null}
     </span>
   );
 }
@@ -386,10 +371,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   }, [canSyncAll]);
   const mode: StockSyncMode = pause?.mode ?? "auto";
   // «Остановлено» запрещает всё, «Ручной» — только массовые отправки.
-  // «Пилотный» ничего не запрещает: он сужает список позиций.
   const paused = mode === "stopped";
-  const bulkAllowedHere = mode === "auto" || mode === "pilot";
-  const bulkBlocked = !bulkAllowedHere;
+  const bulkBlocked = mode !== "auto";
   const allSelected = stocks.length > 0 && stocks.slice(0, 50).every((row) => selected.has(row.variantKey));
   const selectedRows = useMemo(() => stocks.filter((row) => selected.has(row.variantKey)), [selected, stocks]);
   const canRestore = selectedRows.some((row) => Boolean(row.manualZero));
@@ -400,34 +383,6 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
     ozon: selectedRows.filter((row) => Boolean(row.ozonSku)).length,
     unmapped: selectedRows.filter((row) => !row.wbSku && !row.ozonSku).length,
   }), [selectedRows]);
-
-  const selectedPilot = useMemo(() => ({
-    inPilot: selectedRows.filter((row) => Boolean(row.pilot)).length,
-    outside: selectedRows.filter((row) => !row.pilot).length,
-  }), [selectedRows]);
-
-  /** Пилотный список: кому автоматика разрешена, пока идёт обкатка. */
-  async function changePilot(action: "add" | "remove") {
-    if (selected.size === 0) return;
-    setSaving(true);
-    try {
-      const response = await fetch("/api/stocks/pilot", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action, sourceSkus: [...selected] }),
-      });
-      const data = await response.json() as { error?: string; changed?: number; pilotCount?: number };
-      if (!response.ok) throw new Error(data.error ?? "Пилотный список не изменён.");
-      toast.success(action === "add" ? "Добавлено в пилот" : "Убрано из пилота", {
-        description: `Позиций изменено: ${data.changed ?? 0}. Всего в пилоте: ${data.pilotCount ?? 0}.`,
-      });
-      await load(query);
-    } catch (error) {
-      toast.error("Пилотный список не изменён", { description: error instanceof Error ? error.message : "Повторите попытку." });
-    } finally {
-      setSaving(false);
-    }
-  }
 
   /** Читает фактические остатки с площадок: маршрут только смотрит, ничего не шлёт. */
   async function checkRemoteStocks() {
@@ -650,19 +605,12 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             </Button>
           ) : null}
         </div>
-        {mode === "pilot" ? (
-          <p className="mt-2 text-xs font-medium leading-5">
-            {totals.pilotCount > 0
-              ? `В пилоте позиций: ${totals.pilotCount.toLocaleString("ru-RU")}. Остальные ${Math.max(0, totals.skuCount - totals.pilotCount).toLocaleString("ru-RU")} сервис не трогает.`
-              : "Пилотный список пуст — сервис сейчас не отправляет ничего. Отметьте позиции в таблице и нажмите «В пилот»."}
-          </p>
-        ) : null}
-        {bulkAllowedHere ? (
+        {mode === "auto" ? (
           <p className="mt-2 text-xs leading-5 opacity-80">
             Очередь доотправки: {pending > 0 ? `ждут отправки ${pending} позиций.` : "пусто."}
           </p>
         ) : null}
-        {canSyncSelected && bulkAllowedHere ? (
+        {canSyncSelected && mode === "auto" ? (
           <Button variant="outline" size="sm" className="mt-3 bg-white" onClick={() => void pushPendingStocks()} disabled={pushingPending || syncingAll || syncingSelected}>
             {pushingPending ? <Loader2 className="animate-spin" /> : <Zap />}
             {pushingPending ? "Отправляем…" : "Доотправить изменившиеся сейчас"}
@@ -733,18 +681,6 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <span className="mr-1 text-xs text-muted-foreground">Выбрано: {selected.size}</span>
-            {canSyncSelected ? (
-              <Button
-                variant="outline"
-                className="border-sky-300 text-sky-800 hover:bg-sky-50 hover:text-sky-900"
-                onClick={() => void changePilot(selectedPilot.outside > 0 ? "add" : "remove")}
-                disabled={selected.size === 0 || saving || syncingAll || syncingSelected}
-                title="Пилотный список: с этими позициями автоматика работает в пилотном режиме"
-              >
-                <FlaskConical />
-                {selectedPilot.outside > 0 ? `В пилот (${selectedPilot.outside})` : `Убрать из пилота (${selectedPilot.inPilot})`}
-              </Button>
-            ) : null}
             <Button variant="outline" onClick={() => void applyManualZero("restore")} disabled={!canRestore || saving || syncingAll || syncingSelected || paused}>
               {saving ? <Loader2 className="animate-spin" /> : <RefreshCw />}Снять обнуление
             </Button>

@@ -2,7 +2,7 @@ import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { pushStocksForSkus } from "@/lib/stock-push";
 import { clearDirtySkus, countDirtySkus, readDirtySkus } from "@/lib/stock-queue";
-import { bulkStockSyncScope, pilotFilterSql } from "@/lib/sync-pause";
+import { bulkStockSyncBlocked } from "@/lib/sync-pause";
 
 /**
  * Доотправка остатков по изменившимся позициям.
@@ -38,14 +38,14 @@ export async function POST(request: Request) {
   const db = runtime.DB;
   // Доотправку ведёт таймер: в ручном режиме сервис не должен трогать площадки
   // сам, даже «дёшево» и по нескольким позициям.
-  const scope = await bulkStockSyncScope(db);
-  if (scope.blocked) return scope.blocked;
+  const blocked = await bulkStockSyncBlocked(db);
+  if (blocked) return blocked;
 
   const body = await request.json().catch(() => null) as { limit?: unknown } | null;
   const requested = Number(body?.limit);
   const limit = Number.isFinite(requested) ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(requested))) : DEFAULT_LIMIT;
 
-  const sourceSkus = await readDirtySkus(db, limit, pilotFilterSql(scope.mode));
+  const sourceSkus = await readDirtySkus(db, limit);
   if (sourceSkus.length === 0) {
     return Response.json({ ok: true, selected: 0, pendingLeft: 0, skipped: "нет изменившихся позиций" });
   }

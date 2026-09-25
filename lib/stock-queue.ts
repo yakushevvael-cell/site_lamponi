@@ -41,20 +41,12 @@ export async function countDirtySkus(db: D1Database) {
   return Number(row?.count ?? 0);
 }
 
-/**
- * Берёт из очереди самые давние позиции: они ждут дольше всех.
- *
- * `pilotSql` сужает выборку до пилотного списка. Отбор идёт в запросе, а не
- * после него: иначе первые двести очередников могли бы оказаться непилотными,
- * и доотправка в пилотном режиме не находила бы ничего.
- */
-export async function readDirtySkus(db: D1Database, limit: number, pilotSql = "") {
+/** Берёт из очереди самые давние позиции: они ждут дольше всех. */
+export async function readDirtySkus(db: D1Database, limit: number) {
   const rows = await db.prepare(
-    `SELECT d.product_sku AS productSku
-     FROM stock_dirty_skus d
-     JOIN products p ON p.source_sku = d.product_sku
-     WHERE 1 = 1${pilotSql}
-     ORDER BY d.marked_at, d.product_sku
+    `SELECT product_sku AS productSku
+     FROM stock_dirty_skus
+     ORDER BY marked_at, product_sku
      LIMIT ?`,
   ).bind(Math.max(1, Math.min(1000, Math.trunc(limit)))).all<{ productSku: string }>();
   return rows.results.map((row) => row.productSku);

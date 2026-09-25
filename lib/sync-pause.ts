@@ -7,13 +7,10 @@
  * Приходилось снимать паузу, быстро отправить выбранное и успеть поставить её
  * обратно, пока не сработал часовой таймер. Уследить за этим нельзя.
  *
- * Поэтому режимов четыре, и они описывают не кнопки, а происходящее:
+ * Поэтому режимов три, и они описывают не кнопки, а происходящее:
  *
- *   auto    — сервис ведёт остатки сам по всему ассортименту: полная выгрузка
- *             раз в час и доотправка изменившихся каждые 15 минут;
- *   pilot   — то же самое, но только по позициям из пилотного списка. Нужен,
- *             чтобы обкатать автоматику на нескольких артикулах и увидеть её
- *             ошибки прежде, чем ей отдадут весь каталог;
+ *   auto    — сервис ведёт остатки сам: полная выгрузка раз в час и доотправка
+ *             изменившихся каждые 15 минут;
  *   manual  — площадки сервис сам не трогает. Уходит только то, что человек
  *             отметил галочками и отправил кнопкой. Автоматика молчит;
  *   stopped — не уходит ничего, ни автоматически, ни вручную.
@@ -23,14 +20,14 @@
  *
  * Проверку делают ВСЕ маршруты, что-либо отправляющие на маркетплейсы:
  * `stockSyncBlocked` — там, где любая отправка недопустима, а
- * `bulkStockSyncScope` — там, где на площадку уходит весь ассортимент.
+ * `bulkStockSyncBlocked` — там, где на площадку уходит весь ассортимент.
  */
 
 /** Старый двоичный ключ: читаем, чтобы уже включённая пауза не потерялась. */
 export const STOCK_SYNC_PAUSE_KEY = "stock_sync_paused";
 export const STOCK_SYNC_MODE_KEY = "stock_sync_mode";
 
-export type StockSyncMode = "auto" | "pilot" | "manual" | "stopped";
+export type StockSyncMode = "auto" | "manual" | "stopped";
 
 export type StockSyncState = {
   mode: StockSyncMode;
@@ -49,18 +46,8 @@ const DEFAULT_STATE: StockSyncState = {
   reason: null,
 };
 
-export function isMode(value: unknown): value is StockSyncMode {
-  return value === "auto" || value === "pilot" || value === "manual" || value === "stopped";
-}
-
-/**
- * Ограничение автоматики пилотным списком.
- *
- * Возвращает кусок условия для запросов, где таблица products идёт под
- * алиасом `p`. Строка постоянная, значений пользователя в ней нет.
- */
-export function pilotFilterSql(mode: StockSyncMode) {
-  return mode === "pilot" ? " AND p.pilot = 1" : "";
+function isMode(value: unknown): value is StockSyncMode {
+  return value === "auto" || value === "manual" || value === "stopped";
 }
 
 function stateOf(mode: StockSyncMode, rest: Partial<StockSyncState>): StockSyncState {
@@ -136,7 +123,6 @@ export async function setStockSyncMode(
 
 export const MODE_TITLE: Record<StockSyncMode, string> = {
   auto: "автоматический",
-  pilot: "пилотный",
   manual: "ручной",
   stopped: "остановлено",
 };
@@ -162,28 +148,19 @@ export async function stockSyncBlocked(db: D1Database): Promise<Response | null>
 }
 
 /**
- * Массовая выгрузка: можно ли и в каком объёме.
+ * Запрет массовой выгрузки — режимы «Остановлено» и «Ручной».
  *
  * Сюда попадает всё, что отправляет на площадку весь сопоставленный
  * ассортимент: полная синхронизация (и по кнопке, и по часовому таймеру),
  * доотправка из очереди и включение склада с выгрузкой остатка.
- *
- * Режимы «Остановлено» и «Ручной» запрещают её целиком. Пилотный не запрещает
- * ничего — он сужает список позиций, поэтому режим возвращается вместе с
- * разрешением: вызывающий передаёт его в `pilotFilterSql`.
  */
-export async function bulkStockSyncScope(db: D1Database): Promise<{ blocked: Response | null; mode: StockSyncMode }> {
+export async function bulkStockSyncBlocked(db: D1Database): Promise<Response | null> {
   const state = await readStockSyncState(db);
-  if (state.mode === "auto" || state.mode === "pilot") return { blocked: null, mode: state.mode };
-  if (state.mode === "stopped") {
-    return { blocked: blockedResponse(state, "Выгрузка остатков на площадки остановлена."), mode: state.mode };
-  }
-  return {
-    blocked: blockedResponse(
-      state,
-      "Включён ручной режим: сервис не отправляет остатки по всему ассортименту. "
-      + "Отметьте нужные позиции и отправьте их кнопкой «Синхронизировать выбранные».",
-    ),
-    mode: state.mode,
-  };
+  if (state.mode === "auto") return null;
+  if (state.mode === "stopped") return blockedResponse(state, "Выгрузка остатков на площадки остановлена.");
+  return blockedResponse(
+    state,
+    "Включён ручной режим: сервис не отправляет остатки по всему ассортименту. "
+    + "Отметьте нужные позиции и отправьте их кнопкой «Синхронизировать выбранные».",
+  );
 }

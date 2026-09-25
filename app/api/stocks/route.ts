@@ -30,7 +30,6 @@ export async function GET(request: Request) {
          WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'wildberries' AND sm.active = 1 LIMIT 1) AS wbSku,
        (SELECT sm.external_sku FROM sku_mappings sm
          WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'ozon' AND sm.active = 1 LIMIT 1) AS ozonSku,
-       p.pilot AS pilot,
        p.updated_at AS updatedAt
      FROM products p
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
@@ -50,7 +49,6 @@ export async function GET(request: Request) {
       COALESCE(SUM(p.current_physical_qty), 0) AS physicalQuantity,
       SUM(CASE WHEN p.manual_zero = 1 OR p.current_physical_qty = 0 THEN 1 ELSE 0 END) AS zeroStockCount,
       SUM(CASE WHEN p.manual_zero = 1 THEN 1 ELSE 0 END) AS manualZeroCount,
-      SUM(CASE WHEN p.pilot = 1 THEN 1 ELSE 0 END) AS pilotCount,
       COALESCE((SELECT SUM(quantity) FROM stock_reservations WHERE status = 'active'), 0) AS reservedQuantity,
       COALESCE(SUM(p.safety_stock), 0) AS safetyStock,
       COALESCE(SUM(CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(

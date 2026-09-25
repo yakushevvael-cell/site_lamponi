@@ -1,5 +1,5 @@
 import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
-import { bulkStockSyncScope, pilotFilterSql, readStockSyncState, type StockSyncMode } from "@/lib/sync-pause";
+import { bulkStockSyncBlocked } from "@/lib/sync-pause";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
 import { getRuntimeEnv } from "@/lib/runtime-env";
@@ -43,12 +43,6 @@ type FullSyncJob = {
   startedAt: string;
   /** Версия ОСВ на момент старта: после загрузки новой ОСВ задание становится недействительным. */
   osvUploadId: number | null;
-  /**
-   * Задание запущено в пилотном режиме и ограничено пилотным списком.
-   * Хранится в задании, а не читается заново на каждом шаге: смена режима
-   * посреди выгрузки не должна менять состав отправляемых позиций.
-   */
-  pilotOnly: boolean;
   wildberries: {
     warehouses: Warehouse[];
     mappingCount: number;
@@ -88,12 +82,12 @@ async function readWarehouses(db: D1Database, marketplaceId: MarketplaceId) {
   return rows.results;
 }
 
-async function readMappingCount(db: D1Database, marketplaceId: MarketplaceId, pilotSql: string) {
+async function readMappingCount(db: D1Database, marketplaceId: MarketplaceId) {
   const row = await db.prepare(
     `SELECT COUNT(*) AS count
      FROM sku_mappings sm
      JOIN products p ON p.source_sku = sm.product_sku
-     WHERE sm.marketplace_id = ? AND sm.active = 1${pilotSql}`,
+     WHERE sm.marketplace_id = ? AND sm.active = 1`,
   ).bind(marketplaceId).first<{ count: number }>();
   return Number(row?.count ?? 0);
 }
@@ -105,7 +99,6 @@ async function readMappingCount(db: D1Database, marketplaceId: MarketplaceId, pi
 async function readStockBasis(
   db: D1Database,
   marketplaceId: MarketplaceId,
-  pilotSql: string,
   limit?: number,
   offset = 0,
 ) {
@@ -122,7 +115,6 @@ async function readStockBasis(
      FROM products p
      JOIN sku_mappings sm ON sm.product_sku = p.source_sku AND sm.marketplace_id = ? AND sm.active = 1
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
-     WHERE 1 = 1${pilotSql}
      GROUP BY p.source_sku, sm.external_sku, p.article, p.size,
               p.current_physical_qty, p.safety_stock, p.manual_zero
      ORDER BY sm.external_sku${pagination}`,
@@ -187,7 +179,7 @@ async function markWarehouseSync(
  * товарам, которые физически лежат на складе. Считаем долю нулей заранее и
  * без явного подтверждения администратора такой запуск не начинаем.
  */
-async function readZeroRatio(db: D1Database, pilotSql: string) {
+async function readZeroRatio(db: D1Database) {
   const row = await db.prepare(
     `SELECT COUNT(*) AS total,
             COUNT(CASE WHEN computed <= 0 THEN 1 END) AS zeros
@@ -198,7 +190,7 @@ async function readZeroRatio(db: D1Database, pilotSql: string) {
                   - p.safety_stock AS INTEGER))
               END AS computed
        FROM products p
-       JOIN sku_mappings sm ON sm.product_sku = p.source_sku AND sm.active = 1${pilotSql}
+       JOIN sku_mappings sm ON sm.product_sku = p.source_sku AND sm.active = 1
        LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
        GROUP BY p.source_sku, sm.marketplace_id, sm.external_sku,
                 p.current_physical_qty, p.safety_stock, p.manual_zero
@@ -209,8 +201,7 @@ async function readZeroRatio(db: D1Database, pilotSql: string) {
   return { total, zeros, ratio: total > 0 ? zeros / total : 0 };
 }
 
-async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode, confirmMassZero = false) {
-  const pilotSql = pilotFilterSql(mode);
+async function startJob(db: D1Database, ownerEmail: string, confirmMassZero = false) {
   const now = Date.now();
   const existing = await readJob(db);
   const existingStartedAt = existing ? Date.parse(existing.startedAt) : Number.NaN;
@@ -234,8 +225,8 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
   const [wbWarehouses, ozonWarehouses, wbMappingCount, ozonMappingCount, osvUploadId] = await Promise.all([
     readWarehouses(db, "wildberries"),
     readWarehouses(db, "ozon"),
-    readMappingCount(db, "wildberries", pilotSql),
-    readMappingCount(db, "ozon", pilotSql),
+    readMappingCount(db, "wildberries"),
+    readMappingCount(db, "ozon"),
     readLatestOsvUploadId(db),
   ]);
   if (wbWarehouses.length === 0 && ozonWarehouses.length === 0) {
@@ -244,14 +235,8 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
   if (osvUploadId === null) {
     return Response.json({ error: "ОСВ ещё не загружена. Остатки отправлять не с чего." }, { status: 400 });
   }
-  if (mode === "pilot" && wbMappingCount === 0 && ozonMappingCount === 0) {
-    return Response.json({
-      error: "Пилотный список пуст или в нём нет позиций, сопоставленных с площадками. "
-        + "Отметьте позиции на вкладке «Остатки» и добавьте их в пилот.",
-    }, { status: 400 });
-  }
 
-  const zeroStats = await readZeroRatio(db, pilotSql);
+  const zeroStats = await readZeroRatio(db);
   if (!confirmMassZero && zeroStats.total >= MASS_ZERO_MIN_ROWS && zeroStats.ratio >= MASS_ZERO_RATIO) {
     return Response.json({
       error: `Расчёт даёт ноль по ${zeroStats.zeros} из ${zeroStats.total} сопоставленных позиций. Похоже на неполные данные: проверьте последнюю ОСВ и загрузку заказов. Если обнуление действительно нужно, подтвердите запуск.`,
@@ -268,7 +253,6 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
     ownerEmail,
     startedAt,
     osvUploadId,
-    pilotOnly: mode === "pilot",
     wildberries: {
       warehouses: wbWarehouses,
       mappingCount: wbMappingCount,
@@ -333,7 +317,7 @@ async function syncWildberriesWarehouse(
     const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
     if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
 
-    const basis = await readStockBasis(db, "wildberries", pilotFilterSql(job.pilotOnly ? "pilot" : "auto"));
+    const basis = await readStockBasis(db, "wildberries");
     // Гард срабатывает здесь: если хоть одна строка не проходит проверку,
     // на маркетплейс не уходит НИ ОДНОГО запроса (ТЗ, п. 9).
     rows = basis.map((item) => buildSendableRow({
@@ -402,7 +386,7 @@ async function syncOzonBatch(
   const stale = await assertOsvUnchanged(db, job);
   if (stale) return stale;
 
-  const basis = await readStockBasis(db, "ozon", pilotFilterSql(job.pilotOnly ? "pilot" : "auto"), OZON_MAPPING_BATCH_SIZE, requestedOffset);
+  const basis = await readStockBasis(db, "ozon", OZON_MAPPING_BATCH_SIZE, requestedOffset);
   if (basis.length === 0) {
     job.ozon.done = true;
     if (requestedOffset < job.ozon.mappingCount) {
@@ -678,13 +662,11 @@ export async function GET() {
   // Масштаб полной выгрузки: сколько позиций и на сколько складов уедет.
   // Нужен до запуска — человек должен видеть цену нажатия, а не узнавать её
   // из итогового отчёта, когда остатки на площадках уже перезаписаны.
-  // Считается по текущему режиму: в пилотном это только пилотные позиции.
-  const pilotSql = pilotFilterSql((await readStockSyncState(runtime.DB)).mode);
   const [wbWarehouses, ozonWarehouses, wbMappingCount, ozonMappingCount] = await Promise.all([
     readWarehouses(runtime.DB, "wildberries"),
     readWarehouses(runtime.DB, "ozon"),
-    readMappingCount(runtime.DB, "wildberries", pilotSql),
-    readMappingCount(runtime.DB, "ozon", pilotSql),
+    readMappingCount(runtime.DB, "wildberries"),
+    readMappingCount(runtime.DB, "ozon"),
   ]);
 
   const startedAt = job ? Date.parse(job.startedAt) : Number.NaN;
@@ -722,13 +704,11 @@ export async function POST(request: Request) {
   // Полная выгрузка — массовое действие: её запрещают и «Остановлено», и
   // «Ручной режим». «Отмена» и «итог» разрешены всегда — незакрытое задание
   // надо уметь завершить в любом режиме.
-  let mode: StockSyncMode = "auto";
   if (body?.action !== "cancel" && body?.action !== "finish") {
-    const scope = await bulkStockSyncScope(runtime.DB);
-    if (scope.blocked) return scope.blocked;
-    mode = scope.mode;
+    const blocked = await bulkStockSyncBlocked(runtime.DB);
+    if (blocked) return blocked;
   }
-  if (body?.action === "start") return startJob(runtime.DB, auth.user.email, mode, body?.confirmMassZero === true);
+  if (body?.action === "start") return startJob(runtime.DB, auth.user.email, body?.confirmMassZero === true);
 
   const jobId = typeof body?.jobId === "string" ? body.jobId : "";
   const job = await readJob(runtime.DB);
