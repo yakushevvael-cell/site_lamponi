@@ -36,7 +36,7 @@ import {
 import { stampLabelLines } from "@/lib/label-stamp.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import { ensureWildberriesSupply } from "@/lib/supplies";
-import { articleKey, normalizeSizeValue } from "@/lib/upd-parse-core.mjs";
+import { articleBaseKey, articleKey, normalizeSizeValue, splitArticleSize } from "@/lib/upd-parse-core.mjs";
 import {
   addOrdersToWildberriesSupply,
   getWildberriesStickers,
@@ -115,7 +115,7 @@ async function readFreeUins(db: D1Database) {
   ).all<{ uin: string; article: string; size: string | null }>();
   const byKey = new Map<string, string[]>();
   for (const row of rows.results) {
-    for (const key of [articleKey(row.article, row.size) as string, articleKey(row.article, null) as string]) {
+    for (const key of [articleKey(row.article, row.size) as string, articleBaseKey(row.article) as string]) {
       const list = byKey.get(key) ?? [];
       list.push(row.uin);
       byKey.set(key, list);
@@ -126,7 +126,7 @@ async function readFreeUins(db: D1Database) {
 
 /** УИН под строку задания: сначала точная пара с размером, потом по артикулу. */
 function takeUin(byKey: Map<string, string[]>, article: string, size: string | null, used: Set<string>) {
-  const keys = [articleKey(article, size) as string, articleKey(article, null) as string];
+  const keys = [articleKey(article, size) as string, articleBaseKey(article) as string];
   for (const key of keys) {
     const list = byKey.get(key) ?? [];
     for (const uin of list) {
@@ -1025,10 +1025,10 @@ export async function resolveScan(
      ORDER BY CASE WHEN ti.uin = ? THEN 0 ELSE 1 END, ti.task_id DESC, ti.id`,
   ).bind(uin, uin).all<ScanItem & { itemUin: string | null; taskNumber: string | null; taskStatus: string }>();
 
-  const articleOnly = articleKey(known.article, null) as string;
+  const articleOnly = articleBaseKey(known.article) as string;
   const withSize = articleKey(known.article, known.size) as string;
   const sameArticle = candidates.results.filter(
-    (row) => row.itemUin === uin || (articleKey(row.article, null) as string) === articleOnly,
+    (row) => row.itemUin === uin || (articleBaseKey(row.article) as string) === articleOnly,
   );
 
   // Размер из УПД — подсказка, а не фильтр: у колец он либо не приходит вовсе
@@ -1058,7 +1058,8 @@ export async function resolveScan(
     return { status: "repeat", uin, item: already ?? inTask[0] };
   }
 
-  const orderSize = String(target.size ?? "").trim();
+  // «К-1298з (16-21)»: размер из скобок, если отдельного нет.
+  const orderSize = String((splitArticleSize(target.article, target.size) as { size: string | null }).size ?? "").trim();
   const updSize = String(known.size ?? "").trim();
   const sizeMatches = normalizeSizeValue(orderSize) === normalizeSizeValue(updSize);
 

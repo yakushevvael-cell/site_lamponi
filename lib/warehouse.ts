@@ -10,6 +10,7 @@
  * выдадут сборщикам один и тот же товар.
  */
 import { generatePickSheetCode, parsePickSheetScan } from "@/lib/barcode39.mjs";
+import { splitArticleSize } from "@/lib/upd-parse-core.mjs";
 import {
   attachCells,
   buildTaskNumber,
@@ -439,8 +440,12 @@ async function insertTask(
     placements: Array<{ article: string; size: string | null; cellCode: string; sortOrder: number }>;
   },
 ): Promise<CreatedTask | null> {
+  // «К-1298з (16-21)» из карточки Ozon — это артикул «К-1298з» с размером
+  // «16-21», как в 1С и УПД. Разделяем сразу: по чистому артикулу находятся
+  // ячейка, свободный УИН и скан.
   const flat = input.postings.flatMap((posting) => posting.items.map((item) => ({
     ...item,
+    ...(splitArticleSize(item.article, item.size) as { article: string; size: string | null }),
     orderedAt: posting.orderedAt,
     shipmentDeadline: posting.shipmentDeadline,
   })));
