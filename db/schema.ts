@@ -47,9 +47,18 @@ export const products = sqliteTable(
     safetyStock: real("safety_stock").notNull().default(0),
     manualZero: integer("manual_zero", { mode: "boolean" }).notNull().default(false),
     manualZeroAt: text("manual_zero_at"),
+    /**
+     * Позиция участвует в пилоте: в пилотном режиме автоматика трогает
+     * только такие. Нужен, чтобы обкатать автоматическую выгрузку на
+     * нескольких артикулах, прежде чем отдать ей весь ассортимент.
+     */
+    pilot: integer("pilot", { mode: "boolean" }).notNull().default(false),
     updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
   },
-  (table) => [index("product_article_size_idx").on(table.article, table.size)],
+  (table) => [
+    index("product_article_size_idx").on(table.article, table.size),
+    index("product_pilot_idx").on(table.pilot),
+  ],
 );
 
 export const stockSnapshots = sqliteTable(
