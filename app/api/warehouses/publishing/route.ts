@@ -1,5 +1,5 @@
 import { authorizeApi } from "@/lib/app-auth";
-import { bulkStockSyncBlocked } from "@/lib/sync-pause";
+import { bulkStockSyncScope, pilotFilterSql } from "@/lib/sync-pause";
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
 import { getRuntimeEnv } from "@/lib/runtime-env";
@@ -53,7 +53,7 @@ async function readPublishingCount(db: D1Database, marketplaceId: MarketplaceId)
   return Number(row?.count ?? 0);
 }
 
-async function readStockBasis(db: D1Database, marketplaceId: MarketplaceId) {
+async function readStockBasis(db: D1Database, marketplaceId: MarketplaceId, pilotSql: string) {
   const rows = await db.prepare(
     `SELECT p.source_sku AS sourceSku,
             sm.external_sku AS externalSku,
@@ -66,6 +66,7 @@ async function readStockBasis(db: D1Database, marketplaceId: MarketplaceId) {
      FROM products p
      JOIN sku_mappings sm ON sm.product_sku = p.source_sku AND sm.marketplace_id = ? AND sm.active = 1
      LEFT JOIN stock_reservations r ON r.product_sku = p.source_sku
+     WHERE 1 = 1${pilotSql}
      GROUP BY p.source_sku, sm.external_sku, p.article, p.size,
               p.current_physical_qty, p.safety_stock, p.manual_zero
      ORDER BY sm.external_sku`,
@@ -98,8 +99,9 @@ async function pushWarehouseStock(
   marketplaceId: MarketplaceId,
   warehouseId: string,
   mode: "publish" | "zero",
+  pilotSql: string,
 ) {
-  const basis = await readStockBasis(db, marketplaceId);
+  const basis = await readStockBasis(db, marketplaceId, pilotSql);
   if (basis.length === 0) return { rows: [] as SendableRow[], sent: 0 };
 
   if (marketplaceId === "wildberries") {
@@ -189,10 +191,13 @@ export async function POST(request: Request) {
   }
   // Режим ограничивает отправку, а не настройку: тихое переключение ничего не
   // отправляет, поэтому разрешено в любом режиме. А вот включение с выгрузкой —
-  // это весь ассортимент разом, и в ручном режиме оно запрещено.
+  // это весь ассортимент разом, и в ручном режиме оно запрещено. В пилотном
+  // разрешено, но уедут только позиции из пилотного списка.
+  let pilotSql = "";
   if (pushStock) {
-    const blocked = await bulkStockSyncBlocked(db);
-    if (blocked) return blocked;
+    const scope = await bulkStockSyncScope(db);
+    if (scope.blocked) return scope.blocked;
+    pilotSql = pilotFilterSql(scope.mode);
   }
   if (await hasActiveStockJob(db)) {
     return Response.json({ error: "Дождитесь завершения текущей синхронизации остатков." }, { status: 409 });
@@ -268,7 +273,7 @@ export async function POST(request: Request) {
   let sent = 0;
   try {
     // И включение, и отключение сначала работают с API и только при успехе меняют флаг.
-    const result = await pushWarehouseStock(db, runtime, marketplaceId, warehouseId, publishFullStock ? "publish" : "zero");
+    const result = await pushWarehouseStock(db, runtime, marketplaceId, warehouseId, publishFullStock ? "publish" : "zero", pilotSql);
     rows = result.rows;
     sent = result.sent;
   } catch (error) {

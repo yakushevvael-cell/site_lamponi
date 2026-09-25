@@ -115,7 +115,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
   useEffect(() => {
     void fetch("/api/stocks/pause", { cache: "no-store" })
       .then((response) => response.json())
-      .then((state: { mode?: string }) => setBulkAllowed(state?.mode === undefined || state.mode === "auto"))
+      .then((state: { mode?: string }) => setBulkAllowed(state?.mode === undefined || state.mode === "auto" || state.mode === "pilot"))
       .catch(() => undefined);
   }, []);
 
