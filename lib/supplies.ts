@@ -429,13 +429,30 @@ export async function checkSupplyReadiness(db: D1Database, taskId: number): Prom
   const notFound = rows.results.filter((row) => row.status === "not_found");
   if (notFound.length > 0) {
     // ТЗ, п. 6: пока проблемные не разобраны, оформление недоступно.
-    const open = await db.prepare(
-      `SELECT article, size FROM problem_articles WHERE state = 'blocked' AND task_id = ?`,
-    ).bind(taskId).all<{ article: string; size: string | null }>();
-    if (open.results.length > 0) {
+    // Разобранным считается и товар, чей заказ отменён на площадке: в
+    // поставку он не попадёт, а блокировка артикула при этом остаётся —
+    // снимать её ради поставки значит вернуть в продажу то, чего нет.
+    const cancelled = await db.prepare(
+      `SELECT DISTINCT o.external_order_id AS externalOrderId
+       FROM pick_task_items ti
+       JOIN orders o ON o.marketplace_id = ti.marketplace_id AND o.external_order_id = ti.external_order_id
+       WHERE ti.task_id = ? AND ti.status = 'not_found' AND o.canceled_at IS NOT NULL`,
+    ).bind(taskId).all<{ externalOrderId: string }>();
+    const cancelledOrders = new Set(cancelled.results.map((row) => row.externalOrderId));
+    const waiting = notFound.filter((row) => !cancelledOrders.has(row.externalOrderId));
+
+    const open = waiting.length > 0
+      ? await db.prepare(
+        `SELECT article, size FROM problem_articles WHERE state = 'blocked' AND task_id = ?`,
+      ).bind(taskId).all<{ article: string; size: string | null }>()
+      : { results: [] as Array<{ article: string; size: string | null }> };
+    const blocked = waiting.filter((row) => open.results.some(
+      (problem) => problem.article === row.article && (problem.size ?? "") === (row.size ?? ""),
+    ));
+    if (blocked.length > 0) {
       return {
-        reason: "Есть неразобранные проблемные товары — сначала закройте их.",
-        details: open.results.map((row) => `${row.article}${row.size ? ` / ${row.size}` : ""}`),
+        reason: "Есть неразобранные проблемные товары — отмените их заказы на «Проблемных товарах» или снимите блокировку.",
+        details: blocked.map((row) => `${row.article}${row.size ? ` / ${row.size}` : ""} · заказ ${row.externalOrderId}`),
       };
     }
   }
