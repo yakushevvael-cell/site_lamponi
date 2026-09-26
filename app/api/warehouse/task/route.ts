@@ -17,6 +17,7 @@ import {
   readTask,
   readTaskItems,
   releaseTask,
+  reopenManualShipment,
   resolveTaskItem,
 } from "@/lib/warehouse";
 
@@ -119,6 +120,15 @@ export async function POST(request: Request) {
     if (!manages) return Response.json({ error: "Закрыть отгрузку вручную может кладовщик." }, { status: 403 });
     const note = typeof body?.comment === "string" ? body.comment : null;
     const result = await closeShipmentManually(db, taskId, auth.user.email, note);
+    if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
+    return Response.json({ ok: true, task: result.task });
+  }
+
+  // Ошибочно закрытую вручную отгрузку возвращают в работу: задание снова
+  // в прежнем статусе, а закрытие и возврат остаются в журнале.
+  if (action === "reopen_manual") {
+    if (!manages) return Response.json({ error: "Вернуть отгрузку в работу может кладовщик." }, { status: 403 });
+    const result = await reopenManualShipment(db, taskId, auth.user.email);
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ ok: true, task: result.task });
   }

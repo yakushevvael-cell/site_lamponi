@@ -21,6 +21,7 @@ import {
   Loader2,
   PackagePlus,
   RefreshCw,
+  RotateCcw,
   Settings2,
   UserRound,
 } from "lucide-react";
@@ -125,6 +126,7 @@ export function WarehouseTasksWorkspace() {
   const [cancelTarget, setCancelTarget] = useState<Task | null>(null);
   const [manualTarget, setManualTarget] = useState<Task | null>(null);
   const [manualNote, setManualNote] = useState("");
+  const [reopenTarget, setReopenTarget] = useState<Task | null>(null);
 
   const load = useCallback(async () => {
     const [tasksResponse, pickersResponse] = await Promise.all([
@@ -524,6 +526,18 @@ export function WarehouseTasksWorkspace() {
                           <CheckCircle2 className="size-4" /> Закрыть вручную
                         </Button>
                       ) : null}
+                      {task.manualCloseAt && task.status !== "cancelled" ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          disabled={busy !== null}
+                          onClick={() => setReopenTarget(task)}
+                        >
+                          {busy === `task:${task.id}:reopen_manual`
+                            ? <Loader2 className="size-4 animate-spin" />
+                            : <RotateCcw className="size-4" />} Вернуть в работу
+                        </Button>
+                      ) : null}
                       {task.status !== "shipped" && task.status !== "cancelled" ? (
                         <Button size="sm" variant="ghost" className="text-destructive hover:text-destructive" disabled={busy !== null} onClick={() => setCancelTarget(task)}>
                           <Ban className="size-4" />
@@ -575,6 +589,38 @@ export function WarehouseTasksWorkspace() {
               }}
             >
               Закрыть вручную
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(reopenTarget)} onOpenChange={(open) => { if (!open) setReopenTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Вернуть отгрузку {reopenTarget?.number} в работу?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Отметка «закрыто вручную» снимется, задание вернётся в статус, который был до
+              закрытия, а поставка по нему снова станет незакрытой — с заданием можно будет
+              работать дальше. Закрытие и возврат останутся в журнале событий.
+              {reopenTarget?.manualCloseAt ? (
+                <span className="mt-2 block text-xs">
+                  Закрыто {formatMoment(reopenTarget.manualCloseAt)}
+                  {reopenTarget.manualCloseBy ? ` · ${reopenTarget.manualCloseBy}` : ""}
+                  {reopenTarget.manualCloseNote ? ` · «${reopenTarget.manualCloseNote}»` : ""}
+                </span>
+              ) : null}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Оставить закрытым</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                const task = reopenTarget;
+                setReopenTarget(null);
+                if (task) void act(task, "reopen_manual", {}, "Отгрузка возвращена в работу");
+              }}
+            >
+              Вернуть в работу
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>

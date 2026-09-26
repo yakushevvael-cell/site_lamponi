@@ -795,6 +795,12 @@ export async function closeShipmentManually(
   if (task.manualCloseAt) return { ok: false as const, error: `Задание ${task.number} уже закрыто вручную.` };
 
   const comment = note && note.trim() ? note.trim().slice(0, 500) : null;
+  // Снимок поставок до закрытия: по нему «Вернуть в работу» восстановит их
+  // статусы точно, а не по догадке.
+  const suppliesBefore = await db.prepare(
+    `SELECT id, status, closed_at AS closedAt, closed_by AS closedBy
+     FROM supplies WHERE task_id = ? AND status <> 'closed'`,
+  ).bind(taskId).all<{ id: number; status: string; closedAt: string | null; closedBy: string | null }>();
   await db.batch([
     db.prepare(
       `UPDATE pick_tasks
@@ -824,7 +830,120 @@ export async function closeShipmentManually(
     taskNumber: task.number,
     marketplaceId: task.marketplaceId,
     actorEmail,
-    payload: { note: comment, statusBefore: task.status, pickedAt: task.pickedAt },
+    payload: {
+      note: comment,
+      statusBefore: task.status,
+      pickedAt: task.pickedAt,
+      shippedAt: task.shippedAt,
+      supplies: suppliesBefore.results,
+    },
+  });
+  return { ok: true as const, task: await readTask(db, taskId) };
+}
+
+const REOPEN_STATUSES = new Set<PickTaskStatus>(["created", "issued", "picked", "shipped"]);
+const SUPPLY_STATUSES = new Set(["open", "created", "error"]);
+
+/**
+ * Возврат вручную закрытой отгрузки в работу.
+ *
+ * Кнопку «Закрыть вручную» могут нажать по ошибке, а после неё с заданием
+ * ничего не сделать. Возврат снимает отметку и восстанавливает то, что было
+ * до закрытия: статус задания, время сборки и открытые поставки. Прежнее
+ * состояние берём из журнала — событие закрытия хранит его снимок. Сама
+ * отметка о закрытии и возврат остаются в журнале событий.
+ */
+export async function reopenManualShipment(db: D1Database, taskId: number, actorEmail: string) {
+  const task = await readTask(db, taskId);
+  if (!task) return { ok: false as const, error: "Задание не найдено." };
+  if (!task.manualCloseAt) return { ok: false as const, error: `Задание ${task.number} не закрыто вручную.` };
+
+  const event = await db.prepare(
+    `SELECT payload_json AS payloadJson FROM warehouse_events
+     WHERE task_id = ? AND kind = 'shipment_closed_manually'
+     ORDER BY id DESC LIMIT 1`,
+  ).bind(taskId).first<{ payloadJson: string }>();
+  let before: {
+    statusBefore?: unknown;
+    pickedAt?: unknown;
+    shippedAt?: unknown;
+    supplies?: Array<{ id?: unknown; status?: unknown; closedAt?: unknown; closedBy?: unknown }>;
+  } = {};
+  try {
+    before = event ? JSON.parse(event.payloadJson) : {};
+  } catch {
+    before = {};
+  }
+
+  // Без снимка возвращаем в «Собрано»: ручное закрытие ставило время сборки,
+  // и с этого статуса можно оформить поставку заново.
+  const status: PickTaskStatus = REOPEN_STATUSES.has(before.statusBefore as PickTaskStatus)
+    ? before.statusBefore as PickTaskStatus
+    : "picked";
+  const pickedAt = "statusBefore" in before
+    ? (typeof before.pickedAt === "string" ? before.pickedAt : null)
+    : task.pickedAt;
+  const shippedAt = status === "shipped"
+    ? (typeof before.shippedAt === "string" ? before.shippedAt : task.shippedAt)
+    : null;
+
+  const statements = [
+    db.prepare(
+      `UPDATE pick_tasks
+       SET status = ?,
+           picked_at = ?,
+           shipped_at = ?,
+           manual_close_at = NULL,
+           manual_close_by = NULL,
+           manual_close_note = NULL
+       WHERE id = ? AND manual_close_at IS NOT NULL`,
+    ).bind(status, pickedAt, shippedAt, taskId),
+  ];
+
+  const snapshot = Array.isArray(before.supplies) ? before.supplies : null;
+  if (snapshot) {
+    for (const supply of snapshot) {
+      const id = Number(supply.id);
+      if (!Number.isFinite(id) || id <= 0) continue;
+      const supplyStatus = SUPPLY_STATUSES.has(String(supply.status)) ? String(supply.status) : "error";
+      statements.push(db.prepare(
+        `UPDATE supplies
+         SET status = ?, closed_at = ?, closed_by = ?, closed_manually = 0
+         WHERE id = ? AND task_id = ? AND closed_manually = 1`,
+      ).bind(
+        supplyStatus,
+        typeof supply.closedAt === "string" ? supply.closedAt : null,
+        typeof supply.closedBy === "string" ? supply.closedBy : null,
+        id,
+        taskId,
+      ));
+    }
+  } else {
+    // Закрытие до появления снимка: открытая поставка WB остаётся открытой,
+    // остальные возвращаются в «ошибку» — их оформляют повторной попыткой.
+    statements.push(db.prepare(
+      `UPDATE supplies
+       SET status = CASE WHEN marketplace_id = 'wildberries' AND external_id IS NOT NULL THEN 'open' ELSE 'error' END,
+           closed_at = NULL,
+           closed_by = NULL,
+           closed_manually = 0
+       WHERE task_id = ? AND closed_manually = 1`,
+    ).bind(taskId));
+  }
+  await db.batch(statements);
+
+  await logWarehouseEvent(db, {
+    kind: "shipment_reopened",
+    taskId,
+    taskNumber: task.number,
+    marketplaceId: task.marketplaceId,
+    actorEmail,
+    payload: {
+      statusAfter: status,
+      closedAt: task.manualCloseAt,
+      closedBy: task.manualCloseBy,
+      note: task.manualCloseNote,
+    },
   });
   return { ok: true as const, task: await readTask(db, taskId) };
 }
