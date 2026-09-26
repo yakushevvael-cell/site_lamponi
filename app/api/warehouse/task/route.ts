@@ -19,6 +19,7 @@ import {
   releaseTask,
   reopenManualShipment,
   resolveTaskItem,
+  returnTaskToPicking,
 } from "@/lib/warehouse";
 
 function taskIdFrom(value: unknown) {
@@ -104,6 +105,16 @@ export async function POST(request: Request) {
 
   if (action === "close") {
     const result = await closeTask(db, taskId, auth.user.email);
+    if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
+    return Response.json({ ok: true, task: result.task });
+  }
+
+  // Строку отметили «собрано» по ошибке: задание возвращают сборщику, чтобы
+  // переотметить её «не найден». Решает кладовщик — сборщик закрытое задание
+  // сам не открывает.
+  if (action === "return_to_picking") {
+    if (!manages) return Response.json({ error: "Вернуть задание на сборку может кладовщик." }, { status: 403 });
+    const result = await returnTaskToPicking(db, taskId, auth.user.email);
     if (!result.ok) return Response.json({ error: result.error }, { status: 409 });
     return Response.json({ ok: true, task: result.task });
   }

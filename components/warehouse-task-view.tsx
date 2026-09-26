@@ -25,6 +25,7 @@ import {
   Printer,
   RefreshCw,
   Truck,
+  Undo2,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -87,6 +88,7 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
   const [notFoundTarget, setNotFoundTarget] = useState<Item | null>(null);
+  const [returnOpen, setReturnOpen] = useState(false);
 
   const load = useCallback(async () => {
     const response = await fetch(`/api/warehouse/task?id=${taskId}`, { cache: "no-store" });
@@ -188,6 +190,14 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
             {manages && task.status === "picked" ? (
               <Button asChild size="sm" variant="outline">
                 <Link href="/warehouse/scan">Стол сканирования</Link>
+              </Button>
+            ) : null}
+            {/* Строку отметили «собрано» по ошибке — задание возвращают на
+                сборку, чтобы переотметить её «не найден». */}
+            {manages && task.status === "picked" ? (
+              <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => setReturnOpen(true)}>
+                {busy === "return_to_picking:" ? <Loader2 className="size-4 animate-spin" /> : <Undo2 className="size-4" />}
+                Вернуть на сборку
               </Button>
             ) : null}
             {!closed && !task.assigneeEmail ? (
@@ -305,6 +315,30 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
           </Button>
         </div>
       ) : null}
+
+      <AlertDialog open={returnOpen} onOpenChange={setReturnOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Вернуть задание {task.number} на сборку?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Задание снова станет «у сборщика», отметки строк сохранятся. У товаров, которых
+              на деле нет, нажмите «Не найден» — остаток обнулится, артикул попадёт в проблемные.
+              Потом закройте задание кнопкой «Задание собрано».
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Не возвращать</AlertDialogCancel>
+            <AlertDialogAction
+              onClick={() => {
+                setReturnOpen(false);
+                void act("return_to_picking", {}, "Задание возвращено на сборку");
+              }}
+            >
+              Вернуть на сборку
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <AlertDialog open={Boolean(notFoundTarget)} onOpenChange={(open) => { if (!open) setNotFoundTarget(null); }}>
         <AlertDialogContent>

@@ -1036,6 +1036,54 @@ export async function closeTask(db: D1Database, taskId: number, actorEmail: stri
 }
 
 /**
+ * Возврат собранного задания на сборку.
+ *
+ * Строку могли отметить «собрано» по ошибке — например, кнопкой «Собрано
+ * всё», — а товара на деле нет. Закрытое задание отметок не меняет, поэтому
+ * его возвращают сборщику: статус снова «у сборщика», отметки строк
+ * сохраняются, и ошибочную строку переотмечают «не найден» — с обнулением
+ * остатка, как при обычной сборке. После исправления задание закрывают
+ * заново кнопкой «Задание собрано».
+ */
+export async function returnTaskToPicking(db: D1Database, taskId: number, actorEmail: string) {
+  const task = await readTask(db, taskId);
+  if (!task) return { ok: false as const, error: "Задание не найдено." };
+  if (task.status === "cancelled") return { ok: false as const, error: `Задание ${task.number} отменено.` };
+  if (task.status === "shipped") {
+    return {
+      ok: false as const,
+      error: task.manualCloseAt
+        ? `Отгрузка ${task.number} закрыта вручную — сначала верните её в работу.`
+        : `По заданию ${task.number} уже оформлена поставка.`,
+    };
+  }
+  if (task.status !== "picked") return { ok: false as const, error: `Задание ${task.number} ещё на сборке.` };
+
+  const result = await db.prepare(
+    `UPDATE pick_tasks
+     SET status = CASE WHEN assignee_email IS NULL THEN 'created' ELSE 'issued' END,
+         picked_at = NULL
+     WHERE id = ? AND status = 'picked'`,
+  ).bind(taskId).run();
+  if (!result.meta.changes) return { ok: false as const, error: "Задание уже изменилось — обновите страницу." };
+
+  await logWarehouseEvent(db, {
+    kind: "task_returned_to_picking",
+    taskId,
+    taskNumber: task.number,
+    marketplaceId: task.marketplaceId,
+    actorEmail,
+    payload: {
+      pickedAt: task.pickedAt,
+      picker: task.assigneeEmail,
+      picked: task.pickedCount,
+      notFound: task.notFoundCount,
+    },
+  });
+  return { ok: true as const, task: await readTask(db, taskId) };
+}
+
+/**
  * Отмена задания: строки освобождаются и вернутся в следующий отбор.
  * Нужна, когда задание сформировали ошибочно — иначе товар заперт в нём
  * уникальным индексом.
