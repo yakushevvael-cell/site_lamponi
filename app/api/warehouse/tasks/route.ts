@@ -60,6 +60,7 @@ export async function POST(request: Request) {
     marketplaceId?: unknown;
     warehouseExternalId?: unknown;
     maxBatches?: unknown;
+    metal?: unknown;
   } | null;
   const marketplaceId = body?.marketplaceId === "ozon" || body?.marketplaceId === "wildberries" || body?.marketplaceId === "yandex"
     ? body.marketplaceId as MarketplaceId
@@ -72,15 +73,23 @@ export async function POST(request: Request) {
   const maxBatchesRaw = Number(body?.maxBatches);
   const maxBatches = Number.isFinite(maxBatchesRaw) && maxBatchesRaw > 0 ? Math.trunc(maxBatchesRaw) : null;
 
+  // Серебро и золото выдаются разными кнопками: для золота своя УПД.
+  if (body?.metal !== "silver" && body?.metal !== "gold") {
+    return Response.json({ error: "Укажите, что выдавать: серебро или золото." }, { status: 400 });
+  }
+  const metal = body.metal;
+
   const result = await createPickTasks(runtime.DB, {
     marketplaceId,
     warehouseExternalId,
     maxBatches,
+    metal,
     actorEmail: auth.user.email,
   });
   return Response.json({
     ok: result.created.length > 0,
     created: result.created,
     skipped: result.skipped,
+    mixed: result.mixed ?? [],
   });
 }

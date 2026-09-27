@@ -50,6 +50,7 @@ import { formatAge, formatMoment } from "@/lib/utils";
 type Task = {
   id: number;
   number: string;
+  metal?: Metal;
   marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: "created" | "issued" | "picked" | "shipped" | "cancelled";
@@ -79,7 +80,15 @@ type WaitingGroup = {
   unitCount: number;
   oldestOrderedAt: string | null;
   withoutCell: number;
+  silverCount: number;
+  goldCount: number;
+  /** Отправления, где серебро и золото вместе: в задания не идут. */
+  mixed: string[];
 };
+
+type Metal = "silver" | "gold";
+
+const METAL_LABEL: Record<Metal, string> = { silver: "серебро", gold: "золото" };
 
 type Picker = { email: string; fullName: string | null; role: string };
 
@@ -178,23 +187,38 @@ export function WarehouseTasksWorkspace() {
     }
   }
 
-  async function createTasks(marketplaceId: "ozon" | "wildberries" | "yandex", warehouseExternalId?: string | null, maxBatches?: number) {
-    const key = `create:${marketplaceId}:${warehouseExternalId ?? "all"}:${maxBatches ?? 0}`;
+  async function createTasks(
+    marketplaceId: "ozon" | "wildberries" | "yandex",
+    metal: Metal,
+    warehouseExternalId?: string | null,
+    maxBatches?: number,
+  ) {
+    const key = `create:${marketplaceId}:${metal}:${warehouseExternalId ?? "all"}:${maxBatches ?? 0}`;
     setBusy(key);
     try {
       const response = await fetch("/api/warehouse/tasks", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ marketplaceId, warehouseExternalId, maxBatches }),
+        body: JSON.stringify({ marketplaceId, metal, warehouseExternalId, maxBatches }),
       });
-      const data = await response.json() as { created?: Array<{ number: string; itemCount: number }>; skipped?: string | null; error?: string };
+      const data = await response.json() as {
+        created?: Array<{ number: string; itemCount: number }>;
+        skipped?: string | null;
+        mixed?: Array<{ externalOrderId: string; articles: string[] }>;
+        error?: string;
+      };
       if (!response.ok) throw new Error(data.error ?? "Не удалось сформировать задания.");
       const created = data.created ?? [];
       if (created.length === 0) {
         toast.info(data.skipped ?? "Формировать нечего.");
       } else {
-        toast.success(`Сформировано заданий: ${created.length}`, {
+        toast.success(`Сформировано заданий (${METAL_LABEL[metal]}): ${created.length}`, {
           description: created.slice(0, 4).map((task) => `${task.number} — ${task.itemCount} поз.`).join("; "),
+        });
+      }
+      if ((data.mixed ?? []).length > 0) {
+        toast.warning(`Отправлений с серебром и золотом вместе: ${data.mixed?.length}`, {
+          description: "Они не попали в задания — соберите их вручную и отправьте через кабинет площадки. Список — в карточке площадки.",
         });
       }
       await load();
@@ -288,36 +312,49 @@ export function WarehouseTasksWorkspace() {
               <span className="flex items-center gap-2"><PackagePlus className="size-4" /> Wildberries</span>
               <Badge variant={wbPostings ? "default" : "secondary"}>{wbPostings} заданий ждёт</Badge>
             </CardTitle>
-            <CardDescription>Одно задание на каждый региональный склад: сортировка идёт уже на сборке.</CardDescription>
+            <CardDescription>
+              Одно задание на каждый региональный склад: сортировка идёт уже на сборке. Серебро и золото — разными
+              заданиями: для золота отдельная УПД.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <Button
-              className="w-full"
-              disabled={wbPostings === 0 || busy !== null}
-              onClick={() => void createTasks("wildberries")}
-            >
-              {busy === "create:wildberries:all:0" ? <Loader2 className="size-4 animate-spin" /> : <PackagePlus className="size-4" />}
-              Выдать задания по всем складам
-            </Button>
+            <MetalButtons
+              counts={metalCounts(wbWaiting)}
+              busy={busy}
+              busyKey={(metal) => `create:wildberries:${metal}:all:0`}
+              label={(metal) => `Выдать задания на ${METAL_LABEL[metal]} по всем складам`}
+              onCreate={(metal) => void createTasks("wildberries", metal)}
+            />
             <div className="space-y-2">
               {wbWaiting.length === 0 ? <p className="text-sm text-muted-foreground">Новых сборочных заданий нет.</p> : null}
               {wbWaiting.map((group) => (
-                <div key={`${group.warehouseExternalId}`} className="flex items-center justify-between gap-3 rounded-lg border px-3 py-2">
+                <div key={`${group.warehouseExternalId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{group.warehouseName}</p>
                     <p className="text-xs text-muted-foreground">
-                      {group.postingCount} заданий · {group.unitCount} шт. · ждёт {formatAge(group.oldestOrderedAt)}
+                      серебро {group.silverCount} · золото {group.goldCount} · {group.unitCount} шт. · ждёт {formatAge(group.oldestOrderedAt)}
                       {group.withoutCell > 0 ? ` · без ячейки ${group.withoutCell}` : ""}
                     </p>
                   </div>
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    disabled={busy !== null}
-                    onClick={() => void createTasks("wildberries", group.warehouseExternalId)}
-                  >
-                    Выдать
-                  </Button>
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      disabled={busy !== null || group.silverCount === 0}
+                      onClick={() => void createTasks("wildberries", "silver", group.warehouseExternalId)}
+                    >
+                      Серебро
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      className="border-amber-400 text-amber-900"
+                      disabled={busy !== null || group.goldCount === 0}
+                      onClick={() => void createTasks("wildberries", "gold", group.warehouseExternalId)}
+                    >
+                      Золото
+                    </Button>
+                  </div>
                 </div>
               ))}
             </div>
@@ -330,31 +367,21 @@ export function WarehouseTasksWorkspace() {
               <span className="flex items-center gap-2"><PackagePlus className="size-4" /> Ozon</span>
               <Badge variant={ozonPostings ? "default" : "secondary"}>{ozonPostings} отправлений ждёт</Badge>
             </CardTitle>
-            <CardDescription>Партиями по {batchSizes.ozon} отправлений. Остаток уходит как есть, не добивается.</CardDescription>
+            <CardDescription>
+              Партиями по {batchSizes.ozon} отправлений. Остаток уходит как есть, не добивается. Серебро и золото —
+              разными заданиями.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Button
-                className="flex-1"
-                disabled={ozonPostings === 0 || busy !== null}
-                onClick={() => void createTasks("ozon")}
-              >
-                {busy === "create:ozon:all:0" ? <Loader2 className="size-4 animate-spin" /> : <PackagePlus className="size-4" />}
-                Сформировать партии из остатка
-              </Button>
-              <Button
-                variant="outline"
-                disabled={ozonPostings === 0 || busy !== null}
-                onClick={() => void createTasks("ozon", null, 1)}
-              >
-                Одну партию
-              </Button>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {ozonPostings > 0
-                ? `Получится партий: ${Math.ceil(ozonPostings / Math.max(1, batchSizes.ozon))}, последняя — ${ozonPostings % batchSizes.ozon || batchSizes.ozon} отправлений.`
-                : "Новых отправлений на сборку нет."}
-            </p>
+            <MetalButtons
+              counts={metalCounts(ozonWaiting)}
+              busy={busy}
+              busyKey={(metal) => `create:ozon:${metal}:all:0`}
+              label={(metal) => `Выдать задания на ${METAL_LABEL[metal]}`}
+              onCreate={(metal) => void createTasks("ozon", metal)}
+              onOne={(metal) => void createTasks("ozon", metal, null, 1)}
+            />
+            <MixedWarning marketplace="Ozon" groups={ozonWaiting} />
             {withoutCell > 0 ? (
               <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
                 Без адреса в раскладке: {withoutCell} позиций. Они попадут в задание, но в конец списка —
@@ -372,31 +399,19 @@ export function WarehouseTasksWorkspace() {
             </CardTitle>
             <CardDescription>
               Партиями по {batchSizes.yandex} заказов. Доставку выполняет Яндекс Доставка — курьер вызывается на отгрузке.
+              Серебро и золото — разными заданиями.
             </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3">
-            <div className="flex flex-col gap-2 sm:flex-row">
-              <Button
-                className="flex-1"
-                disabled={yandexPostings === 0 || busy !== null}
-                onClick={() => void createTasks("yandex")}
-              >
-                {busy === "create:yandex:all:0" ? <Loader2 className="size-4 animate-spin" /> : <PackagePlus className="size-4" />}
-                Сформировать партии из остатка
-              </Button>
-              <Button
-                variant="outline"
-                disabled={yandexPostings === 0 || busy !== null}
-                onClick={() => void createTasks("yandex", null, 1)}
-              >
-                Одну партию
-              </Button>
-            </div>
-            <p className="text-sm text-muted-foreground">
-              {yandexPostings > 0
-                ? `Получится партий: ${Math.ceil(yandexPostings / Math.max(1, batchSizes.yandex))}, последняя — ${yandexPostings % batchSizes.yandex || batchSizes.yandex} заказов.`
-                : "Новых заказов на сборку нет."}
-            </p>
+            <MetalButtons
+              counts={metalCounts(yandexWaiting)}
+              busy={busy}
+              busyKey={(metal) => `create:yandex:${metal}:all:0`}
+              label={(metal) => `Выдать задания на ${METAL_LABEL[metal]}`}
+              onCreate={(metal) => void createTasks("yandex", metal)}
+              onOne={(metal) => void createTasks("yandex", metal, null, 1)}
+            />
+            <MixedWarning marketplace="Яндекс Маркета" groups={yandexWaiting} />
           </CardContent>
         </Card>
       </section>
@@ -473,6 +488,7 @@ export function WarehouseTasksWorkspace() {
                 <TableRow key={task.id}>
                   <TableCell className="pl-5 font-mono text-xs font-semibold">
                     <Link href={`/warehouse/task?id=${task.id}`} className="hover:underline">{task.number}</Link>
+                    {task.metal === "gold" ? <Badge className="ml-2 bg-amber-400 text-amber-950 hover:bg-amber-400">ЗОЛОТО</Badge> : null}
                   </TableCell>
                   <TableCell className="text-sm">
                     {MARKETPLACE_LABEL[task.marketplaceId]}
@@ -689,6 +705,74 @@ export function WarehouseTasksWorkspace() {
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+    </div>
+  );
+}
+
+/** Сколько отправлений ждёт по серебру и по золоту. */
+function metalCounts(groups: WaitingGroup[]): Record<Metal, number> {
+  return {
+    silver: groups.reduce((sum, group) => sum + group.silverCount, 0),
+    gold: groups.reduce((sum, group) => sum + group.goldCount, 0),
+  };
+}
+
+/** Две кнопки на площадку: серебро и золото, у каждой своя УПД. */
+function MetalButtons({
+  counts,
+  busy,
+  busyKey,
+  label,
+  onCreate,
+  onOne,
+}: {
+  counts: Record<Metal, number>;
+  busy: string | null;
+  busyKey: (metal: Metal) => string;
+  label: (metal: Metal) => string;
+  onCreate: (metal: Metal) => void;
+  onOne?: (metal: Metal) => void;
+}) {
+  return (
+    <div className="space-y-2">
+      {(["silver", "gold"] as const).map((metal) => (
+        <div key={metal} className="flex flex-col gap-2 sm:flex-row">
+          <Button
+            className={metal === "gold" ? "flex-1 bg-amber-500 text-amber-950 hover:bg-amber-400" : "flex-1"}
+            disabled={counts[metal] === 0 || busy !== null}
+            onClick={() => onCreate(metal)}
+          >
+            {busy === busyKey(metal) ? <Loader2 className="size-4 animate-spin" /> : <PackagePlus className="size-4" />}
+            {label(metal)} · {counts[metal]}
+          </Button>
+          {onOne ? (
+            <Button variant="outline" disabled={counts[metal] === 0 || busy !== null} onClick={() => onOne(metal)}>
+              Одну партию
+            </Button>
+          ) : null}
+        </div>
+      ))}
+    </div>
+  );
+}
+
+/**
+ * Отправления, где серебро и золото вместе. В задания они не попадают: на
+ * серебро и золото 1С выписывает разные УПД, а задание сверяется с одной.
+ */
+function MixedWarning({ marketplace, groups }: { marketplace: string; groups: WaitingGroup[] }) {
+  const mixed = groups.flatMap((group) => group.mixed);
+  if (mixed.length === 0) return null;
+  return (
+    <div className="space-y-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+      <p className="flex items-center gap-1 font-semibold">
+        <AlertTriangle className="size-3.5" /> Серебро и золото в одном отправлении: {mixed.length}
+      </p>
+      <p>
+        Для серебра и золота оформляются разные УПД, а задание сверяется с одной, поэтому эти отправления не попадают
+        в задания. Соберите их артикулы вручную и отправьте через портал {marketplace}.
+      </p>
+      <p className="font-mono">{mixed.slice(0, 20).join(", ")}{mixed.length > 20 ? ` и ещё ${mixed.length - 20}` : ""}</p>
     </div>
   );
 }

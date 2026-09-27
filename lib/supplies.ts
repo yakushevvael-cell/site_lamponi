@@ -12,9 +12,11 @@
  */
 import { deliveryConfigured, getMarketplaceCredentials } from "@/lib/credentials";
 import {
+  approveOzonCarriage,
   checkOzonActStatus,
-  createOzonAct,
+  createOzonCarriage,
   getOzonActFile,
+  OzonApiError,
   ozonPostingDeliveryMethod,
 } from "@/lib/ozon";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
@@ -68,6 +70,7 @@ export type SupplyRow = {
   postingCount: number;
   dropoffPointId: number | null;
   dropoffName: string | null;
+  dropoffType: string | null;
   shippingType: string | null;
   shippingDate: string | null;
   documentsJson: string;
@@ -83,7 +86,7 @@ export type SupplyRow = {
 const SUPPLY_COLUMNS = `
   id, marketplace_id AS marketplaceId, task_id AS taskId, external_id AS externalId, name, status,
   box_count AS boxCount, posting_count AS postingCount, dropoff_point_id AS dropoffPointId,
-  dropoff_name AS dropoffName, shipping_type AS shippingType, shipping_date AS shippingDate,
+  dropoff_name AS dropoffName, dropoff_type AS dropoffType, shipping_type AS shippingType, shipping_date AS shippingDate,
   documents_json AS documentsJson, error, created_by AS createdBy,
   created_at AS createdAt, closed_at AS closedAt,
   closed_manually AS closedManually, closed_by AS closedBy
@@ -578,13 +581,13 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
   if (openWb) {
     supplyId = Number(openWb.id);
     await db.prepare(
-      `UPDATE supplies SET box_count = ?, posting_count = ?, dropoff_point_id = ?, dropoff_name = ?, error = NULL
+      `UPDATE supplies SET box_count = ?, posting_count = ?, dropoff_point_id = ?, dropoff_name = ?, dropoff_type = ?, error = NULL
        WHERE id = ?`,
-    ).bind(boxCount, postings.results.length, dropoff?.id ?? null, dropoff?.name ?? null, supplyId).run();
+    ).bind(boxCount, postings.results.length, dropoff?.id ?? null, dropoff?.name ?? null, dropoff?.officeType ?? null, supplyId).run();
   } else {
     const insert = await db.prepare(
-      `INSERT INTO supplies (marketplace_id, task_id, name, status, box_count, posting_count, dropoff_point_id, dropoff_name, created_by)
-       VALUES (?, ?, ?, 'created', ?, ?, ?, ?, ?)`,
+      `INSERT INTO supplies (marketplace_id, task_id, name, status, box_count, posting_count, dropoff_point_id, dropoff_name, dropoff_type, created_by)
+       VALUES (?, ?, ?, 'created', ?, ?, ?, ?, ?, ?)`,
     ).bind(
       task.marketplaceId,
       input.taskId,
@@ -593,6 +596,7 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
       postings.results.length,
       dropoff?.id ?? null,
       dropoff?.name ?? null,
+      dropoff?.officeType ?? null,
       input.actorEmail,
     ).run();
     supplyId = Number(insert.meta.last_row_id ?? 0);
@@ -603,6 +607,8 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
     if (task.marketplaceId === "wildberries") {
       await createWildberriesSupplyFlow(db, runtime, {
         supplyId,
+        taskId: input.taskId,
+        actorEmail: input.actorEmail,
         taskNumber: task.number,
         externalId: openWb?.externalId ?? null,
         orderIds: postings.results.map((row) => row.externalOrderId),
@@ -622,6 +628,7 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
     } else {
       await createOzonSupplyFlow(db, runtime, {
         supplyId,
+        taskId: input.taskId,
         firstPosting: postings.results[0].externalOrderId,
         boxCount: Math.max(1, Math.trunc(input.boxCount || 1)),
         departureDate: input.departureDate ?? null,
@@ -676,6 +683,8 @@ async function createWildberriesSupplyFlow(
   runtime: AppRuntimeEnv,
   input: {
     supplyId: number;
+    taskId: number;
+    actorEmail: string;
     taskNumber: string;
     externalId?: string | null;
     orderIds: string[];
@@ -740,14 +749,34 @@ async function createWildberriesSupplyFlow(
   // поставка остаётся открытой, и повторная попытка доделает начатое.
   const boxStickers: Array<{ id: string; file: string }> = [];
   const needsBoxes = String(input.shippingPointType ?? "").toLowerCase() === "pp";
+  // Каждый шаг с коробами — в журнал: без него не восстановить, почему у
+  // поставки на ПВЗ не оказалось QR коробов.
+  const logBoxes = (step: string, payload: Record<string, unknown>) => logWarehouseEvent(db, {
+    kind: "wb_supply_boxes",
+    taskId: input.taskId,
+    taskNumber: input.taskNumber,
+    marketplaceId: "wildberries",
+    actorEmail: input.actorEmail,
+    payload: { step, supplyId: input.supplyId, externalId, ...payload },
+  }).catch(() => undefined);
+  await logBoxes("decision", {
+    shippingPointId: input.shippingPointId,
+    shippingPointName: input.shippingPointName ?? null,
+    shippingPointType: input.shippingPointType ?? null,
+    needsBoxes,
+    boxCount: input.boxCount,
+  });
   if (needsBoxes) {
     const wanted = Math.max(1, Math.trunc(input.boxCount || 1));
     let boxIds = await getWildberriesSupplyBoxIds(token, externalId);
+    await logBoxes("existing", { wanted, existing: boxIds.length });
     if (boxIds.length < wanted) {
       try {
-        await addWildberriesSupplyBoxes(token, externalId, wanted - boxIds.length);
+        const added = await addWildberriesSupplyBoxes(token, externalId, wanted - boxIds.length);
+        await logBoxes("added", { requested: wanted - boxIds.length, added: added.length });
       } catch (error) {
         const detail = error instanceof Error ? error.message : "ошибка WB";
+        await logBoxes("add_failed", { error: detail });
         throw new Error(
           `Wildberries не завёл короба (${wanted} шт.) для ПВЗ: ${detail}. `
           + "WB разрешает не больше одного короба на два отправления — уменьшите число коробов и оформите ещё раз.",
@@ -760,12 +789,17 @@ async function createWildberriesSupplyFlow(
     // В ответе нет ID грузоместа: стикеры идут в порядке запроса.
     const stickers = await getWildberriesBoxStickers(token, externalId, boxIds);
     const files = stickers.map((row) => row.file ?? "").filter(Boolean);
+    await logBoxes("stickers", { boxes: boxIds.length, stickers: stickers.length, files: files.length });
     if (files.length < boxIds.length) {
       throw new Error(
         `Wildberries отдал ${files.length} стикеров коробов из ${boxIds.length} — повторите оформление, поставка ещё открыта.`,
       );
     }
     boxIds.forEach((id, index) => boxStickers.push({ id, file: files[index] }));
+  }
+  // ПВЗ не принимает поставку без коробов: закрыть её без QR коробов нельзя.
+  if (needsBoxes && boxStickers.length === 0) {
+    throw new Error("Для отгрузки в ПВЗ нужны QR коробов, а Wildberries их не отдал. Поставка не закрыта — повторите оформление.");
   }
 
   await deliverWildberriesSupply(token, externalId);
@@ -793,7 +827,7 @@ async function createWildberriesSupplyFlow(
 async function createOzonSupplyFlow(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { supplyId: number; firstPosting: string; boxCount: number; departureDate: string | null },
+  input: { supplyId: number; taskId: number; firstPosting: string; boxCount: number; departureDate: string | null },
 ) {
   const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
   if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Ключи Ozon не добавлены.");
@@ -803,16 +837,31 @@ async function createOzonSupplyFlow(
   const method = await ozonPostingDeliveryMethod(clientId, apiKey, input.firstPosting);
   if (!method.id) throw new Error("Ozon не сообщил метод доставки по отправлению — акт создать не из чего.");
 
-  const actId = await createOzonAct(clientId, apiKey, {
+  // Акт — это отгрузка Ozon (carriage): создание, затем подтверждение.
+  // Отгрузка, созданная прошлой попыткой, но не подтверждённая, не
+  // создаётся заново — иначе у Ozon остались бы две отгрузки на один день.
+  const previous = await db.prepare(
+    `SELECT external_id AS externalId FROM supplies
+     WHERE task_id = ? AND marketplace_id = 'ozon' AND status = 'error' AND external_id IS NOT NULL AND id <> ?
+     ORDER BY id DESC LIMIT 1`,
+  ).bind(input.taskId, input.supplyId).first<{ externalId: string }>();
+  const carriageId = Number(previous?.externalId ?? 0) || await createOzonCarriage(clientId, apiKey, {
     deliveryMethodId: method.id,
     departureDate: input.departureDate,
-    containersCount: input.boxCount,
   });
   await db.prepare("UPDATE supplies SET external_id = ?, dropoff_name = COALESCE(dropoff_name, ?) WHERE id = ?")
-    .bind(String(actId), method.name || method.warehouseName || null, input.supplyId).run();
+    .bind(String(carriageId), method.name || method.warehouseName || null, input.supplyId).run();
+
+  try {
+    await approveOzonCarriage(clientId, apiKey, { carriageId, containersCount: input.boxCount });
+  } catch (error) {
+    // Отгрузку прошлой попытки Ozon мог уже подтвердить: тогда повторное
+    // подтверждение отклоняется, а документы по ней уже готовятся.
+    if (!previous || !(error instanceof OzonApiError) || error.status >= 500) throw error;
+  }
 
   // Акт готовится не мгновенно: ждём немного, дальше документы докладываются кнопкой.
-  await collectOzonActDocuments(db, runtime, input.supplyId, actId, 4);
+  await collectOzonActDocuments(db, runtime, input.supplyId, carriageId, 4);
 }
 
 /**
@@ -986,6 +1035,60 @@ function formatYandexAddress(address: YandexOrderAddress | null) {
     address.apartment ? `кв. ${address.apartment}` : null,
   ];
   return parts.filter(Boolean).join(", ");
+}
+
+/**
+ * QR коробов поставки WB — заново из Wildberries.
+ *
+ * Нужна, когда поставка на ПВЗ оформлена, а стикеров коробов на сайте нет:
+ * WB отдаёт короба и их QR и по закрытой поставке. Дополнить закрытую
+ * поставку новыми коробами WB не даёт — тогда короба заводят в кабинете WB.
+ */
+export async function refreshWildberriesBoxStickers(
+  db: D1Database,
+  runtime: AppRuntimeEnv,
+  input: { supplyId: number; actorEmail: string },
+) {
+  const supply = await readSupply(db, input.supplyId);
+  if (!supply) throw new Error("Поставка не найдена.");
+  if (supply.marketplaceId !== "wildberries" || !supply.externalId) {
+    throw new Error("QR коробов есть только у поставок Wildberries, уже созданных в WB.");
+  }
+  const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
+  if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
+  const token = credentials.WB_API_TOKEN;
+
+  const boxIds = await getWildberriesSupplyBoxIds(token, supply.externalId);
+  const stickers = boxIds.length > 0 ? await getWildberriesBoxStickers(token, supply.externalId, boxIds) : [];
+  const files = stickers.map((row) => row.file ?? "").filter(Boolean);
+  await logWarehouseEvent(db, {
+    kind: "wb_supply_boxes",
+    taskId: supply.taskId,
+    marketplaceId: "wildberries",
+    actorEmail: input.actorEmail,
+    payload: { step: "refresh", supplyId: supply.id, externalId: supply.externalId, boxes: boxIds.length, files: files.length },
+  });
+  if (boxIds.length === 0) {
+    throw new Error(
+      `В поставке WB ${supply.externalId} нет коробов. В закрытую поставку WB короба не добавить — заведите их в кабинете Wildberries.`,
+    );
+  }
+  if (files.length < boxIds.length) {
+    throw new Error(`Wildberries отдал ${files.length} стикеров коробов из ${boxIds.length}. Повторите через минуту.`);
+  }
+
+  const kept = parseDocuments(supply).filter((document) => document.kind !== "box_sticker");
+  const boxes: SupplyDocument[] = [];
+  for (const [index, file] of files.entries()) {
+    boxes.push({
+      kind: "box_sticker",
+      label: `Короб ${index + 1} из ${files.length}`,
+      storageKey: await storeDocument(runtime, supply.id, "box_sticker", index + 1, file, "image/png"),
+      contentType: "image/png",
+    });
+  }
+  await saveDocuments(db, supply.id, [...kept, ...boxes]);
+  return readSupply(db, supply.id);
 }
 
 /** Догружает документы Ozon: акт и штрихкод отгрузки, когда они готовы. */

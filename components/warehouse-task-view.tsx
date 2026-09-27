@@ -48,6 +48,7 @@ import { formatAge, formatMoment } from "@/lib/utils";
 type Task = {
   id: number;
   number: string;
+  metal?: "silver" | "gold";
   marketplaceId: "ozon" | "wildberries" | "yandex";
   warehouseName: string | null;
   status: "created" | "issued" | "picked" | "shipped" | "cancelled";
@@ -155,7 +156,10 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
       <Card>
         <CardContent className="flex flex-wrap items-start justify-between gap-4 px-5">
           <div className="min-w-0">
-            <p className="font-mono text-2xl font-bold tracking-tight md:text-3xl">{task.number}</p>
+            <p className="font-mono text-2xl font-bold tracking-tight md:text-3xl">
+              {task.number}
+              {task.metal === "gold" ? <Badge className="ml-2 bg-amber-400 align-middle text-amber-950 hover:bg-amber-400">ЗОЛОТО</Badge> : null}
+            </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {MARKETPLACE_LABEL[task.marketplaceId]} · {task.warehouseName ?? "склад не указан"} ·
               {" "}{task.orderCount} заказов · {task.itemCount} позиций · {task.unitCount} шт. · {task.cellCount} ячеек

@@ -6,6 +6,7 @@ import {
   checkSupplyReadiness,
   collectOzonActDocuments,
   createSupplyForTask,
+  refreshWildberriesBoxStickers,
   readDropoffPoints,
   readSupplies,
   readShippingCities,
@@ -61,6 +62,17 @@ export async function POST(request: Request) {
     departureDate?: unknown;
   } | null;
   const action = String(body?.action ?? "create");
+
+  if (action === "refresh_boxes") {
+    const supplyId = idFrom(body?.supplyId);
+    if (!supplyId) return Response.json({ error: "Не указана поставка." }, { status: 400 });
+    try {
+      const updated = await refreshWildberriesBoxStickers(runtime.DB, runtime, { supplyId, actorEmail: auth.user.email });
+      return Response.json({ ok: true, supply: updated ? withDocuments(updated) : null });
+    } catch (error) {
+      return Response.json({ error: error instanceof Error ? error.message : "QR коробов не получены." }, { status: 409 });
+    }
+  }
 
   if (action === "refresh_documents") {
     const supplyId = idFrom(body?.supplyId);

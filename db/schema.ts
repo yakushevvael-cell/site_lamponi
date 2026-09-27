@@ -496,6 +496,8 @@ export const pickTasks = sqliteTable(
     /** УПД задания сверена и УИН закреплены (миграция 0027). Без неё упаковка заблокирована. */
     updMatchedAt: text("upd_matched_at"),
     updUploadId: integer("upd_upload_id"),
+    /** silver или gold: для золота отдельная УПД, поэтому и отдельное задание (миграция 0028). */
+    metal: text("metal", { enum: ["silver", "gold"] }).notNull().default("silver"),
   },
   (table) => [
     uniqueIndex("pick_task_barcode_unique").on(table.barcode),
@@ -751,6 +753,8 @@ export const supplies = sqliteTable(
     postingCount: integer("posting_count").notNull().default(0),
     dropoffPointId: integer("dropoff_point_id"),
     dropoffName: text("dropoff_name"),
+    /** Тип пункта WB при оформлении: pp — ПВЗ (нужны короба), sc — СЦ, sw — склад (миграция 0028). */
+    dropoffType: text("dropoff_type"),
     documentsJson: text("documents_json").notNull().default("[]"),
     error: text("error"),
     createdBy: text("created_by"),

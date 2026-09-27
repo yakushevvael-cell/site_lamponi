@@ -4,6 +4,8 @@ import { test } from "node:test";
 import {
   attachCells,
   buildTaskNumber,
+  isGoldArticle,
+  splitPostingsByMetal,
   cellSortOrder,
   countCells,
   groupByPosting,
@@ -259,4 +261,35 @@ test("русские буквы, похожие на латинские, ищу�
     { article: "Б-1316", size: null, cellCode: "2", sortOrder: 2 },
   ];
   assert.deepEqual(attachCells(items, placements).map((item) => item.cellCode), ["1", "2"]);
+});
+
+test("золото — кириллическое «-з» на конце артикула", () => {
+  assert.equal(isGoldArticle("С-3254зр001-З"), true);
+  assert.equal(isGoldArticle("с-3254зр001-з"), true);
+  assert.equal(isGoldArticle("С-3254зр001-З (17)"), true);
+  assert.equal(isGoldArticle("С-3254зр001"), false);
+  assert.equal(isGoldArticle("С-3064зр"), false);
+  assert.equal(isGoldArticle("С-3254зр001-Z"), false);
+  assert.equal(isGoldArticle("С-3254зр001-3"), false);
+});
+
+test("отправления делятся на серебро, золото и смешанные", () => {
+  const posting = (id, ...articles) => ({ externalOrderId: id, items: articles.map((article) => ({ article })) });
+  const result = splitPostingsByMetal([
+    posting("A", "С-1"),
+    posting("B", "С-2-З"),
+    posting("C", "С-1", "С-2-З"),
+    posting("D", "С-3-З", "К-4-З (17)"),
+  ]);
+  assert.deepEqual(result.silver.map((row) => row.externalOrderId), ["A"]);
+  assert.deepEqual(result.gold.map((row) => row.externalOrderId), ["B", "D"]);
+  assert.deepEqual(result.mixed.map((row) => row.externalOrderId), ["C"]);
+});
+
+test("номер задания на золото помечен «-З»", () => {
+  assert.equal(buildTaskNumber({ day: "2026-09-27", marketplaceId: "ozon", sequence: 4, metal: "gold" }), "2026-09-27-OZ-04-З");
+  assert.equal(
+    buildTaskNumber({ day: "2026-09-27", marketplaceId: "wildberries", warehouseName: "Казань", metal: "gold" }),
+    `${buildTaskNumber({ day: "2026-09-27", marketplaceId: "wildberries", warehouseName: "Казань" })}-З`,
+  );
 });

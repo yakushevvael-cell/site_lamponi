@@ -56,6 +56,7 @@ export default async function PickSheetPage({ searchParams }: { searchParams: Pr
         .mark span { display: inline-block; width: 20px; height: 20px; border: 1.5px solid #111; }
         .posting { font-family: ui-monospace, monospace; font-size: 11px; color: #444; }
         .no-cell { color: #8a5300; font-weight: 600; }
+        .pick-sheet__gold { display: inline-block; margin: 4px 0; padding: 2px 10px; border: 3px solid #111; font-size: 22px; font-weight: 800; letter-spacing: 2px; }
         .pick-sheet__foot { margin-top: 18px; display: flex; justify-content: space-between; font-size: 12px; color: #333; }
         @media print {
           @page { size: A4; margin: 10mm; }
@@ -69,6 +70,8 @@ export default async function PickSheetPage({ searchParams }: { searchParams: Pr
       <header className="pick-sheet__head">
         <div>
           <p className="pick-sheet__number">{task.number}</p>
+          {/* Золото — отдельный лист и отдельная УПД: пометка крупно, чтобы не спутать. */}
+          {task.metal === "gold" ? <p className="pick-sheet__gold">ЗОЛОТО</p> : null}
           <p className="pick-sheet__meta">
             {MARKETPLACE_LABEL[task.marketplaceId] ?? task.marketplaceId} · {task.warehouseName ?? "склад не указан"}
             <br />

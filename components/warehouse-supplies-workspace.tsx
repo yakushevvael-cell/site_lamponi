@@ -67,6 +67,7 @@ type Supply = {
   boxCount: number;
   postingCount: number;
   dropoffName: string | null;
+  dropoffType: string | null;
   error: string | null;
   createdAt: string;
   closedAt: string | null;
@@ -319,6 +320,26 @@ export function WarehouseSuppliesWorkspace() {
     }
   }
 
+  /** QR коробов WB заново: для поставки на ПВЗ, у которой их нет на сайте. */
+  async function refreshBoxes(supply: Supply) {
+    setBusy(`boxes:${supply.id}`);
+    try {
+      const response = await fetch("/api/warehouse/supplies", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "refresh_boxes", supplyId: supply.id }),
+      });
+      const data = await response.json() as { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "QR коробов не получены.");
+      toast.success("QR коробов получены", { description: "Печатайте их из списка документов поставки." });
+      await loadSupplies(taskId);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : "QR коробов не получены.");
+    } finally {
+      setBusy(null);
+    }
+  }
+
   const selectedTask = tasks.find((item) => item.id === taskId) ?? null;
 
   // Список пунктов с фильтром по адресу. Выбранный пункт остаётся в списке,
@@ -547,6 +568,7 @@ export function WarehouseSuppliesWorkspace() {
                   <p className="mt-1 text-sm text-muted-foreground">
                     задание {supply.name ?? "—"} · {supply.postingCount}
                     {supply.marketplaceId === "yandex" ? " заявок в Яндекс Доставку" : ` отправлений · ${supply.boxCount} коробов`}
+                    {supply.dropoffType && OFFICE_TYPE[supply.dropoffType] ? ` · ${OFFICE_TYPE[supply.dropoffType]}` : ""}
                     {supply.dropoffName ? ` · ${supply.dropoffName}` : ""}
                   </p>
                   <p className="mt-1 text-xs text-muted-foreground">
@@ -562,6 +584,11 @@ export function WarehouseSuppliesWorkspace() {
                     <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">
                       закрыто вручную{supply.closedBy ? ` · ${supply.closedBy}` : ""}
                     </Badge>
+                  ) : null}
+                  {supply.marketplaceId === "wildberries" && supply.externalId && supply.status !== "open" ? (
+                    <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void refreshBoxes(supply)}>
+                      {busy === `boxes:${supply.id}` ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Получить QR коробов
+                    </Button>
                   ) : null}
                   {supply.marketplaceId === "ozon" ? (
                     <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => void refreshDocuments(supply)}>

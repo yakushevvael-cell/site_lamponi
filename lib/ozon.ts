@@ -749,24 +749,60 @@ export async function ozonPostingDeliveryMethod(clientId: string, apiKey: string
   };
 }
 
-/** Создание акта приёма-передачи (перевозки). */
-export async function createOzonAct(
+/**
+ * Отгрузка FBS (акт приёма-передачи) в два шага.
+ *
+ * Прежний /v2/posting/fbs/act/create Ozon отключил 07.09.2026 — с тех пор
+ * оформление поставки Ozon падало. Замена:
+ *   1. /v1/carriage/create — отгрузка в статусе «новая»; в неё попадают все
+ *      отправления метода доставки в статусе «готово к отгрузке»;
+ *   2. /v1/carriage/approve — подтверждение, отгрузка становится
+ *      «сформирована», и по ней готовятся акт и штрихкод.
+ *
+ * Номер отгрузки (carriage_id) — это и номер задания на формирование
+ * документов: по нему, как раньше по номеру акта, запрашиваются статус, PDF
+ * акта и штрихкод.
+ */
+export async function createOzonCarriage(
   clientId: string,
   apiKey: string,
-  input: { deliveryMethodId: number; departureDate?: string | null; containersCount?: number | null },
+  input: { deliveryMethodId: number; departureDate?: string | null },
 ) {
   const body: Record<string, unknown> = { delivery_method_id: input.deliveryMethodId };
-  if (input.departureDate) body.departure_date = input.departureDate;
-  if (input.containersCount && input.containersCount > 0) body.containers_count = input.containersCount;
-  const payload = await ozonRequest<{ result?: { id?: number }; id?: number }>(
-    "/v2/posting/fbs/act/create",
+  const date = String(input.departureDate ?? "").trim();
+  // Ozon ждёт дату-время; из формы приходит «ГГГГ-ММ-ДД».
+  if (date) body.departure_date = /^\d{4}-\d{2}-\d{2}$/.test(date) ? `${date}T00:00:00Z` : date;
+  const created = await ozonRequest<{ carriage_id?: number; result?: { carriage_id?: number; id?: number }; id?: number }>(
+    "/v1/carriage/create",
     clientId,
     apiKey,
     body,
   );
-  const id = Number(payload.result?.id ?? payload.id ?? 0);
-  if (!id) throw new OzonApiError(502, "Ozon не вернул номер акта.");
-  return id;
+  const carriageId = Number(created.carriage_id ?? created.result?.carriage_id ?? created.result?.id ?? created.id ?? 0);
+  if (!carriageId) throw new OzonApiError(502, "Ozon не вернул номер отгрузки.");
+  return carriageId;
+}
+
+/** Подтверждение отгрузки: после него Ozon формирует акт и штрихкод. */
+export async function approveOzonCarriage(
+  clientId: string,
+  apiKey: string,
+  input: { carriageId: number; containersCount?: number | null },
+) {
+  const count = input.containersCount && input.containersCount > 0 ? Math.trunc(input.containersCount) : null;
+  try {
+    await ozonRequest<unknown>(
+      "/v1/carriage/approve",
+      clientId,
+      apiKey,
+      count ? { carriage_id: input.carriageId, containers_count: count } : { carriage_id: input.carriageId },
+    );
+  } catch (error) {
+    // Число грузомест в подтверждении необязательно: если Ozon его не принял,
+    // подтверждаем отгрузку без него — акт важнее, короба укажут на приёмке.
+    if (!count || !(error instanceof OzonApiError) || error.status >= 500) throw error;
+    await ozonRequest<unknown>("/v1/carriage/approve", clientId, apiKey, { carriage_id: input.carriageId });
+  }
 }
 
 /** Статус акта: пока не ready, PDF запрашивать нельзя. */

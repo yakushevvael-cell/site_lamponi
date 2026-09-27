@@ -17,16 +17,20 @@ import {
   cellSortOrder,
   confusableArticle,
   groupByPosting,
+  isGoldArticle,
   normalizeBatchSize,
   placementKey,
   sortByRoute,
   sortByWaiting,
   splitIntoBatches,
+  splitPostingsByMetal,
   taskDay,
 } from "@/lib/warehouse-core.mjs";
 
 export type MarketplaceId = "ozon" | "wildberries" | "yandex";
 export type PickTaskStatus = "created" | "issued" | "picked" | "shipped" | "cancelled";
+/** Серебро и золото — разные задания: для золота отдельная УПД. */
+export type TaskMetal = "silver" | "gold";
 export type PickItemStatus = "pending" | "picked" | "not_found";
 
 export const OZON_BATCH_SIZE_KEY = "warehouse_ozon_batch_size";
@@ -91,6 +95,7 @@ export type PickTask = {
   manualCloseNote: string | null;
   /** УПД задания сверена и УИН закреплены. Пока её нет, упаковка по заданию заблокирована. */
   updMatchedAt: string | null;
+  metal: TaskMetal;
 };
 
 export type PickTaskItem = {
@@ -276,6 +281,10 @@ export async function readWaitingSummary(db: D1Database) {
     unitCount: number;
     oldestOrderedAt: string | null;
     withoutCell: number;
+    silverCount: number;
+    goldCount: number;
+    /** Серебро и золото в одном отправлении: в задания не идут, собираются вручную. */
+    mixed: string[];
   }>();
   const postings = groupByPosting(rows) as PostingGroup[];
   const placements = await readPlacements(db);
@@ -295,7 +304,14 @@ export async function readWaitingSummary(db: D1Database) {
       unitCount: 0,
       oldestOrderedAt: null,
       withoutCell: 0,
+      silverCount: 0,
+      goldCount: 0,
+      mixed: [],
     };
+    const gold = posting.items.map((item) => isGoldArticle(item.article) as boolean);
+    if (gold.every(Boolean)) group.goldCount += 1;
+    else if (gold.some(Boolean)) group.mixed.push(posting.externalOrderId);
+    else group.silverCount += 1;
     group.postingCount += 1;
     group.itemCount += posting.items.length;
     group.unitCount += posting.items.reduce((sum, item) => sum + Number(item.quantity ?? 0), 0);
@@ -344,6 +360,8 @@ export type CreateTasksOptions = {
   warehouseExternalId?: string | null;
   /** Сколько партий создать. Пусто — все, что набралось (кнопка «из остатка»). */
   maxBatches?: number | null;
+  /** Серебро или золото: у каждого своя кнопка, своя УПД и свои задания. */
+  metal: TaskMetal;
   actorEmail: string;
 };
 
@@ -369,7 +387,20 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
     readBatchSizes(db),
   ]);
 
-  const postings = sortByWaiting(groupByPosting(rows) as PostingGroup[]) as PostingGroup[];
+  // Серебро и золото — разные задания. Отправление, где есть и то и другое,
+  // не попадает ни в одно: одна УПД на задание его не покроет.
+  const byMetal = splitPostingsByMetal(sortByWaiting(groupByPosting(rows) as PostingGroup[]) as PostingGroup[]) as {
+    silver: PostingGroup[]; gold: PostingGroup[]; mixed: PostingGroup[];
+  };
+  const postings = options.metal === "gold" ? byMetal.gold : byMetal.silver;
+  const mixed = byMetal.mixed.map((posting) => ({
+    externalOrderId: posting.externalOrderId,
+    articles: [...new Set(posting.items.map((item) => item.article))],
+  }));
+  const metalName = options.metal === "gold" ? "золота" : "серебра";
+  if (postings.length === 0) {
+    return { created: [] as CreatedTask[], skipped: `Ожидающих заказов ${metalName} нет.`, mixed };
+  }
   const day = taskDay(new Date());
   const takenRows = await db.prepare("SELECT number FROM pick_tasks WHERE number LIKE ?").bind(`${day}%`).all<{ number: string }>();
   const taken = new Set(takenRows.results.map((row) => row.number));
@@ -416,6 +447,7 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
         warehouseName,
         sequence: batchSequence,
         taken: [...taken],
+        metal: options.metal,
       });
       taken.add(number);
 
@@ -427,6 +459,7 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
         actorEmail: options.actorEmail,
         postings: batch,
         placements,
+        metal: options.metal,
       });
       if (task) {
         created.push(task);
@@ -437,7 +470,7 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
     }
   }
 
-  return { created, skipped: created.length === 0 ? "Все ожидающие заказы уже в заданиях." : null };
+  return { created, skipped: created.length === 0 ? `Все ожидающие заказы ${metalName} уже в заданиях.` : null, mixed };
 }
 
 async function insertTask(
@@ -450,6 +483,7 @@ async function insertTask(
     actorEmail: string;
     postings: PostingGroup[];
     placements: Array<{ article: string; size: string | null; cellCode: string; sortOrder: number }>;
+    metal: TaskMetal;
   },
 ): Promise<CreatedTask | null> {
   // «К-1298з (16-21)» из карточки Ozon — это артикул «К-1298з» с размером
@@ -472,8 +506,8 @@ async function insertTask(
   for (let attempt = 0; attempt < 5 && taskId === 0; attempt += 1) {
     try {
       const insert = await db.prepare(
-        `INSERT INTO pick_tasks (number, marketplace_id, warehouse_external_id, warehouse_name, status, created_by, barcode)
-         VALUES (?, ?, ?, ?, 'created', ?, ?)`,
+        `INSERT INTO pick_tasks (number, marketplace_id, warehouse_external_id, warehouse_name, status, created_by, barcode, metal)
+         VALUES (?, ?, ?, ?, 'created', ?, ?, ?)`,
       ).bind(
         input.number,
         input.marketplaceId,
@@ -481,6 +515,7 @@ async function insertTask(
         input.warehouseName,
         input.actorEmail,
         generatePickSheetCode() as string,
+        input.metal,
       ).run();
       taskId = Number(insert.meta.last_row_id ?? 0);
     } catch (error) {
@@ -604,7 +639,7 @@ const TASK_COLUMNS = `
   created_by AS createdBy, created_at AS createdAt, issued_at AS issuedAt, picked_at AS pickedAt,
   shipped_at AS shippedAt, cancelled_at AS cancelledAt, printed_at AS printedAt, comment,
   barcode, manual_close_at AS manualCloseAt, manual_close_by AS manualCloseBy,
-  manual_close_note AS manualCloseNote, upd_matched_at AS updMatchedAt
+  manual_close_note AS manualCloseNote, upd_matched_at AS updMatchedAt, metal
 `;
 
 export async function readTaskList(
