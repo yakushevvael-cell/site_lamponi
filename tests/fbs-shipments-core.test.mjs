@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { isAwaitingHandover, isHandedOver, moscowDay, overdueHandover, shipmentsByDay } from "../lib/fbs-shipments-core.mjs";
+import { isAwaitingHandover, isHandedOver, moscowDay, overdueHandover, shipmentsByDay, wbHandedOverAt } from "../lib/fbs-shipments-core.mjs";
 
 test("Ozon: отгружен с этапа «доставляется», awaiting_deliver ещё у нас", () => {
   assert.equal(isHandedOver("ozon", "delivering"), true);
@@ -20,6 +20,18 @@ test("WB: complete — в доставке, new/confirm — ещё у нас, о
   assert.equal(isAwaitingHandover("wildberries", "new/waiting"), true);
   assert.equal(isAwaitingHandover("wildberries", "cancel/canceled"), false);
   assert.equal(isAwaitingHandover("wildberries", "confirm/canceled_by_client"), false);
+});
+
+test("WB: отгрузка — скан QR поставки, статус задания не важен", () => {
+  const scan = "2026-09-16T07:15:00Z";
+  // После сдачи в СЦ задание может висеть в «сортируем» — скан поставки уже есть.
+  assert.equal(wbHandedOverAt("confirm/waiting", scan), scan);
+  assert.equal(wbHandedOverAt("complete/sorted", scan), scan);
+  // Покупатель отменил после отгрузки — товар всё равно уехал со склада.
+  assert.equal(wbHandedOverAt("complete/canceled_by_client", scan), scan);
+  assert.equal(wbHandedOverAt("cancel/canceled", scan), null);
+  assert.equal(wbHandedOverAt("complete/waiting", null), null);
+  assert.equal(wbHandedOverAt("complete/waiting", undefined), null);
 });
 
 test("день считается по Москве", () => {
@@ -42,6 +54,16 @@ test("отгрузки по дням: нули в пустые дни, площ�
     { date: "2026-09-15", ozon: 0, wildberries: 0 },
     { date: "2026-09-16", ozon: 2, wildberries: 0 },
   ]);
+});
+
+test("отгрузки по дням считаются в штуках", () => {
+  const now = Date.parse("2026-09-16T12:00:00Z");
+  const series = shipmentsByDay([
+    { marketplaceId: "ozon", handedOverAt: "2026-09-16T08:00:00Z", units: 3 },
+    { marketplaceId: "ozon", handedOverAt: "2026-09-16T09:00:00Z", units: 2 },
+    { marketplaceId: "wildberries", handedOverAt: "2026-09-16T10:00:00Z", units: 1 },
+  ], { days: 1, now, marketplaces: ["ozon", "wildberries"] });
+  assert.deepEqual(series, [{ date: "2026-09-16", ozon: 5, wildberries: 1 }]);
 });
 
 test("больше 40 часов без передачи в доставку", () => {

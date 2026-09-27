@@ -1,5 +1,5 @@
 import { getMarketplaceCredentials } from "@/lib/credentials";
-import { isHandedOver } from "@/lib/fbs-shipments-core.mjs";
+import { isHandedOver, wbHandedOverAt } from "@/lib/fbs-shipments-core.mjs";
 import { authorizeApi } from "@/lib/app-auth";
 import {
   matchOzonCatalog,
@@ -252,13 +252,12 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
   const remoteOrders = await getWildberriesOrders(token, days);
   const statuses = await getWildberriesOrderStatuses(token, remoteOrders.map((order) => order.id));
   const statusById = new Map(statuses.map((status) => [status.id, status]));
-  // Время передачи в доставку — закрытие поставки. Если список поставок не
-  // пришёл, время не выдумываем: заказ просто не попадёт в график отгрузок.
-  const supplyHandover = new Map<string, string>();
+  // Отгрузка — скан QR поставки при приёмке WB (в ПВЗ или СЦ). Если список
+  // поставок не пришёл, время не выдумываем: заказ просто не попадёт в график.
+  const supplyScannedAt = new Map<string, string>();
   try {
     for (const supply of await getWildberriesSupplies(token)) {
-      const at = supply.closedAt || supply.scanDt;
-      if (supply.done !== false && at) supplyHandover.set(supply.id, at);
+      if (supply.scanDt) supplyScannedAt.set(supply.id, supply.scanDt);
     }
   } catch {
     // Без права на поставки заказы всё равно синхронизируются.
@@ -287,8 +286,8 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
       // Wildberries в списке сборочных заданий дедлайн не отдаёт — считаем по
       // дате заказа на экране склада, а поле оставляем пустым.
       shipmentDeadline: null,
-      // У задания времени передачи нет — берём закрытие его поставки.
-      handedOverAt: isHandedOver("wildberries", info.status) && order.supplyId ? (supplyHandover.get(order.supplyId) ?? null) : null,
+      // Статус задания после сдачи в СЦ отстаёт на дни — берём скан поставки.
+      handedOverAt: order.supplyId ? wbHandedOverAt(info.status, supplyScannedAt.get(order.supplyId)) : null,
       handedOverSeenAt: null,
       final: info.bought || info.canceled,
       items: [{

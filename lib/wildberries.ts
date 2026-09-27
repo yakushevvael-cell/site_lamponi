@@ -468,9 +468,8 @@ export async function getWildberriesOffices(token: string) {
 export type WildberriesSupplyInfo = { id: string; done?: boolean; createdAt?: string; closedAt?: string | null; scanDt?: string | null };
 
 /**
- * Все поставки FBS продавца. Нужны ради closedAt — момента, когда поставка
- * передана в доставку: время перехода задания на этап «в доставке» Wildberries
- * у самого задания не отдаёт.
+ * Все поставки FBS продавца. Нужны ради scanDt — момента, когда WB
+ * отсканировал QR поставки при приёмке: это и есть день отгрузки её заданий.
  */
 export async function getWildberriesSupplies(token: string, maxPages = 50) {
   const supplies: WildberriesSupplyInfo[] = [];

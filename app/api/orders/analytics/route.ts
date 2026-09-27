@@ -180,11 +180,15 @@ export async function GET(request: Request) {
   }
   const geography = [...geographyMap.values()].sort((a, b) => b.orders - a.orders).slice(0, 100).map((row) => ({ ...row, amount: round(row.amount, 2) }));
 
-  // Отгрузки FBS по дням: заказ перешёл на этап «доставляется».
+  // Отгрузки FBS по дням в штуках: заказ передан площадке (у WB — скан поставки).
   const shippedResult = await runtime.DB.prepare(
-    `SELECT marketplace_id AS marketplaceId, handed_over_at AS handedOverAt
-     FROM orders WHERE handed_over_at IS NOT NULL AND handed_over_at >= ?`,
-  ).bind(new Date(Date.now() - (days + 1) * 86_400_000).toISOString()).all<{ marketplaceId: string; handedOverAt: string }>();
+    `SELECT o.marketplace_id AS marketplaceId, o.handed_over_at AS handedOverAt,
+            COALESCE(SUM(oi.quantity), 1) AS units
+     FROM orders o
+     LEFT JOIN order_items oi ON oi.order_id = o.id
+     WHERE o.handed_over_at IS NOT NULL AND o.handed_over_at >= ?
+     GROUP BY o.id`,
+  ).bind(new Date(Date.now() - (days + 1) * 86_400_000).toISOString()).all<{ marketplaceId: string; handedOverAt: string; units: number }>();
   const shipmentMarketplaces = [...new Set(["ozon", "wildberries", "yandex", ...shippedResult.results.map((row) => row.marketplaceId)])];
   const shipments = shipmentsByDay(shippedResult.results, { days, marketplaces: shipmentMarketplaces });
 
