@@ -493,6 +493,9 @@ export const pickTasks = sqliteTable(
     manualCloseAt: text("manual_close_at"),
     manualCloseBy: text("manual_close_by"),
     manualCloseNote: text("manual_close_note"),
+    /** УПД задания сверена и УИН закреплены (миграция 0027). Без неё упаковка заблокирована. */
+    updMatchedAt: text("upd_matched_at"),
+    updUploadId: integer("upd_upload_id"),
   },
   (table) => [
     uniqueIndex("pick_task_barcode_unique").on(table.barcode),
@@ -629,13 +632,17 @@ export const warehouseEvents = sqliteTable(
   ],
 );
 
-/** Загрузка УПД: из неё берутся пары «артикул + УИН». */
+/** Загрузка УПД к заданию: из неё берутся тройки «артикул + размер + УИН». */
 export const updUploads = sqliteTable("upd_uploads", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   fileName: text("file_name").notNull(),
   itemCount: integer("item_count").notNull().default(0),
   newCount: integer("new_count").notNull().default(0),
   uploadedBy: text("uploaded_by"),
+  taskId: integer("task_id"),
+  /** matched — УПД сошлась с заданием, mismatch — нет, список расхождений в problems_json. */
+  status: text("status", { enum: ["matched", "mismatch"] }),
+  problemsJson: text("problems_json"),
   createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
 });
 
@@ -654,6 +661,8 @@ export const uinItems = sqliteTable(
     size: text("size"),
     description: text("description"),
     uploadId: integer("upload_id"),
+    /** Задание, к УПД которого относится УИН. После закрытия поставки УИН удаляется. */
+    taskId: integer("task_id"),
     createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
     usedMarketplaceId: text("used_marketplace_id"),
     usedExternalOrderId: text("used_external_order_id"),
@@ -664,6 +673,7 @@ export const uinItems = sqliteTable(
   (table) => [
     index("uin_item_article_idx").on(table.article, table.size),
     index("uin_item_used_idx").on(table.usedExternalOrderId),
+    index("uin_item_task_idx").on(table.taskId),
   ],
 );
 

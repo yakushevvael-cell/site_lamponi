@@ -33,7 +33,7 @@ import {
   setWildberriesShippingMethod,
   type WildberriesShippingPoint,
 } from "@/lib/wildberries";
-import { logWarehouseEvent, readTask } from "@/lib/warehouse";
+import { logWarehouseEvent, readTask, releaseTaskUinsStatement } from "@/lib/warehouse";
 import { moscowDate, normalizeCity, pickShippingPoint, sameCity } from "@/lib/shipping-point-core.mjs";
 import {
   getYandexOrder,
@@ -632,6 +632,8 @@ export async function createSupplyForTask(db: D1Database, runtime: AppRuntimeEnv
       db.prepare("UPDATE pick_tasks SET status = 'shipped', shipped_at = CURRENT_TIMESTAMP, supply_id = ? WHERE id = ?")
         .bind(supplyId, input.taskId),
       db.prepare("UPDATE supplies SET status = 'closed', closed_at = CURRENT_TIMESTAMP WHERE id = ?").bind(supplyId),
+      // Поставка закрыта — УИН задания больше не нужны сайту.
+      releaseTaskUinsStatement(db, input.taskId),
       ...(dropoff ? [db.prepare("UPDATE dropoff_points SET last_used_at = CURRENT_TIMESTAMP WHERE id = ?").bind(dropoff.id)] : []),
     ]);
     // Пункт, с которым WB закрыл поставку, — проверенный: в следующий раз

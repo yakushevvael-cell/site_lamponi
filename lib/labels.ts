@@ -37,7 +37,6 @@ import {
 import { stampLabelLines } from "@/lib/label-stamp.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import { ensureWildberriesSupply } from "@/lib/supplies";
-import { articleBaseKey, articleKey, normalizeSizeValue, splitArticleSize } from "@/lib/upd-parse-core.mjs";
 import {
   addOrdersToWildberriesSupply,
   getWildberriesStickers,
@@ -107,34 +106,6 @@ async function readTaskItemsForLabels(db: D1Database, taskId: number) {
      ORDER BY id`,
   ).bind(taskId).all<TaskItemRow>();
   return rows.results;
-}
-
-/** Свободные УИН по ключу «артикул + размер». Сопоставление в коде: SQLite не умеет UPPER для кириллицы. */
-async function readFreeUins(db: D1Database) {
-  const rows = await db.prepare(
-    "SELECT uin, article, size FROM uin_items WHERE used_external_order_id IS NULL ORDER BY created_at, uin",
-  ).all<{ uin: string; article: string; size: string | null }>();
-  const byKey = new Map<string, string[]>();
-  for (const row of rows.results) {
-    for (const key of [articleKey(row.article, row.size) as string, articleBaseKey(row.article) as string]) {
-      const list = byKey.get(key) ?? [];
-      list.push(row.uin);
-      byKey.set(key, list);
-    }
-  }
-  return byKey;
-}
-
-/** УИН под строку задания: сначала точная пара с размером, потом по артикулу. */
-function takeUin(byKey: Map<string, string[]>, article: string, size: string | null, used: Set<string>) {
-  const keys = [articleKey(article, size) as string, articleBaseKey(article) as string];
-  for (const key of keys) {
-    const list = byKey.get(key) ?? [];
-    for (const uin of list) {
-      if (!used.has(uin)) return uin;
-    }
-  }
-  return null;
 }
 
 async function upsertLabel(
@@ -249,10 +220,12 @@ const STATUS_POLLS_PER_PASS = 40;
  * заданию и стикер картинкой. Одна неудача не останавливает остальные —
  * ошибка запоминается в строке этикетки и видна на столе.
  *
- * Отправление из одного изделия готовится заранее, до стола: УИН берётся
- * свободный из УПД. Отправление из нескольких — только когда отсканировано
- * целиком: собрать его в Ozon можно одним запросом, а УИН нужен на каждое
- * изделие, и брать их «на глаз» из УПД нельзя.
+ * УИН берутся только закреплённые за изделиями при загрузке УПД задания —
+ * других у сайта нет. Пока УПД задания не сверена, подготовка не идёт.
+ *
+ * Отправление из одного изделия готовится сразу после сверки УПД, до стола.
+ * Отправление из нескольких — только когда отсканировано целиком: собрать его
+ * в Ozon можно одним запросом, и половину посылки передавать нельзя.
  */
 export async function prepareLabelsForTask(
   db: D1Database,
@@ -260,8 +233,17 @@ export async function prepareLabelsForTask(
   input: { taskId: number; limit?: number; actorEmail: string },
 ): Promise<PrepareResult> {
   const limit = Math.min(20, Math.max(1, input.limit ?? 8));
-  const items = await readTaskItemsForLabels(db, input.taskId);
   const messages: string[] = [];
+  // Номер задания нужен как имя поставки Wildberries.
+  const taskRow = await db.prepare("SELECT number, upd_matched_at AS updMatchedAt FROM pick_tasks WHERE id = ?")
+    .bind(input.taskId).first<{ number: string; updMatchedAt: string | null }>();
+  if (!taskRow?.updMatchedAt) {
+    messages.push("УПД задания не сверена: этикетки готовятся только после загрузки верной УПД.");
+    return { prepared: 0, failed: 0, skipped: 0, waiting: 0, validating: 0, ready: 0, total: 0, messages };
+  }
+  const taskNumber = taskRow.number ?? String(input.taskId);
+
+  const items = await readTaskItemsForLabels(db, input.taskId);
   if (items.length === 0) {
     return { prepared: 0, failed: 0, skipped: 0, waiting: 0, validating: 0, ready: 0, total: 0, messages };
   }
@@ -270,13 +252,6 @@ export async function prepareLabelsForTask(
     `SELECT ${LABEL_COLUMNS} FROM shipment_labels WHERE task_id = ?`,
   ).bind(input.taskId).all<LabelRow>();
   const byPosting = new Map(existing.results.map((row) => [`${row.marketplaceId}::${row.externalOrderId}`, row]));
-
-  const freeUins = await readFreeUins(db);
-  const claimed = new Set<string>();
-  // Номер задания нужен как имя поставки Wildberries.
-  const taskRow = await db.prepare("SELECT number FROM pick_tasks WHERE id = ?")
-    .bind(input.taskId).first<{ number: string }>();
-  const taskNumber = taskRow?.number ?? String(input.taskId);
 
   // Отправление — единица подготовки: этикетка выдаётся на отправление, а не на строку.
   const postings = new Map<string, TaskItemRow[]>();
@@ -328,23 +303,19 @@ export async function prepareLabelsForTask(
       continue;
     }
 
-    // У отсканированного изделия УИН уже свой. Для одиночного отправления,
-    // которое готовится заранее, берём свободный УИН из УПД.
-    const taken: Array<{ item: TaskItemRow; uin: string; fresh: boolean }> = [];
+    // УИН каждого изделия закреплён при загрузке УПД. Изделие без УИН — это
+    // сбой сверки, а не повод подобрать УИН «похожий по артикулу».
+    const taken: Array<{ item: TaskItemRow; uin: string }> = [];
     let shortage: string | null = null;
     for (const row of group) {
-      const own = row.uin;
-      const uin = own ?? takeUin(freeUins, row.article, row.size, claimed);
-      if (!uin) {
-        shortage = `Нет свободного УИН для артикула ${row.article}${row.size ? ` / ${row.size}` : ""}. Загрузите УПД.`;
+      if (!row.uin) {
+        shortage = `У изделия ${row.article}${row.size ? ` / ${row.size}` : ""} нет УИН из УПД задания.`;
         break;
       }
-      claimed.add(uin);
-      taken.push({ item: row, uin, fresh: !own });
+      taken.push({ item: row, uin: row.uin });
     }
 
     if (shortage) {
-      for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
       await upsertLabel(db, {
         marketplaceId,
         externalOrderId: first.externalOrderId,
@@ -359,22 +330,17 @@ export async function prepareLabelsForTask(
       continue;
     }
 
-    // Закрепление УИН вынесено из общего хвоста: по Ozon оно происходит сразу
-    // после передачи УИН площадке, не дожидаясь сборки. Иначе следующий заход
-    // снова возьмёт свободный УИН из УПД — уже другой — и проверка в Ozon
-    // начнётся заново. Ровно из-за этого отправления зависали навсегда.
-    const persistUins = async (pairs: Array<{ itemId: number | null; uin: string }>) => {
-      for (const pair of pairs) {
+    // Отметка «УИН передан площадке по этому отправлению». Сам УИН за
+    // изделием закреплён ещё при загрузке УПД и здесь не меняется.
+    const persistUins = async () => {
+      for (const entry of taken) {
         await markUinUsed(db, {
-          uin: pair.uin,
+          uin: entry.uin,
           marketplaceId,
           externalOrderId: first.externalOrderId,
           taskId: input.taskId,
           actorEmail: input.actorEmail,
         });
-        if (pair.itemId === null) continue;
-        await db.prepare("UPDATE pick_task_items SET uin = COALESCE(uin, ?) WHERE id = ?")
-          .bind(pair.uin, pair.itemId).run();
       }
     };
 
@@ -391,10 +357,10 @@ export async function prepareLabelsForTask(
           shipPostings: splitPostings(label?.shipPostings),
         });
 
-        // Отменено в Ozon: УИН не закрепляем, а уже закреплённые за этим
-        // отправлением возвращаем в свободные — изделия уходят на полку.
+        // Отменено в Ozon: снимаем отметку «передан площадке». УИН остаётся
+        // за заданием и удалится из базы вместе с остальными при закрытии
+        // поставки — изделие уходит на полку.
         if (step.kind === "cancelled") {
-          for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
           await db.prepare(
             `UPDATE uin_items
              SET used_marketplace_id = NULL, used_external_order_id = NULL, used_task_id = NULL, used_at = NULL, used_by = NULL
@@ -416,19 +382,7 @@ export async function prepareLabelsForTask(
           continue;
         }
 
-        // Отправление из одного изделия могло уже получить УИН в Ozon на
-        // прошлом заходе — тогда за изделием закрепляется именно он. У
-        // отсканированного изделия УИН свой, и подменять его нельзя: это
-        // скрыло бы пересорт.
-        const adopt = group.length === 1 && step.uins.length === 1 && !group[0].uin;
-        await persistUins(adopt
-          ? [{ itemId: group[0].id, uin: step.uins[0] }]
-          : [
-            ...taken.map((entry) => ({ itemId: entry.item.id, uin: entry.uin })),
-            ...step.uins.filter((uin) => !taken.some((entry) => entry.uin === uin))
-              .map((uin) => ({ itemId: null, uin })),
-          ]);
-        if (adopt) for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
+        await persistUins();
 
         if (step.kind === "waiting") {
           await upsertLabel(db, {
@@ -437,7 +391,7 @@ export async function prepareLabelsForTask(
             taskId: input.taskId,
             article: articles,
             size: multi ? null : first.size,
-            uin: step.uins[0] ?? taken[0]?.uin ?? null,
+            uin: taken[0]?.uin ?? null,
             status: "pending",
             error: null,
             exemplarStatus: step.exemplarStatus || null,
@@ -454,7 +408,7 @@ export async function prepareLabelsForTask(
           taskId: input.taskId,
           article: articles,
           size: multi ? null : first.size,
-          uin: step.uins[0] ?? taken[0]?.uin ?? null,
+          uin: taken[0]?.uin ?? null,
           status: "ready",
           contentType: "application/pdf",
           storageKey: step.storageKey,
@@ -511,10 +465,9 @@ export async function prepareLabelsForTask(
         });
       }
 
-      await persistUins(taken.map((entry) => ({ itemId: entry.item.id, uin: entry.uin })));
+      await persistUins();
       prepared += 1;
     } catch (error) {
-      for (const entry of taken) if (entry.fresh) claimed.delete(entry.uin);
       const message = error instanceof Error ? error.message : "Не удалось подготовить этикетку.";
       await upsertLabel(db, {
         marketplaceId,
@@ -1001,7 +954,6 @@ export async function readPostingBoard(db: D1Database, taskId: number): Promise<
 export type ScanOutcome =
   | { status: "ok"; item: ScanItem; label: { marketplaceId: string; externalOrderId: string; contentType: string } }
   | { status: "grouped"; uin: string; item: ScanItem; slot: number | null; scanned: number; total: number; complete: boolean }
-  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string; updSize: string | null }
   | { status: "uin_unknown"; uin: string }
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
@@ -1019,128 +971,61 @@ export type ScanItem = {
   scannedAt: string | null;
 };
 
-/** Отметка скана. Размер подтверждается тем же запросом: одно действие — одна запись. */
-function scanStatements(
-  db: D1Database,
-  input: {
-    itemId: number;
-    uin: string;
-    actorEmail: string;
-    confirmSize: boolean;
-    orderSize: string | null;
-    marketplaceId: string;
-    externalOrderId: string;
-    taskId: number;
-  },
-) {
-  const confirm = input.confirmSize ? 1 : 0;
+/**
+ * Отметка скана. УИН изделия не меняется: он закреплён при загрузке УПД, и
+ * скан лишь подтверждает, что в руках именно это изделие.
+ */
+function scanStatements(db: D1Database, input: { itemId: number; uin: string; actorEmail: string }) {
   return [
     db.prepare(
       `UPDATE pick_task_items
-       SET scanned_at = CURRENT_TIMESTAMP, scanned_by = ?, uin = COALESCE(uin, ?),
-           size_confirmed_at = CASE WHEN ? = 1 THEN CURRENT_TIMESTAMP ELSE size_confirmed_at END,
-           size_confirmed_by = CASE WHEN ? = 1 THEN ? ELSE size_confirmed_by END,
-           size_confirmed_value = CASE WHEN ? = 1 THEN ? ELSE size_confirmed_value END
-       WHERE id = ? AND scanned_at IS NULL`,
-    ).bind(
-      input.actorEmail,
-      input.uin,
-      confirm,
-      confirm,
-      input.actorEmail,
-      confirm,
-      input.orderSize,
-      input.itemId,
-    ),
-    db.prepare(
-      `UPDATE uin_items
-       SET used_marketplace_id = ?, used_external_order_id = ?, used_task_id = ?,
-           used_at = COALESCE(used_at, CURRENT_TIMESTAMP), used_by = COALESCE(used_by, ?)
-       WHERE uin = ?`,
-    ).bind(input.marketplaceId, input.externalOrderId, input.taskId, input.actorEmail, input.uin),
+       SET scanned_at = CURRENT_TIMESTAMP, scanned_by = ?
+       WHERE id = ? AND uin = ? AND scanned_at IS NULL`,
+    ).bind(input.actorEmail, input.itemId, input.uin),
   ];
 }
 
 /**
  * Скан УИН на столе.
  *
+ * УИН закреплены за изделиями при загрузке УПД задания, поэтому скан ничего
+ * не выбирает: он находит изделие, за которым закреплён этот УИН, и выдаёт
+ * этикетку его отправления. УИН, которого нет в УПД этого задания, не
+ * принимается — других источников УИН у сайта нет.
+ *
  * Возвращает, что показать на экране. Печать этикетки — отдельный запрос
  * файла: так на столе не бывает состояния «этикетка ушла на принтер, а в
  * системе отметки нет».
  *
- * Два случая, когда скан не заканчивается печатью:
- *  — в отправлении несколько изделий: печатать нечего, пока не собрано всё
- *    отправление, изделие уходит в ячейку комплектации;
- *  — на Wildberries у заказа есть размер, а в УПД его нет: расхождение
- *    подтверждает человек, и до подтверждения ничего не записывается.
+ * В отправлении из нескольких изделий печатать по первому скану нечего:
+ * изделие уходит в ячейку комплектации, этикетка — когда собрано всё.
  */
 export async function resolveScan(
   db: D1Database,
-  input: { uin: string; taskId: number; actorEmail: string; confirmSize?: boolean },
+  input: { uin: string; taskId: number; actorEmail: string },
 ): Promise<ScanOutcome> {
   const uin = input.uin.trim();
-  const known = await db.prepare("SELECT uin, article, size FROM uin_items WHERE uin = ?")
-    .bind(uin).first<{ uin: string; article: string; size: string | null }>();
-  if (!known) return { status: "uin_unknown", uin };
-
-  // Артикул сравнивается в коде, а не в SQL: SQLite не знает регистра кириллицы,
-  // и «с-3064зр» из карточки WB не равно «С-3064зр» из 1С. Поэтому из базы
-  // берутся строки заданий за последний месяц, а отбор идёт по ключу артикула.
-  const candidates = await db.prepare(
+  const target = await db.prepare(
     `SELECT ti.id AS itemId, ti.task_id AS taskId, ti.marketplace_id AS marketplaceId,
             ti.external_order_id AS externalOrderId, ti.article, ti.size, ti.cell_code AS cellCode,
-            ti.scanned_at AS scannedAt, ti.uin AS itemUin, t.number AS taskNumber, t.status AS taskStatus
+            ti.scanned_at AS scannedAt
      FROM pick_task_items ti
-     JOIN pick_tasks t ON t.id = ti.task_id
-     WHERE ti.status <> 'not_found' AND t.status <> 'cancelled'
-       AND (ti.uin = ? OR t.created_at >= datetime('now', '-45 day'))
-     ORDER BY CASE WHEN ti.uin = ? THEN 0 ELSE 1 END, ti.task_id DESC, ti.id`,
-  ).bind(uin, uin).all<ScanItem & { itemUin: string | null; taskNumber: string | null; taskStatus: string }>();
+     WHERE ti.task_id = ? AND ti.uin = ? AND ti.status <> 'not_found'
+     ORDER BY ti.id LIMIT 1`,
+  ).bind(input.taskId, uin).first<ScanItem>();
 
-  const articleOnly = articleBaseKey(known.article) as string;
-  const withSize = articleKey(known.article, known.size) as string;
-  const sameArticle = candidates.results.filter(
-    (row) => row.itemUin === uin || (articleBaseKey(row.article) as string) === articleOnly,
-  );
-
-  // Размер из УПД — подсказка, а не фильтр: у колец он либо не приходит вовсе
-  // («б/р», «16-20», «16,0 +»), либо записан иначе, чем в заказе. Точное
-  // совпадение выигрывает, но если его нет, строку не прячем — размер
-  // подтверждает человек.
-  const exactSize = sameArticle.filter((row) => (articleKey(row.article, row.size) as string) === withSize);
-  const rows = exactSize.length > 0 ? exactSize : sameArticle;
-
-  const inTask = rows.filter((row) => row.taskId === input.taskId);
-  if (inTask.length === 0) {
-    const foreign = rows[0];
-    if (foreign) {
-      return { status: "foreign_task", uin, article: known.article, taskNumber: foreign.taskNumber };
-    }
-    return { status: "not_in_task", uin, article: known.article, size: known.size };
-  }
-
-  // Тот же УИН уже отсканирован: одинаковых изделий в отправлении может быть
-  // несколько, и без этой проверки повторный скан занял бы соседнюю строку.
-  const sameUin = inTask.find((row) => row.scannedAt && row.itemUin === uin);
-  if (sameUin) return { status: "repeat", uin, item: sameUin };
-
-  const already = inTask.find((row) => row.scannedAt);
-  const target = inTask.find((row) => !row.scannedAt);
   if (!target) {
-    return { status: "repeat", uin, item: already ?? inTask[0] };
+    // Изделие из другого открытого задания — частый пересорт на столе.
+    const foreign = await db.prepare(
+      `SELECT t.number AS taskNumber, u.article
+       FROM uin_items u JOIN pick_tasks t ON t.id = u.task_id
+       WHERE u.uin = ? AND u.task_id <> ? AND t.status NOT IN ('shipped', 'cancelled')`,
+    ).bind(uin, input.taskId).first<{ taskNumber: string | null; article: string }>();
+    if (foreign) return { status: "foreign_task", uin, article: foreign.article, taskNumber: foreign.taskNumber };
+    return { status: "uin_unknown", uin };
   }
 
-  // «К-1298з (16-21)»: размер из скобок, если отдельного нет.
-  const orderSize = String((splitArticleSize(target.article, target.size) as { size: string | null }).size ?? "").trim();
-  const updSize = String(known.size ?? "").trim();
-  const sizeMatches = normalizeSizeValue(orderSize) === normalizeSizeValue(updSize);
-
-  // Размер на Wildberries («16-20», «18,0 +», «б/р») в УПД либо не приходит
-  // вовсе, либо записан иначе. Решение — за человеком: подтвердил, значит
-  // изделие то самое.
-  if (target.marketplaceId === "wildberries" && orderSize && !sizeMatches && input.confirmSize !== true) {
-    return { status: "size_confirm", uin, item: target, orderSize, updSize: updSize || null };
-  }
+  if (target.scannedAt) return { status: "repeat", uin, item: target };
 
   const postingItems = await db.prepare(
     `SELECT COUNT(*) AS total,
@@ -1151,16 +1036,7 @@ export async function resolveScan(
   const total = Number(postingItems?.total ?? 1);
   const scannedBefore = Number(postingItems?.scanned ?? 0);
 
-  const writes = scanStatements(db, {
-    itemId: target.itemId,
-    uin,
-    actorEmail: input.actorEmail,
-    confirmSize: input.confirmSize === true,
-    orderSize: orderSize || null,
-    marketplaceId: target.marketplaceId,
-    externalOrderId: target.externalOrderId,
-    taskId: target.taskId,
-  });
+  const writes = scanStatements(db, { itemId: target.itemId, uin, actorEmail: input.actorEmail });
 
   // Отправление из нескольких изделий: отмечаем скан, но этикетку не выдаём.
   if (total > 1) {
@@ -1183,10 +1059,10 @@ export async function resolveScan(
       article: target.article,
       size: target.size,
       actorEmail: input.actorEmail,
-      payload: { uin, slot, grouped: true, scanned, total, sizeConfirmed: input.confirmSize === true },
+      payload: { uin, slot, grouped: true, scanned, total },
     });
 
-    return { status: "grouped", uin, item: target, slot, scanned, total, complete: scanned >= total };
+    return { status: "grouped", uin, item: { ...target, scannedAt: null }, slot, scanned, total, complete: scanned >= total };
   }
 
   const label = await db.prepare(
@@ -1209,7 +1085,7 @@ export async function resolveScan(
     article: target.article,
     size: target.size,
     actorEmail: input.actorEmail,
-    payload: { uin, sizeConfirmed: input.confirmSize === true },
+    payload: { uin },
   });
 
   return {
@@ -1255,7 +1131,11 @@ export async function readScanSummary(db: D1Database, taskId: number) {
     `SELECT status, COUNT(*) AS count FROM shipment_labels WHERE task_id = ? GROUP BY status`,
   ).bind(taskId).all<{ status: string; count: number }>();
   const byStatus = new Map(labels.results.map((entry) => [entry.status, Number(entry.count)]));
+  const task = await db.prepare("SELECT upd_matched_at AS updMatchedAt FROM pick_tasks WHERE id = ?")
+    .bind(taskId).first<{ updMatchedAt: string | null }>();
   return {
+    /** УПД задания сверена: без неё стол не сканирует и этикетки не готовятся. */
+    updMatched: Boolean(task?.updMatchedAt),
     items: Number(row?.items ?? 0),
     scanned: Number(row?.scanned ?? 0),
     postings: Number(row?.postings ?? 0),

@@ -12,15 +12,14 @@
  *   — УИН не найден: жёлтый экран, печати нет;
  *   — изделие из чужого задания: красный экран, печати нет.
  *
- * Два исхода требуют действия, а не только внимания:
- *   — в отправлении несколько изделий: синий экран с номером ячейки
- *     комплектации, печать — из окна отправлений, когда собрано всё;
- *   — на Wildberries размер у заказа есть, а в УПД его нет: поле ввода
- *     блокируется, пока человек не подтвердит или не отклонит.
+ * В отправлении несколько изделий — синий экран с номером ячейки
+ * комплектации, печать — из окна отправлений, когда собрано всё.
  *
  * Работа начинается со скана листа подбора: пока лист не отсканирован, поле
  * принимает только его код (12 цифр), и выбрать задание из списка нельзя —
- * так на столе не окажется чужая партия. Дальше то же поле принимает УИН.
+ * так на столе не окажется чужая партия. Затем загружается УПД этого задания:
+ * сайт сверяет её с заданием по «артикул + размер» и закрепляет УИН за
+ * отправлениями. Пока УПД не сверена, скан УИН и этикетки заблокированы.
  */
 
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -57,6 +56,7 @@ type Task = {
 };
 
 type Summary = {
+  updMatched: boolean;
   items: number;
   scanned: number;
   postings: number;
@@ -66,6 +66,13 @@ type Summary = {
   labelsReady: number;
   labelsError: number;
   labelsPending: number;
+};
+
+/** УПД задания: сверена ли и что не сошлось в последней загрузке. */
+type UpdInfo = {
+  matched: boolean;
+  matchedAt: string | null;
+  lastUpload: { fileName: string; status: "matched" | "mismatch" | null; problems: string[]; createdAt: string } | null;
 };
 
 type BoardItem = { itemId: number; article: string; size: string | null; uin: string | null; scannedAt: string | null };
@@ -107,11 +114,9 @@ type ScanItem = {
 type Outcome =
   | { status: "ok"; item: ScanItem; label: { marketplaceId: string; externalOrderId: string; contentType: string } }
   | { status: "grouped"; uin: string; item: ScanItem; slot: number | null; scanned: number; total: number; complete: boolean }
-  | { status: "size_confirm"; uin: string; item: ScanItem; orderSize: string; updSize: string | null }
   | { status: "uin_unknown"; uin: string }
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
-  | { status: "not_in_task"; uin: string; article: string; size: string | null }
   | { status: "label_not_ready"; uin: string; item: ScanItem; error: string | null };
 
 type HistoryRow = { at: string; uin: string; status: Outcome["status"]; text: string };
@@ -144,11 +149,9 @@ function beep(kind: "ok" | "warn" | "error") {
 const OUTCOME_TEXT: Record<Outcome["status"], string> = {
   ok: "Этикетка отправлена на печать",
   grouped: "В ячейку комплектации, отправление из нескольких изделий",
-  size_confirm: "Нужно подтвердить размер",
   repeat: "Этот УИН уже сканировали",
-  uin_unknown: "УИН не найден в УПД",
+  uin_unknown: "Этого УИН нет в этом сборочном задании",
   foreign_task: "Изделие из другого задания",
-  not_in_task: "Изделия нет ни в одном задании",
   label_not_ready: "Этикетка ещё не готова",
 };
 
@@ -162,7 +165,6 @@ export function WarehouseScanWorkspace() {
   const [labelErrors, setLabelErrors] = useState<LabelError[]>([]);
   const [labelWaiting, setLabelWaiting] = useState<LabelWaiting[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
-  const [pendingSize, setPendingSize] = useState<{ uin: string; item: ScanItem; orderSize: string } | null>(null);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
   const [history, setHistory] = useState<HistoryRow[]>([]);
   const [value, setValue] = useState("");
@@ -170,7 +172,7 @@ export function WarehouseScanWorkspace() {
   const [receiveConfirm, setReceiveConfirm] = useState<{ code: string; number: string; pendingCount: number } | null>(null);
   const [preparing, setPreparing] = useState(false);
   const [offline, setOffline] = useState(false);
-  const [updInfo, setUpdInfo] = useState<{ total: number; free: number } | null>(null);
+  const [updInfo, setUpdInfo] = useState<UpdInfo | null>(null);
   const [loading, setLoading] = useState(true);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -186,11 +188,10 @@ export function WarehouseScanWorkspace() {
     setTasks(usable);
   }, []);
 
-  const loadUpd = useCallback(async () => {
-    const response = await fetch("/api/warehouse/upd", { cache: "no-store" });
+  const loadUpd = useCallback(async (id: number) => {
+    const response = await fetch(`/api/warehouse/upd?task=${id}`, { cache: "no-store" });
     if (!response.ok) return;
-    const data = await response.json() as { total?: number; free?: number };
-    setUpdInfo({ total: data.total ?? 0, free: data.free ?? 0 });
+    setUpdInfo(await response.json() as UpdInfo);
   }, []);
 
   const loadLabels = useCallback(async (id: number) => {
@@ -206,22 +207,21 @@ export function WarehouseScanWorkspace() {
   }, []);
 
   useEffect(() => {
-    void Promise.all([loadTasks(), loadUpd()])
+    void loadTasks()
       .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Не загрузилось."))
       .finally(() => setLoading(false));
-  }, [loadTasks, loadUpd]);
+  }, [loadTasks]);
 
   useEffect(() => {
     if (!taskId) return;
-    void loadLabels(taskId).catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Не загрузилось."));
-  }, [taskId, loadLabels]);
+    void Promise.all([loadLabels(taskId), loadUpd(taskId)])
+      .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Не загрузилось."));
+  }, [taskId, loadLabels, loadUpd]);
 
   // Поле не должно терять фокус: сканер печатает «в никуда», если фокус ушёл.
   useEffect(() => {
     const timer = setInterval(() => {
-      // Пока ждём подтверждения размера, поле выключено: случайный скан не
-      // должен проскочить мимо вопроса.
-      if (pendingSize || busy) return;
+      if (busy) return;
       const active = document.activeElement;
       if (active === inputRef.current) return;
       // Человек сейчас работает с другим полем: выбирает задание в списке или
@@ -234,7 +234,7 @@ export function WarehouseScanWorkspace() {
       inputRef.current?.focus();
     }, 1200);
     return () => clearInterval(timer);
-  }, [busy, pendingSize]);
+  }, [busy]);
 
   useEffect(() => {
     const online = () => setOffline(false);
@@ -275,7 +275,8 @@ export function WarehouseScanWorkspace() {
   // Этикетки готовятся заранее: пока в задании есть неготовые, экран
   // подтягивает их пачками сам, чтобы на столе не ждали API площадки.
   useEffect(() => {
-    if (!taskId || !summary || preparing || offline) return;
+    // Пока УПД задания не сверена, готовить нечего: УИН не закреплены.
+    if (!taskId || !summary || !summary.updMatched || preparing || offline) return;
     // Отправление из нескольких изделий готовится только после того, как
     // отсканировано целиком: пока не собрано, дёргать площадку нечем.
     const left = summary.preparable - summary.labelsReady - summary.labelsError;
@@ -326,6 +327,7 @@ export function WarehouseScanWorkspace() {
       }
       setReceiveConfirm(null);
       await loadTasks();
+      if (data.task.id !== taskId) setUpdInfo(null);
       setTaskId(data.task.id);
       setSheetCode(input.code);
       setOutcome(null);
@@ -342,7 +344,7 @@ export function WarehouseScanWorkspace() {
     }
   }
 
-  async function submitScan(raw: string, confirmSize = false) {
+  async function submitScan(raw: string) {
     const uin = raw.trim();
     if (!uin) return;
     // Лист подбора в поле УИН — это приём задания, а не изделие. Он же меняет
@@ -363,7 +365,7 @@ export function WarehouseScanWorkspace() {
       const response = await fetch("/api/warehouse/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ uin, code: sheetCode, confirmSize }),
+        body: JSON.stringify({ uin, code: sheetCode }),
       });
       const data = await response.json() as {
         outcome?: Outcome; summary?: Summary; board?: BoardRow[]; error?: string;
@@ -380,14 +382,6 @@ export function WarehouseScanWorkspace() {
         ...current,
       ].slice(0, 40));
 
-      if (result.status === "size_confirm") {
-        // Ничего не записано: ждём ответа человека и держим скан у себя.
-        setPendingSize({ uin: result.uin, item: result.item, orderSize: result.orderSize });
-        beep("warn");
-        return;
-      }
-      setPendingSize(null);
-
       if (result.status === "ok") {
         beep("ok");
         printLabel(result.label.marketplaceId, result.label.externalOrderId);
@@ -395,6 +389,10 @@ export function WarehouseScanWorkspace() {
         beep("ok");
         // Этикетка печатается из окна отправлений, когда собрано всё.
         if (result.complete && taskId) void prepare(taskId, 4).catch(() => undefined);
+      } else if (result.status === "label_not_ready") {
+        beep("warn");
+        // Этикетка ещё готовится — подтолкнём подготовку, повторный скан напечатает.
+        if (taskId) void prepare(taskId, 4).catch(() => undefined);
       } else if (result.status === "foreign_task") {
         beep("error");
       } else {
@@ -406,43 +404,38 @@ export function WarehouseScanWorkspace() {
     } finally {
       setValue("");
       setBusy(false);
-      if (!pendingSize) inputRef.current?.focus();
+      inputRef.current?.focus();
     }
   }
 
-  function rejectSize() {
-    const pending = pendingSize;
-    setPendingSize(null);
-    setOutcome(null);
-    if (pending) {
-      setHistory((current) => [
-        {
-          at: new Date().toISOString(),
-          uin: pending.uin,
-          // as const: без него литерал расширяется до string, а история
-          // ждёт один из известных исходов.
-          status: "size_confirm" as const,
-          text: "Размер не подтверждён, изделие отложено",
-        },
-        ...current,
-      ].slice(0, 40));
-    }
-    inputRef.current?.focus();
-  }
-
+  /**
+   * УПД загружается к заданию на столе: сервер сверяет её с заданием и при
+   * полном совпадении закрепляет УИН за отправлениями. Расхождения остаются
+   * на экране списком — до верной УПД упаковка по заданию заблокирована.
+   */
   async function uploadUpd(file: File) {
+    if (!taskId || !sheetCode) {
+      toast.warning("Сначала отсканируйте лист подбора, затем загрузите УПД.");
+      return;
+    }
     setBusy(true);
     try {
       const form = new FormData();
       form.set("file", file);
+      form.set("code", sheetCode);
       const response = await fetch("/api/warehouse/upd", { method: "POST", body: form });
-      const data = await response.json() as { parsed?: number; newItems?: number; updated?: number; error?: string };
-      if (!response.ok) throw new Error(data.error ?? "УПД не загрузилась.");
-      toast.success(`УПД загружена: ${data.parsed ?? 0} УИН`, {
-        description: `Новых: ${data.newItems ?? 0}, обновлено: ${data.updated ?? 0}`,
+      const data = await response.json() as { bound?: number; problems?: string[]; error?: string };
+      await loadUpd(taskId);
+      if (!response.ok) {
+        beep("error");
+        throw new Error(data.error ?? "УПД не загрузилась.");
+      }
+      beep("ok");
+      toast.success(`УПД сверена: закреплено ${data.bound ?? 0} УИН`, {
+        description: "УИН передаются на площадку, этикетки готовятся.",
       });
-      await loadUpd();
-      if (taskId) await prepare(taskId).catch(() => undefined);
+      await loadLabels(taskId);
+      await prepare(taskId).catch(() => undefined);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "УПД не загрузилась.");
     } finally {
@@ -515,6 +508,7 @@ export function WarehouseScanWorkspace() {
                     onClick={() => {
                       setSheetCode(null);
                       setTaskId(null);
+                      setUpdInfo(null);
                       setOutcome(null);
                       setSummary(null);
                       setBoard([]);
@@ -532,9 +526,11 @@ export function WarehouseScanWorkspace() {
               )}
             </div>
             <div className="flex flex-wrap items-center gap-2">
-              <Badge variant="secondary">
-                УИН в базе: {updInfo?.total ?? 0}, свободных {updInfo?.free ?? 0}
-              </Badge>
+              {taskId && sheetCode ? (
+                updInfo?.matched
+                  ? <Badge variant="secondary"><CheckCircle2 className="size-3" /> УПД сверена</Badge>
+                  : <Badge variant="destructive">УПД не загружена</Badge>
+              ) : null}
               <input
                 ref={fileInput}
                 type="file"
@@ -545,13 +541,18 @@ export function WarehouseScanWorkspace() {
                   if (file) void uploadUpd(file);
                 }}
               />
-              <Button size="sm" variant="outline" disabled={busy} onClick={() => fileInput.current?.click()}>
-                <Upload className="size-4" /> Загрузить УПД
+              <Button
+                size="sm"
+                variant={taskId && sheetCode && updInfo && !updInfo.matched ? "default" : "outline"}
+                disabled={busy || !taskId || !sheetCode || Boolean(updInfo?.matched)}
+                onClick={() => fileInput.current?.click()}
+              >
+                <Upload className="size-4" /> Загрузить УПД задания
               </Button>
               <Button
                 size="sm"
                 variant="outline"
-                disabled={!taskId || preparing}
+                disabled={!taskId || preparing || !updInfo?.matched}
                 onClick={() => { if (taskId) void prepare(taskId, 20).catch(() => undefined); }}
               >
                 {preparing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Подготовить этикетки
@@ -559,15 +560,32 @@ export function WarehouseScanWorkspace() {
             </div>
           </div>
 
+          {taskId && sheetCode && updInfo && !updInfo.matched ? (
+            <div className="space-y-2 rounded-xl border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-950">
+              <p className="flex items-center gap-2 font-semibold">
+                <AlertTriangle className="size-4" />
+                {updInfo.lastUpload?.status === "mismatch"
+                  ? `УПД «${updInfo.lastUpload.fileName}» не сходится с заданием. Исправьте УПД и загрузите заново.`
+                  : "Загрузите УПД этого задания."}
+              </p>
+              <p>Пока УПД не сверена с заданием, скан УИН и этикетки по заданию заблокированы, на площадку ничего не передаётся.</p>
+              {updInfo.lastUpload?.status === "mismatch" && updInfo.lastUpload.problems.length > 0 ? (
+                <ul className="max-h-60 list-disc space-y-0.5 overflow-auto pl-5 font-mono text-xs">
+                  {updInfo.lastUpload.problems.map((problem) => <li key={problem}>{problem}</li>)}
+                </ul>
+              ) : null}
+            </div>
+          ) : null}
+
           <div className="flex flex-wrap items-center gap-3">
             <Input
               ref={inputRef}
               autoFocus
               inputMode="numeric"
-              placeholder={pendingSize ? "Ответьте на вопрос ниже" : taskId && sheetCode ? "Сканируйте УИН" : "Сканируйте штрихкод листа подбора"}
+              placeholder={taskId && sheetCode ? (updInfo?.matched ? "Сканируйте УИН" : "Загрузите УПД задания") : "Сканируйте штрихкод листа подбора"}
               className="h-16 flex-1 min-w-64 text-center font-mono text-2xl"
               value={value}
-              disabled={busy || pendingSize !== null}
+              disabled={busy}
               onChange={(event) => setValue(event.target.value)}
               onKeyDown={(event) => {
                 if (event.key === "Enter") {
@@ -631,31 +649,6 @@ export function WarehouseScanWorkspace() {
                     : "Этикетка напечатается, когда отсканируете остальные изделия этого отправления."}
                 </p>
               </div>
-            ) : outcome.status === "size_confirm" ? (
-              <div className="space-y-2">
-                <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Подтвердите размер</p>
-                <p className="font-mono text-2xl font-bold">{outcome.item.article}</p>
-                <p className="text-lg">
-                  На Wildberries заказан размер{" "}
-                  <span className="rounded bg-amber-200 px-2 font-mono font-bold">{outcome.orderSize}</span>, а в УПД{" "}
-                  {outcome.updSize
-                    ? <>указан <span className="rounded bg-amber-200 px-2 font-mono font-bold">{outcome.updSize}</span>.</>
-                    : "размер не указан."}
-                </p>
-                <p className="text-sm">Проверьте изделие в руках. Подтверждаете, что это тот самый размер?</p>
-                <div className="flex flex-wrap gap-2 pt-1">
-                  <Button
-                    size="lg"
-                    disabled={busy}
-                    onClick={() => { const pending = pendingSize; if (pending) void submitScan(pending.uin, true); }}
-                  >
-                    <CheckCircle2 className="size-5" /> Да, размер тот
-                  </Button>
-                  <Button size="lg" variant="outline" disabled={busy} onClick={rejectSize}>
-                    Нет, отложить изделие
-                  </Button>
-                </div>
-              </div>
             ) : outcome.status === "foreign_task" ? (
               <div className="space-y-1">
                 <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Изделие из другого задания</p>
@@ -667,7 +660,7 @@ export function WarehouseScanWorkspace() {
                 <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Повторный скан</p>
                 <p className="text-lg">
                   УИН <span className="font-mono">{outcome.uin}</span> уже отсканирован по отправлению{" "}
-                  <span className="font-mono">{outcome.item.externalOrderId}</span>.
+                  <span className="font-mono">{outcome.item.externalOrderId}</span>. Распечатать уже напечатанную этикетку ещё раз?
                 </p>
                 <Button
                   size="sm"
@@ -680,15 +673,9 @@ export function WarehouseScanWorkspace() {
               </div>
             ) : outcome.status === "uin_unknown" ? (
               <div className="space-y-1">
-                <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> УИН не найден в УПД</p>
+                <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Этого УИН нет в этом сборочном задании</p>
                 <p className="text-lg font-mono">{outcome.uin}</p>
-                <p className="text-sm">Загрузите свежую УПД — без неё связь «УИН → артикул» не построить.</p>
-              </div>
-            ) : outcome.status === "not_in_task" ? (
-              <div className="space-y-1">
-                <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Изделия нет в заданиях</p>
-                <p className="text-lg">Артикул <span className="font-mono font-bold">{outcome.article}</span> не попал ни в одно открытое задание.</p>
-                <p className="text-sm">Проверьте, не отменён ли заказ и сформированы ли задания.</p>
+                <p className="text-sm">Этикетка не напечатана. УИН нет в УПД задания — отложите изделие и проверьте, откуда оно.</p>
               </div>
             ) : (
               <div className="space-y-1">

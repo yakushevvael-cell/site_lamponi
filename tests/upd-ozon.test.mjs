@@ -155,11 +155,12 @@ test("уже переданный УИН не пересылается: пров
     { mark: "6431111111111111", mark_type: "jw_uin" },
   ]);
 
-  // УИН из УПД проиграл тому, что уже стоит на экземпляре в Ozon: иначе
-  // каждая повторная подготовка обнуляла бы проверку.
+  // На экземпляре чужой УИН: его заменяет УИН, закреплённый за изделием по
+  // УПД задания, — на площадку уходит ровно то, что лежит в коробке.
   const other = buildExemplarSetPayload("1-1", withUin, "6432222222222222");
-  assert.equal(other.mustSet, false);
-  assert.equal(other.assigned[0].uin, "6431111111111111");
+  assert.equal(other.mustSet, true);
+  assert.equal(other.assigned[0].uin, "6432222222222222");
+  assert.equal(other.assigned[0].reused, false);
 
   // А вот пустой экземпляр по-прежнему требует передачи.
   assert.equal(buildExemplarSetPayload("1-1", created, "643").mustSet, true);

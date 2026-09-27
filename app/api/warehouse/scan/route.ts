@@ -7,6 +7,9 @@
  *
  * Скан по отправлению с несколькими товарами — тоже нормальный исход: он
  * отмечает изделие и называет ячейку комплектации, но этикетку не печатает.
+ *
+ * Скан работает только после того, как УПД задания сверена: УИН к этому
+ * моменту уже закреплены за отправлениями, и скан лишь находит своё.
  */
 import { readPostingBoard, readScanSummary, resolveScan } from "@/lib/labels";
 import { authorizePermission } from "@/lib/permissions";
@@ -22,7 +25,6 @@ export async function POST(request: Request) {
   const body = await request.json().catch(() => null) as {
     uin?: unknown;
     code?: unknown;
-    confirmSize?: unknown;
   } | null;
   const raw = typeof body?.uin === "string" ? body.uin : "";
   // Сканер иногда добавляет пробелы и перевод строки, а иногда префикс.
@@ -37,15 +39,18 @@ export async function POST(request: Request) {
     return Response.json({ error: "Сначала отсканируйте штрихкод листа подбора." }, { status: 400 });
   }
   if (task.status === "cancelled") return Response.json({ error: "Задание отменено." }, { status: 409 });
+  // Пока УПД задания не сверена, УИН не закреплены, и упаковывать нечего.
+  if (!task.updMatchedAt) {
+    return Response.json({
+      error: `Загрузите УПД задания ${task.number}: пока она не сверена с заданием, упаковка заблокирована.`,
+    }, { status: 409 });
+  }
   const taskId = task.id;
 
   const outcome = await resolveScan(runtime.DB, {
     uin,
     taskId,
     actorEmail: auth.user.email,
-    // Подтверждение размера присылает кладовщик вторым запросом: до него
-    // ничего не записывается, поэтому «отклонить» ничего не ломает.
-    confirmSize: body?.confirmSize === true,
   });
 
   if (outcome.status !== "ok" && outcome.status !== "grouped") {

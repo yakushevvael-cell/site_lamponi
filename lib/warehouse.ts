@@ -89,6 +89,8 @@ export type PickTask = {
   manualCloseAt: string | null;
   manualCloseBy: string | null;
   manualCloseNote: string | null;
+  /** УПД задания сверена и УИН закреплены. Пока её нет, упаковка по заданию заблокирована. */
+  updMatchedAt: string | null;
 };
 
 export type PickTaskItem = {
@@ -144,6 +146,16 @@ export function eventStatement(db: D1Database, event: WarehouseEvent) {
 }
 
 /** Журнал событий не должен ронять действие: пишем, но не падаем из-за записи. */
+/**
+ * УИН задания удаляются из базы, когда поставка закрыта или задание отменено:
+ * свободных УИН на сайте не бывает, а изделие с тем же УИН может прийти в УПД
+ * другого задания. История «какой УИН куда уехал» остаётся в строках задания
+ * и в журнале.
+ */
+export function releaseTaskUinsStatement(db: D1Database, taskId: number) {
+  return db.prepare("DELETE FROM uin_items WHERE task_id = ?").bind(taskId);
+}
+
 export async function logWarehouseEvent(db: D1Database, event: WarehouseEvent) {
   await eventStatement(db, event).run().catch(() => undefined);
 }
@@ -592,7 +604,7 @@ const TASK_COLUMNS = `
   created_by AS createdBy, created_at AS createdAt, issued_at AS issuedAt, picked_at AS pickedAt,
   shipped_at AS shippedAt, cancelled_at AS cancelledAt, printed_at AS printedAt, comment,
   barcode, manual_close_at AS manualCloseAt, manual_close_by AS manualCloseBy,
-  manual_close_note AS manualCloseNote
+  manual_close_note AS manualCloseNote, upd_matched_at AS updMatchedAt
 `;
 
 export async function readTaskList(
@@ -822,6 +834,7 @@ export async function closeShipmentManually(
            closed_by = ?
        WHERE task_id = ? AND status <> 'closed'`,
     ).bind(actorEmail, taskId),
+    releaseTaskUinsStatement(db, taskId),
   ]);
 
   await logWarehouseEvent(db, {
@@ -1095,6 +1108,7 @@ export async function cancelTask(db: D1Database, taskId: number, actorEmail: str
 
   await db.batch([
     db.prepare("DELETE FROM pick_task_items WHERE task_id = ?").bind(taskId),
+    releaseTaskUinsStatement(db, taskId),
     db.prepare(
       `UPDATE pick_tasks SET status = 'cancelled', cancelled_at = CURRENT_TIMESTAMP, comment = ?,
          order_count = 0, item_count = 0, unit_count = 0, picked_count = 0, not_found_count = 0, cell_count = 0
