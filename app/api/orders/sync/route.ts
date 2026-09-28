@@ -252,15 +252,18 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
   const remoteOrders = await getWildberriesOrders(token, days);
   const statuses = await getWildberriesOrderStatuses(token, remoteOrders.map((order) => order.id));
   const statusById = new Map(statuses.map((status) => [status.id, status]));
-  // Отгрузка — скан QR поставки при приёмке WB (в ПВЗ или СЦ). Если список
-  // поставок не пришёл, время не выдумываем: заказ просто не попадёт в график.
-  const supplyScannedAt = new Map<string, string>();
+  // Отгрузка — скан QR поставки при приёмке WB (в ПВЗ или СЦ), а пока WB
+  // скан не отдал — закрытие поставки. Если список поставок не пришёл, время
+  // не выдумываем: заказ просто не попадёт в график.
+  const supplyTimes = new Map<string, { scanDt: string | null; closedAt: string | null }>();
+  let suppliesError: string | null = null;
   try {
     for (const supply of await getWildberriesSupplies(token)) {
-      if (supply.scanDt) supplyScannedAt.set(supply.id, supply.scanDt);
+      supplyTimes.set(supply.id, { scanDt: supply.scanDt || null, closedAt: supply.closedAt || null });
     }
-  } catch {
+  } catch (error) {
     // Без права на поставки заказы всё равно синхронизируются.
+    suppliesError = error instanceof Error ? error.message : "Список поставок не получен";
   }
   const syncedAt = new Date().toISOString();
   const normalized = remoteOrders.map((order: WildberriesOrder): NormalizedOrder => {
@@ -287,7 +290,9 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
       // дате заказа на экране склада, а поле оставляем пустым.
       shipmentDeadline: null,
       // Статус задания после сдачи в СЦ отстаёт на дни — берём скан поставки.
-      handedOverAt: order.supplyId ? wbHandedOverAt(info.status, supplyScannedAt.get(order.supplyId)) : null,
+      handedOverAt: order.supplyId
+        ? wbHandedOverAt(info.status, supplyTimes.get(order.supplyId)?.scanDt, supplyTimes.get(order.supplyId)?.closedAt)
+        : null,
       handedOverSeenAt: null,
       final: info.bought || info.canceled,
       items: [{
@@ -301,7 +306,7 @@ async function syncWildberries(db: D1Database, runtime: ReturnType<typeof getRun
     };
   });
   await persistOrders(db, "wildberries", "Wildberries", normalized);
-  return { marketplace: "wildberries", skipped: false, orders: normalized.length };
+  return { marketplace: "wildberries", skipped: false, orders: normalized.length, supplies: supplyTimes.size, suppliesError };
 }
 
 function ozonCancellationSource(posting: OzonPosting) {

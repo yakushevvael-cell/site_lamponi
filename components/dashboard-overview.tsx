@@ -102,7 +102,7 @@ export function DashboardOverview() {
           <CardHeader>
             <CardTitle className="flex items-center gap-2 text-base"><Truck className="size-4" /> Отгруженные товары FBS, шт.</CardTitle>
             <p className="text-xs text-muted-foreground">
-              Сколько штук в день принято площадками, по Москве. Wildberries — по скану QR поставки в ПВЗ или СЦ.
+              Сколько штук в день принято площадками, по Москве. Wildberries — по скану QR поставки в ПВЗ или СЦ, а пока WB скан не отдал — по закрытию поставки.
               {shipmentKeys.length ? ` За период: ${shipmentKeys.map((key) => `${MARKETPLACE_STYLE[key]?.name ?? key} — ${Number(shipmentTotals[key]).toLocaleString("ru-RU")}`).join(", ")}.` : ""}
             </p>
           </CardHeader>

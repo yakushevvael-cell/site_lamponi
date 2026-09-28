@@ -32,6 +32,11 @@ test("WB: отгрузка — скан QR поставки, статус зад
   assert.equal(wbHandedOverAt("cancel/canceled", scan), null);
   assert.equal(wbHandedOverAt("complete/waiting", null), null);
   assert.equal(wbHandedOverAt("complete/waiting", undefined), null);
+  // Скана ещё нет — день сдачи по закрытию поставки; скан, когда придёт, важнее.
+  const closed = "2026-09-16T05:40:00Z";
+  assert.equal(wbHandedOverAt("complete/waiting", null, closed), closed);
+  assert.equal(wbHandedOverAt("complete/waiting", scan, closed), scan);
+  assert.equal(wbHandedOverAt("cancel/canceled", null, closed), null);
 });
 
 test("день считается по Москве", () => {
