@@ -91,5 +91,6 @@ export async function POST(request: Request) {
     created: result.created,
     skipped: result.skipped,
     mixed: result.mixed ?? [],
+    held: result.held ?? [],
   });
 }

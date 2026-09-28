@@ -84,7 +84,11 @@ type WaitingGroup = {
   goldCount: number;
   /** Отправления, где серебро и золото вместе: в задания не идут. */
   mixed: string[];
+  /** Есть проблемный товар или часть уже в задании: в задания не идут. */
+  held?: HeldPosting[];
 };
+
+type HeldPosting = { externalOrderId: string; articles: string[]; reasons: string[] };
 
 type Metal = "silver" | "gold";
 
@@ -205,6 +209,7 @@ export function WarehouseTasksWorkspace() {
         created?: Array<{ number: string; itemCount: number }>;
         skipped?: string | null;
         mixed?: Array<{ externalOrderId: string; articles: string[] }>;
+        held?: HeldPosting[];
         error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Не удалось сформировать задания.");
@@ -219,6 +224,11 @@ export function WarehouseTasksWorkspace() {
       if ((data.mixed ?? []).length > 0) {
         toast.warning(`Отправлений с серебром и золотом вместе: ${data.mixed?.length}`, {
           description: "Они не попали в задания — соберите их вручную и отправьте через кабинет площадки. Список — в карточке площадки.",
+        });
+      }
+      if ((data.held ?? []).length > 0) {
+        toast.warning(`Отправлений с проблемным товаром или уже частично в задании: ${data.held?.length}`, {
+          description: "Они не попали в задания целиком — соберите их вручную и отправьте через кабинет площадки. Список — в карточке площадки.",
         });
       }
       await load();
@@ -326,8 +336,8 @@ export function WarehouseTasksWorkspace() {
               onCreate={(metal) => void createTasks("wildberries", metal)}
             />
             <div className="space-y-2">
-              {wbWaiting.length === 0 ? <p className="text-sm text-muted-foreground">Новых сборочных заданий нет.</p> : null}
-              {wbWaiting.map((group) => (
+              {wbPostings === 0 ? <p className="text-sm text-muted-foreground">Новых сборочных заданий нет.</p> : null}
+              {wbWaiting.filter((group) => group.postingCount > 0).map((group) => (
                 <div key={`${group.warehouseExternalId}`} className="flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2">
                   <div className="min-w-0">
                     <p className="truncate text-sm font-medium">{group.warehouseName}</p>
@@ -358,6 +368,7 @@ export function WarehouseTasksWorkspace() {
                 </div>
               ))}
             </div>
+            <HeldWarning marketplace="Wildberries" groups={wbWaiting} />
           </CardContent>
         </Card>
 
@@ -382,6 +393,7 @@ export function WarehouseTasksWorkspace() {
               onOne={(metal) => void createTasks("ozon", metal, null, 1)}
             />
             <MixedWarning marketplace="Ozon" groups={ozonWaiting} />
+            <HeldWarning marketplace="Ozon" groups={ozonWaiting} />
             {withoutCell > 0 ? (
               <p className="rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-900">
                 Без адреса в раскладке: {withoutCell} позиций. Они попадут в задание, но в конец списка —
@@ -412,6 +424,7 @@ export function WarehouseTasksWorkspace() {
               onOne={(metal) => void createTasks("yandex", metal, null, 1)}
             />
             <MixedWarning marketplace="Яндекс Маркета" groups={yandexWaiting} />
+            <HeldWarning marketplace="Яндекс Маркета" groups={yandexWaiting} />
           </CardContent>
         </Card>
       </section>
@@ -773,6 +786,38 @@ function MixedWarning({ marketplace, groups }: { marketplace: string; groups: Wa
         в задания. Соберите их артикулы вручную и отправьте через портал {marketplace}.
       </p>
       <p className="font-mono">{mixed.slice(0, 20).join(", ")}{mixed.length > 20 ? ` и ещё ${mixed.length - 20}` : ""}</p>
+    </div>
+  );
+}
+
+/**
+ * Отправления, где есть проблемный товар или часть уже лежит в другом
+ * задании. В задания они не попадают целиком: площадка собирает отправление
+ * одним запросом, и половину посылки передать нельзя.
+ */
+function HeldWarning({ marketplace, groups }: { marketplace: string; groups: WaitingGroup[] }) {
+  const held = groups.flatMap((group) => group.held ?? []);
+  if (held.length === 0) return null;
+  return (
+    <div className="space-y-1 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+      <p className="flex items-center gap-1 font-semibold">
+        <AlertTriangle className="size-3.5" /> Собрать вручную: {held.length}
+      </p>
+      <p>
+        В этих отправлениях есть проблемный товар или часть товаров уже в другом задании, поэтому ни один их товар
+        не попадает в задания. Соберите отправление целиком вручную и отправьте через портал {marketplace} — или
+        дождитесь, пока проблемный товар найдётся.
+      </p>
+      <ul className="space-y-0.5">
+        {held.slice(0, 20).map((posting) => (
+          <li key={posting.externalOrderId}>
+            <span className="font-mono">{posting.externalOrderId}</span>
+            {" "}<span className="font-mono text-amber-800/80">{posting.articles.join(", ")}</span>
+            {" — "}{posting.reasons.join("; ")}
+          </li>
+        ))}
+      </ul>
+      {held.length > 20 ? <p>и ещё {held.length - 20}</p> : null}
     </div>
   );
 }

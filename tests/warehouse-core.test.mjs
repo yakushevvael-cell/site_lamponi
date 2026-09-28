@@ -5,6 +5,7 @@ import {
   attachCells,
   buildTaskNumber,
   isGoldArticle,
+  splitPostingsByAvailability,
   splitPostingsByMetal,
   cellSortOrder,
   countCells,
@@ -292,4 +293,18 @@ test("номер задания на золото помечен «-З»", () =>
     buildTaskNumber({ day: "2026-09-27", marketplaceId: "wildberries", warehouseName: "Казань", metal: "gold" }),
     `${buildTaskNumber({ day: "2026-09-27", marketplaceId: "wildberries", warehouseName: "Казань" })}-З`,
   );
+});
+
+test("отправление с проблемным товаром или частью в задании не берётся целиком", () => {
+  const row = (article, extra = {}) => ({ article, size: null, taskNumber: null, blocked: 0, ...extra });
+  const result = splitPostingsByAvailability([
+    { externalOrderId: "A", items: [row("С-1"), row("С-2")] },
+    { externalOrderId: "B", items: [row("С-1536зр"), row("К-3038р", { size: "18,0", blocked: 1 })] },
+    { externalOrderId: "C", items: [row("С-1", { taskNumber: "2026-09-27-OZ-01" }), row("С-2")] },
+    { externalOrderId: "D", items: [row("С-1", { taskNumber: "2026-09-27-OZ-01" })] },
+  ]);
+  assert.deepEqual(result.ready.map((posting) => posting.externalOrderId), ["A"]);
+  assert.deepEqual(result.held.map((entry) => entry.posting.externalOrderId), ["B", "C"]);
+  assert.deepEqual(result.held[0].reasons, ["К-3038р (18,0) — проблемный товар"]);
+  assert.deepEqual(result.held[1].reasons, ["часть уже в задании 2026-09-27-OZ-01"]);
 });

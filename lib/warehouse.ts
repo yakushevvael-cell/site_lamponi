@@ -23,6 +23,7 @@ import {
   sortByRoute,
   sortByWaiting,
   splitIntoBatches,
+  splitPostingsByAvailability,
   splitPostingsByMetal,
   taskDay,
 } from "@/lib/warehouse-core.mjs";
@@ -54,6 +55,10 @@ export type CandidateRow = {
   article: string;
   size: string | null;
   quantity: number;
+  /** Задание, в котором этот товар уже лежит. */
+  taskNumber: string | null;
+  /** 1 — артикул числится проблемным. */
+  blocked: number;
 };
 
 type PostingGroup = {
@@ -212,8 +217,11 @@ export async function writeBatchSizes(
 /**
  * Заказы, ждущие сборки.
  *
- * Отсеиваются: отменённые, уже попавшие в задание и артикулы, числящиеся
- * проблемными (ТЗ, п. 3: проверка при формировании, а не при сборке).
+ * Отсеиваются отменённые. Товары, уже попавшие в задание, и артикулы,
+ * числящиеся проблемными (ТЗ, п. 3: проверка при формировании, а не при
+ * сборке), не отсеиваются по одному, а помечаются: решение принимается по
+ * отправлению целиком (splitPostingsByAvailability), иначе в задание уйдёт
+ * часть посылки.
  */
 const CANDIDATE_SQL = `
   SELECT o.marketplace_id AS marketplaceId,
@@ -225,7 +233,21 @@ const CANDIDATE_SQL = `
          oi.product_sku AS productSku,
          COALESCE(NULLIF(oi.seller_article, ''), NULLIF(p.article, ''), oi.external_sku) AS article,
          COALESCE(oi.size, p.size) AS size,
-         oi.quantity AS quantity
+         oi.quantity AS quantity,
+         (
+           SELECT t.number FROM pick_task_items ti
+           JOIN pick_tasks t ON t.id = ti.task_id
+           WHERE ti.marketplace_id = o.marketplace_id
+             AND ti.external_order_id = o.external_order_id
+             AND ti.external_sku = oi.external_sku
+           LIMIT 1
+         ) AS taskNumber,
+         EXISTS (
+           SELECT 1 FROM problem_articles pa
+           WHERE pa.state = 'blocked'
+             AND pa.article = COALESCE(NULLIF(oi.seller_article, ''), NULLIF(p.article, ''), oi.external_sku)
+             AND (pa.size IS NULL OR pa.size = COALESCE(oi.size, p.size))
+         ) AS blocked
   FROM orders o
   JOIN order_items oi ON oi.order_id = o.id
   LEFT JOIN products p ON p.source_sku = oi.product_sku
@@ -234,18 +256,6 @@ const CANDIDATE_SQL = `
       (o.marketplace_id = 'ozon' AND o.status IN (${OZON_PICK_STATUSES.map((status) => `'${status}'`).join(", ")}))
       OR (o.marketplace_id = 'wildberries' AND o.status LIKE 'new/%')
       OR (o.marketplace_id = 'yandex' AND o.status = '${YANDEX_PICK_STATUS}')
-    )
-    AND NOT EXISTS (
-      SELECT 1 FROM pick_task_items ti
-      WHERE ti.marketplace_id = o.marketplace_id
-        AND ti.external_order_id = o.external_order_id
-        AND ti.external_sku = oi.external_sku
-    )
-    AND NOT EXISTS (
-      SELECT 1 FROM problem_articles pa
-      WHERE pa.state = 'blocked'
-        AND pa.article = COALESCE(NULLIF(oi.seller_article, ''), NULLIF(p.article, ''), oi.external_sku)
-        AND (pa.size IS NULL OR pa.size = COALESCE(oi.size, p.size))
     )
 `;
 
@@ -268,6 +278,17 @@ export async function readCandidateRows(
   return rows.results;
 }
 
+/** Отправление, которое не берётся в задание и собирается вручную. */
+export type HeldPosting = { externalOrderId: string; articles: string[]; reasons: string[] };
+
+function toHeldPosting(posting: PostingGroup, reasons: string[]): HeldPosting {
+  return {
+    externalOrderId: posting.externalOrderId,
+    articles: [...new Set(posting.items.map((item) => (item.size ? `${item.article} (${item.size})` : item.article)))],
+    reasons,
+  };
+}
+
 /** Сводка по ожидающим заказам: сколько и по каким складам. Для главного экрана. */
 export async function readWaitingSummary(db: D1Database) {
   const rows = await readCandidateRows(db);
@@ -285,8 +306,13 @@ export async function readWaitingSummary(db: D1Database) {
     goldCount: number;
     /** Серебро и золото в одном отправлении: в задания не идут, собираются вручную. */
     mixed: string[];
+    /** Есть проблемный товар или часть уже в задании: собираются вручную. */
+    held: HeldPosting[];
   }>();
-  const postings = groupByPosting(rows) as PostingGroup[];
+  const availability = splitPostingsByAvailability(groupByPosting(rows) as PostingGroup[]) as {
+    ready: PostingGroup[]; held: Array<{ posting: PostingGroup; reasons: string[] }>;
+  };
+  const postings = availability.ready;
   const placements = await readPlacements(db);
   // Ключ строится тем же placementKey, что и при сборке задания: иначе
   // «без ячейки» на главной и в задании посчитались бы по-разному.
@@ -307,6 +333,7 @@ export async function readWaitingSummary(db: D1Database) {
       silverCount: 0,
       goldCount: 0,
       mixed: [],
+      held: [],
     };
     const gold = posting.items.map((item) => isGoldArticle(item.article) as boolean);
     if (gold.every(Boolean)) group.goldCount += 1;
@@ -323,6 +350,29 @@ export async function readWaitingSummary(db: D1Database) {
         ?? cellIndex.get(placementKey(item.article, null) as string);
       if (!exact) group.withoutCell += 1;
     }
+    groups.set(key, group);
+  }
+
+  // Отложенные отправления видны в карточке своей площадки: их надо собрать
+  // вручную, а в счётчики ожидающих заказов они не входят.
+  for (const { posting, reasons } of availability.held) {
+    const key = `${posting.marketplaceId}::${posting.warehouseExternalId ?? ""}`;
+    const group = groups.get(key) ?? {
+      marketplaceId: posting.marketplaceId,
+      warehouseExternalId: posting.warehouseExternalId,
+      warehouseName: names.get(key)
+        ?? (posting.marketplaceId === "ozon" ? "Ozon" : posting.marketplaceId === "yandex" ? "Яндекс Маркет" : "Склад не указан"),
+      postingCount: 0,
+      itemCount: 0,
+      unitCount: 0,
+      oldestOrderedAt: null,
+      withoutCell: 0,
+      silverCount: 0,
+      goldCount: 0,
+      mixed: [],
+      held: [],
+    };
+    group.held.push(toHeldPosting(posting, reasons));
     groups.set(key, group);
   }
 
@@ -379,7 +429,7 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
     marketplaceId: options.marketplaceId,
     warehouseExternalId: options.warehouseExternalId ?? undefined,
   });
-  if (rows.length === 0) return { created: [] as CreatedTask[], skipped: "Ожидающих заказов нет." };
+  if (rows.length === 0) return { created: [] as CreatedTask[], skipped: "Ожидающих заказов нет.", mixed: [], held: [] as HeldPosting[] };
 
   const [placements, names, batchSizes] = await Promise.all([
     readPlacements(db),
@@ -387,9 +437,16 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
     readBatchSizes(db),
   ]);
 
+  // Отправление с проблемным товаром или уже частично лежащее в задании не
+  // берётся целиком: половину посылки площадке не передать.
+  const availability = splitPostingsByAvailability(groupByPosting(rows) as PostingGroup[]) as {
+    ready: PostingGroup[]; held: Array<{ posting: PostingGroup; reasons: string[] }>;
+  };
+  const held = availability.held.map(({ posting, reasons }) => toHeldPosting(posting, reasons));
+
   // Серебро и золото — разные задания. Отправление, где есть и то и другое,
   // не попадает ни в одно: одна УПД на задание его не покроет.
-  const byMetal = splitPostingsByMetal(sortByWaiting(groupByPosting(rows) as PostingGroup[]) as PostingGroup[]) as {
+  const byMetal = splitPostingsByMetal(sortByWaiting(availability.ready) as PostingGroup[]) as {
     silver: PostingGroup[]; gold: PostingGroup[]; mixed: PostingGroup[];
   };
   const postings = options.metal === "gold" ? byMetal.gold : byMetal.silver;
@@ -399,7 +456,7 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
   }));
   const metalName = options.metal === "gold" ? "золота" : "серебра";
   if (postings.length === 0) {
-    return { created: [] as CreatedTask[], skipped: `Ожидающих заказов ${metalName} нет.`, mixed };
+    return { created: [] as CreatedTask[], skipped: `Ожидающих заказов ${metalName} нет.`, mixed, held };
   }
   const day = taskDay(new Date());
   const takenRows = await db.prepare("SELECT number FROM pick_tasks WHERE number LIKE ?").bind(`${day}%`).all<{ number: string }>();
@@ -470,7 +527,7 @@ export async function createPickTasks(db: D1Database, options: CreateTasksOption
     }
   }
 
-  return { created, skipped: created.length === 0 ? `Все ожидающие заказы ${metalName} уже в заданиях.` : null, mixed };
+  return { created, skipped: created.length === 0 ? `Все ожидающие заказы ${metalName} уже в заданиях.` : null, mixed, held };
 }
 
 async function insertTask(
