@@ -48,6 +48,7 @@ const statusLabels: Record<LogRow["apiStatus"], { label: string; className: stri
 
 const runLabels: Record<string, string> = {
   manual: "Ручной запуск",
+  full_sync: "Полная синхронизация",
   osv_upload: "Загрузка ОСВ",
   orders_sync: "Синхронизация заказов",
   warehouse_enabled: "Включение склада",

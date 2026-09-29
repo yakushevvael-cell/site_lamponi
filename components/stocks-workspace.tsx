@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, FlaskConical, Layers, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, Zap } from "lucide-react";
+import { Ban, Boxes, CloudUpload, FlaskConical, History, Layers, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
@@ -17,6 +17,7 @@ import {
   AlertDialogTitle,
   AlertDialogTrigger,
 } from "@/components/ui/alert-dialog";
+import { StockHistoryDialog } from "@/components/stock-history-dialog";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
@@ -57,7 +58,7 @@ type RemoteStockRow = {
   size: string | null;
   availableQuantity: number;
   marketplaces: Array<{
-    marketplaceId: "wildberries" | "ozon";
+    marketplaceId: "wildberries" | "ozon" | "yandex";
     externalSku: string;
     warehouses: RemoteWarehouseStock[];
   }>;
@@ -153,7 +154,7 @@ const MODES: Record<StockSyncMode, { title: string; summary: string; detail: str
   },
 };
 
-const marketplaceLabel = { wildberries: "Wildberries", ozon: "Ozon" } as const;
+const marketplaceLabel = { wildberries: "Wildberries", ozon: "Ozon", yandex: "Яндекс Маркет" } as const;
 
 const statusLabel = {
   success: "Отправлено",
@@ -331,6 +332,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [scope, setScope] = useState<SyncState["scope"] | null>(null);
   const [remoteCheck, setRemoteCheck] = useState<RemoteCheckResult | null>(null);
   const [checkingRemote, setCheckingRemote] = useState(false);
+  /** Позиция, чья «История» открыта. */
+  const [historyRow, setHistoryRow] = useState<StockRow | null>(null);
 
   const load = useCallback(async (search: string) => {
     setLoading(true);
@@ -838,6 +841,16 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               </Button>
             ) : null}
             {canSyncSelected ? (
+              <Button
+                variant="outline"
+                onClick={() => setHistoryRow(selectedRows[0] ?? null)}
+                disabled={selectedRows.length !== 1}
+                title={selectedRows.length === 1 ? "Заказы, корректировки и проверки остатков по позиции" : "Отметьте одну позицию"}
+              >
+                <History />История
+              </Button>
+            ) : null}
+            {canSyncSelected ? (
               <Button variant="outline" onClick={() => setUnitsOpen(true)} disabled={loading || savingUnits}><Layers />Кратность позиции</Button>
             ) : null}
             <Button variant="outline" onClick={() => void load(query)} disabled={loading || syncingAll || syncingSelected}><RefreshCw className={loading ? "animate-spin" : ""} />Обновить</Button>
@@ -991,6 +1004,14 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {historyRow ? (
+        <StockHistoryDialog
+          sourceSku={historyRow.variantKey}
+          title={`${historyRow.sku}${historyRow.size ? ` · ${historyRow.size}` : ""}`}
+          onClose={() => setHistoryRow(null)}
+        />
+      ) : null}
 
       <AlertDialog open={Boolean(remoteCheck)} onOpenChange={(open) => { if (!open) setRemoteCheck(null); }}>
         <AlertDialogContent className="max-w-4xl">

@@ -69,7 +69,7 @@ API-ключи маркетплейсов зашифрованы в базе к�
 На старом сервере:
 
 ```bash
-systemctl stop lamponi lamponi-sync-orders.timer lamponi-sync-stocks.timer
+systemctl stop lamponi lamponi-sync-orders.timer lamponi-sync-stocks.timer lamponi-stock-checks.timer
 tar -czf /root/lamponi-data.tar.gz -C / opt/lamponi/shared/.env var/lib/lamponi
 ```
 

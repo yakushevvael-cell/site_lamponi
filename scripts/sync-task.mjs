@@ -11,6 +11,8 @@
  *   node scripts/sync-task.mjs orders   — подтянуть заказы, пересчитать резервы
  *                                         и сразу доотправить изменившиеся остатки
  *   node scripts/sync-task.mjs stocks   — полная выгрузка остатков на площадки
+ *   node scripts/sync-task.mjs checks   — проверка площадок через 10 минут после
+ *                                         корректировки остатков (для «Истории»)
  *
  * Скрипт обращается к собственному HTTP-API приложения со служебным токеном:
  * так используется тот же самый проверенный код, что и при ручном запуске,
@@ -210,12 +212,36 @@ async function syncStocks() {
   }
 }
 
+/**
+ * Проверка площадок после корректировки: что фактически легло на склады.
+ *
+ * Таймер срабатывает каждые 2 минуты, и почти всегда проверять нечего —
+ * тогда скрипт молчит, чтобы не засорять журнал. Во время выката приложение
+ * перезапускается и не отвечает: это не сбой, проверка просто выполнится
+ * при следующем запуске.
+ */
+async function runChecks() {
+  let result;
+  try {
+    result = await call("/api/stocks/checks", {});
+  } catch (error) {
+    log(`Приложение не отвечает (${error instanceof Error ? error.message : error}) — проверка перенесена.`);
+    return;
+  }
+  const { status, data } = result;
+  if (status >= 400) fail(data.error ?? `ответ ${status}`);
+  if (!data.checked) return;
+  log(`Проверено позиций на площадках: ${data.checked}. Ждут проверки: ${data.dueLeft ?? 0}.`);
+  for (const failure of data.failures ?? []) log(`Замечание: ${failure}`);
+}
+
 async function main() {
   if (!TOKEN) fail("не задан SYNC_TASK_TOKEN. Добавьте его в .env приложения.");
   const action = process.argv[2];
   if (action === "orders") return syncOrders();
   if (action === "stocks") return syncStocks();
-  fail("укажите режим: orders или stocks.");
+  if (action === "checks") return runChecks();
+  fail("укажите режим: orders, stocks или checks.");
 }
 
 main().catch((error) => {

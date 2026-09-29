@@ -1,9 +1,14 @@
 import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
-import { getMarketplaceCredentials } from "@/lib/credentials";
-import { getOzonStocksByWarehouse } from "@/lib/ozon";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
+import {
+  readRemoteMappings,
+  readRemoteStocks,
+  remoteKey,
+  REMOTE_MARKETPLACES,
+  type RemoteMarketplaceId,
+  type RemoteWarehouseStock,
+} from "@/lib/remote-stocks";
 import { getRuntimeEnv } from "@/lib/runtime-env";
-import { getWildberriesStocks } from "@/lib/wildberries";
 
 /**
  * Что на самом деле лежит на площадке.
@@ -17,8 +22,8 @@ import { getWildberriesStocks } from "@/lib/wildberries";
  * Маршрут ничего не отправляет — только читает. Поэтому его не блокирует
  * стоп-кран выгрузки: смотреть на площадку под паузой как раз и нужно.
  *
- * Спрашиваем все активные склады, а не только те, где включена выгрузка:
- * смысл в том и есть, чтобы увидеть склад до его включения.
+ * Само чтение — в lib/remote-stocks: тем же кодом пользуется проверка
+ * площадок через 10 минут после корректировки.
  */
 
 const MAX_SELECTION = 50;
@@ -30,16 +35,7 @@ type BasisRow = {
   availableQuantity: number;
 };
 
-type MappingRow = { sourceSku: string; marketplaceId: string; externalSku: string };
-type WarehouseRow = { externalId: string; name: string; publishFullStock: number };
-
-export type RemoteWarehouseStock = {
-  warehouseId: string;
-  warehouseName: string;
-  publishing: boolean;
-  amount: number;
-  reserved: number | null;
-};
+export type { RemoteWarehouseStock };
 
 export type RemoteStockRow = {
   sourceSku: string;
@@ -47,21 +43,11 @@ export type RemoteStockRow = {
   size: string | null;
   availableQuantity: number;
   marketplaces: Array<{
-    marketplaceId: "wildberries" | "ozon";
+    marketplaceId: RemoteMarketplaceId;
     externalSku: string;
     warehouses: RemoteWarehouseStock[];
   }>;
 };
-
-async function readWarehouses(db: D1Database, marketplaceId: string) {
-  const rows = await db.prepare(
-    `SELECT external_id AS externalId, name, publish_full_stock AS publishFullStock
-     FROM marketplace_warehouses
-     WHERE marketplace_id = ? AND remote_active = 1
-     ORDER BY name`,
-  ).bind(marketplaceId).all<WarehouseRow>();
-  return rows.results;
-}
 
 export async function POST(request: Request) {
   const auth = await authorizeApi();
@@ -99,103 +85,25 @@ export async function POST(request: Request) {
      ORDER BY p.article, p.size`,
   ).bind(...sourceSkus).all<BasisRow>();
 
-  const mappings = await db.prepare(
-    `SELECT product_sku AS sourceSku, marketplace_id AS marketplaceId, external_sku AS externalSku
-     FROM sku_mappings
-     WHERE active = 1 AND marketplace_id IN ('wildberries', 'ozon') AND product_sku IN (${placeholders})`,
-  ).bind(...sourceSkus).all<MappingRow>();
+  const mappings = await readRemoteMappings(db, sourceSkus);
+  const remote = await readRemoteStocks(db, runtime, mappings);
 
-  const wbMappings = mappings.results.filter((row) => row.marketplaceId === "wildberries");
-  const ozonMappings = mappings.results.filter((row) => row.marketplaceId === "ozon");
-  const failures: string[] = [];
-
-  /** Фактические остатки: ключ «внешний SKU» → строки по складам. */
-  const wbRemote = new Map<string, RemoteWarehouseStock[]>();
-  const ozonRemote = new Map<string, RemoteWarehouseStock[]>();
-
-  if (wbMappings.length > 0) {
-    try {
-      const credentials = await getMarketplaceCredentials(db, runtime, "wildberries");
-      if (!credentials.WB_API_TOKEN) throw new Error("Ключ Wildberries не добавлен.");
-      const warehouses = await readWarehouses(db, "wildberries");
-      if (warehouses.length === 0) throw new Error("Активных складов Wildberries нет. Обновите список складов.");
-      const chrtIds = wbMappings
-        .map((row) => Number(row.externalSku))
-        .filter((id) => Number.isSafeInteger(id) && id > 0);
-      for (const warehouse of warehouses) {
-        try {
-          const stocks = await getWildberriesStocks(credentials.WB_API_TOKEN, warehouse.externalId, chrtIds);
-          for (const stock of stocks) {
-            const key = String(stock.chrtId);
-            const list = wbRemote.get(key) ?? [];
-            list.push({
-              warehouseId: warehouse.externalId,
-              warehouseName: warehouse.name,
-              publishing: Boolean(warehouse.publishFullStock),
-              amount: Number(stock.amount) || 0,
-              // WB отдаёт только итоговое количество, резерв в этом ответе не приходит.
-              reserved: null,
-            });
-            wbRemote.set(key, list);
-          }
-        } catch (error) {
-          failures.push(`Wildberries, ${warehouse.name}: ${error instanceof Error ? error.message : "склад не ответил"}`);
-        }
-      }
-    } catch (error) {
-      failures.push(`Wildberries: ${error instanceof Error ? error.message : "не удалось прочитать остатки"}`);
-    }
-  }
-
-  if (ozonMappings.length > 0) {
-    try {
-      const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
-      if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Client-Id или API-ключ Ozon не добавлен.");
-      const publishingByWarehouse = new Map(
-        (await readWarehouses(db, "ozon")).map((warehouse) => [warehouse.externalId, Boolean(warehouse.publishFullStock)]),
-      );
-      const stocks = await getOzonStocksByWarehouse(
-        credentials.OZON_CLIENT_ID,
-        credentials.OZON_API_KEY,
-        ozonMappings.map((row) => row.externalSku),
-      );
-      for (const stock of stocks) {
-        const list = ozonRemote.get(stock.offerId) ?? [];
-        list.push({
-          warehouseId: String(stock.warehouseId),
-          warehouseName: stock.warehouseName,
-          publishing: publishingByWarehouse.get(String(stock.warehouseId)) ?? false,
-          amount: Number(stock.present) || 0,
-          reserved: Number(stock.reserved) || 0,
-        });
-        ozonRemote.set(stock.offerId, list);
-      }
-    } catch (error) {
-      failures.push(`Ozon: ${error instanceof Error ? error.message : "не удалось прочитать остатки"}`);
-    }
-  }
-
-  const wbBySku = new Map(wbMappings.map((row) => [row.sourceSku, row.externalSku]));
-  const ozonBySku = new Map(ozonMappings.map((row) => [row.sourceSku, row.externalSku]));
-
-  const rows: RemoteStockRow[] = basis.results.map((item) => {
-    const marketplaces: RemoteStockRow["marketplaces"] = [];
-    const wbSku = wbBySku.get(item.sourceSku);
-    if (wbSku) {
-      marketplaces.push({ marketplaceId: "wildberries", externalSku: wbSku, warehouses: wbRemote.get(wbSku) ?? [] });
-    }
-    const ozonSku = ozonBySku.get(item.sourceSku);
-    if (ozonSku) {
-      marketplaces.push({ marketplaceId: "ozon", externalSku: ozonSku, warehouses: ozonRemote.get(ozonSku) ?? [] });
-    }
-    return {
-      sourceSku: item.sourceSku,
-      article: item.article,
-      size: item.size,
-      availableQuantity: Number(item.availableQuantity) || 0,
-      marketplaces,
-    };
-  });
+  const rows: RemoteStockRow[] = basis.results.map((item) => ({
+    sourceSku: item.sourceSku,
+    article: item.article,
+    size: item.size,
+    availableQuantity: Number(item.availableQuantity) || 0,
+    marketplaces: REMOTE_MARKETPLACES.flatMap((marketplaceId) => {
+      const mapping = mappings.find((row) => row.sourceSku === item.sourceSku && row.marketplaceId === marketplaceId);
+      if (!mapping) return [];
+      return [{
+        marketplaceId,
+        externalSku: mapping.externalSku,
+        warehouses: remote.stocks.get(remoteKey(marketplaceId, mapping.externalSku)) ?? [],
+      }];
+    }),
+  }));
+  const failures = remote.failures;
 
   return Response.json({
     ok: failures.length === 0,

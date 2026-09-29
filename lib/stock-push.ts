@@ -3,6 +3,7 @@ import { getMarketplaceCredentials } from "@/lib/credentials";
 import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
 import { collectReserveDrift, rebuildReservations } from "@/lib/reservations";
 import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow, type SyncTrigger } from "@/lib/stock-log";
+import { scheduleRemoteChecks } from "@/lib/stock-checks";
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
@@ -228,12 +229,31 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
       const message = messageFrom(error, `Не удалось обновить склад ${warehouse.name}.`);
       failures.push(`Wildberries, ${warehouse.name}: ${message}`);
       await markWarehouseSync(db, "wildberries", warehouse.externalId, false, message);
-      logRows.push({
-        ...(guard ? (error as { row: Partial<SendableRow> }).row : { warehouseId: warehouse.externalId }),
-        marketplaceId: "wildberries",
-        apiStatus: guard ? "blocked" : "error",
-        apiMessage: message,
-      } as LogRow);
+      if (guard) {
+        logRows.push({
+          ...(error as { row: Partial<SendableRow> }).row,
+          marketplaceId: "wildberries",
+          apiStatus: "blocked",
+          apiMessage: message,
+        } as LogRow);
+      } else {
+        // Ошибка пишется по каждой позиции: иначе в «Истории» позиции не
+        // видно, что до этого склада её остаток не доехал.
+        for (const item of wbBasis) {
+          logRows.push({
+            marketplaceId: "wildberries",
+            warehouseId: warehouse.externalId,
+            externalSku: item.externalSku,
+            productSku: item.sourceSku,
+            article: item.article,
+            size: item.size,
+            osvQty: item.osvQty,
+            reserveQty: item.reserveQty,
+            apiStatus: "error",
+            apiMessage: message,
+          });
+        }
+      }
       for (const item of wbBasis) {
         resultRows.push({
           marketplaceId: "wildberries",
@@ -364,12 +384,32 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
         const guard = isStockGuardError(error);
         const message = messageFrom(error, "Не удалось обновить остатки Ozon.");
         failures.push(`Ozon: ${message}`);
-        logRows.push({
-          ...(guard ? (error as { row: Partial<SendableRow> }).row : {}),
-          marketplaceId: "ozon",
-          apiStatus: guard ? "blocked" : "error",
-          apiMessage: message,
-        } as LogRow);
+        if (guard) {
+          logRows.push({
+            ...(error as { row: Partial<SendableRow> }).row,
+            marketplaceId: "ozon",
+            apiStatus: "blocked",
+            apiMessage: message,
+          } as LogRow);
+        } else {
+          // Как и у WB: ошибка по каждой паре «позиция — склад», чтобы её было видно в «Истории».
+          for (const warehouse of ozonWarehouses) {
+            for (const item of ozonBasis) {
+              logRows.push({
+                marketplaceId: "ozon",
+                warehouseId: warehouse.externalId,
+                externalSku: item.externalSku,
+                productSku: item.sourceSku,
+                article: item.article,
+                size: item.size,
+                osvQty: item.osvQty,
+                reserveQty: item.reserveQty,
+                apiStatus: "error",
+                apiMessage: message,
+              });
+            }
+          }
+        }
         for (const warehouse of ozonWarehouses) {
           await markWarehouseSync(db, "ozon", warehouse.externalId, false, message);
         }
@@ -396,6 +436,8 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   if (statements.length > 0) await db.batch(statements);
 
   await finishSyncRun(db, runId, ok ? "success" : "partial", ok ? null : failures[0] ?? null);
+  // Через 10 минут сервис сам посмотрит, что легло на склады площадок.
+  await scheduleRemoteChecks(db, { runId, trigger, sourceSkus: [...mappedSkus] });
 
   return {
     ok,

@@ -142,13 +142,13 @@ fi
 
 log "Настраиваю сервис и таймеры"
 install -m 644 "$RELEASE_DIR/deploy/lamponi.service" /etc/systemd/system/lamponi.service
-for unit in lamponi-sync-orders lamponi-sync-stocks lamponi-backup lamponi-autodeploy; do
+for unit in lamponi-sync-orders lamponi-sync-stocks lamponi-stock-checks lamponi-backup lamponi-autodeploy; do
   install -m 644 "$RELEASE_DIR/deploy/$unit.service" "/etc/systemd/system/$unit.service"
   install -m 644 "$RELEASE_DIR/deploy/$unit.timer" "/etc/systemd/system/$unit.timer"
 done
 systemctl daemon-reload
 systemctl enable --now lamponi.service
-systemctl enable --now lamponi-sync-orders.timer lamponi-sync-stocks.timer lamponi-backup.timer
+systemctl enable --now lamponi-sync-orders.timer lamponi-sync-stocks.timer lamponi-stock-checks.timer lamponi-backup.timer
 if [[ -d "$RELEASE_DIR/.git" ]]; then
   systemctl enable --now lamponi-autodeploy.timer
   log "Автодеплой включён: сервер сам подтягивает новые коммиты из $REPO_BRANCH"

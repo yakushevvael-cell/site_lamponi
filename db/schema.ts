@@ -276,6 +276,51 @@ export const stockSyncLog = sqliteTable(
   ],
 );
 
+/**
+ * Проверка площадок через 10 минут после корректировки остатка по позиции:
+ * что фактически легло на склады WB, Ozon и Яндекс Маркета.
+ */
+export const stockRemoteChecks = sqliteTable(
+  "stock_remote_checks",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    /** Корректировка (stock_sync_runs.id), после которой назначена проверка. */
+    runId: text("run_id"),
+    productSku: text("product_sku").notNull(),
+    trigger: text("trigger").notNull(),
+    dueAt: text("due_at").notNull(),
+    status: text("status", { enum: ["pending", "running", "done", "error"] }).notNull().default("pending"),
+    checkedAt: text("checked_at"),
+    message: text("message"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+  },
+  (table) => [
+    index("stock_remote_check_due_idx").on(table.status, table.dueAt),
+    index("stock_remote_check_sku_idx").on(table.productSku, table.createdAt),
+  ],
+);
+
+export const stockRemoteCheckRows = sqliteTable(
+  "stock_remote_check_rows",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    checkId: integer("check_id").notNull(),
+    marketplaceId: text("marketplace_id").notNull(),
+    warehouseId: text("warehouse_id").notNull(),
+    warehouseName: text("warehouse_name"),
+    /** Выгрузка на склад была включена в момент проверки. */
+    publishing: integer("publishing", { mode: "boolean" }).notNull().default(false),
+    /** ok — площадка показала остаток; missing — товара на складе нет; error — склад не ответил. */
+    status: text("status", { enum: ["ok", "missing", "error"] }).notNull(),
+    amount: integer("amount"),
+    reserved: integer("reserved"),
+    /** Что сервис отправил на этот склад при корректировке. */
+    expectedQty: integer("expected_qty"),
+    message: text("message"),
+  },
+  (table) => [index("stock_remote_check_row_check_idx").on(table.checkId)],
+);
+
 export const settings = sqliteTable("settings", {
   key: text("key").primaryKey(),
   value: text("value").notNull(),

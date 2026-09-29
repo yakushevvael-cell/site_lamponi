@@ -380,3 +380,64 @@ export async function getYandexDeliveryServices(apiKey: string): Promise<YandexD
     .map((service) => ({ id: Number(service.id), name: String(service.name ?? "") }))
     .filter((service) => Number.isFinite(service.id));
 }
+
+export type YandexOfferStock = {
+  offerId: string;
+  warehouseId: string;
+  /** Годный остаток (FIT) — то, что Маркет считает выставленным на складе. */
+  amount: number;
+  /** Зарезервировано под заказы (RESERVE), если Маркет его отдал. */
+  reserved: number | null;
+};
+
+/**
+ * Остатки магазина по артикулам — только чтение.
+ *
+ * Выгрузку остатков на Маркет сервис не делает (см. ЯНДЕКС.md), но смотреть,
+ * что лежит на площадке, нужно так же, как на WB и Ozon: для «Истории»
+ * позиции на странице «Остатки».
+ */
+export async function getYandexOfferStocks(apiKey: string, campaignId: string, offerIds: string[]): Promise<YandexOfferStock[]> {
+  const stocks: YandexOfferStock[] = [];
+  for (let start = 0; start < offerIds.length; start += 500) {
+    const chunk = offerIds.slice(start, start + 500);
+    let pageToken = "";
+    for (let page = 0; page < 50; page += 1) {
+      const query = new URLSearchParams({ limit: "200" });
+      if (pageToken) query.set("page_token", pageToken);
+      const payload = await yandexRequest<{
+        result?: {
+          warehouses?: Array<{
+            warehouseId?: number | string;
+            offers?: Array<{ offerId?: string; stocks?: Array<{ type?: string; count?: number }> }>;
+          }>;
+          paging?: { nextPageToken?: string };
+        };
+      }>(`/v2/campaigns/${campaignId}/offers/stocks?${query.toString()}`, apiKey, {
+        method: "POST",
+        body: { offerIds: chunk },
+      });
+
+      for (const warehouse of payload.result?.warehouses ?? []) {
+        for (const offer of warehouse.offers ?? []) {
+          const offerId = String(offer.offerId ?? "").trim();
+          if (!offerId) continue;
+          const count = (type: string) => {
+            const entry = (offer.stocks ?? []).find((stock) => stock.type === type);
+            return entry ? Number(entry.count) || 0 : null;
+          };
+          stocks.push({
+            offerId,
+            warehouseId: String(warehouse.warehouseId ?? ""),
+            amount: count("FIT") ?? count("AVAILABLE") ?? 0,
+            reserved: count("RESERVE"),
+          });
+        }
+      }
+
+      pageToken = payload.result?.paging?.nextPageToken ?? "";
+      if (!pageToken) break;
+    }
+  }
+  return stocks;
+}

@@ -291,7 +291,7 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
     },
   };
 
-  await startSyncRun(db, { runId: jobId, trigger: "manual", actorEmail: ownerEmail, osvUploadId });
+  await startSyncRun(db, { runId: jobId, trigger: "full_sync", actorEmail: ownerEmail, osvUploadId });
   await db.batch([
     db.prepare(
       `INSERT INTO settings (key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)

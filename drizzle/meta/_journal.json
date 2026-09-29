@@ -211,6 +211,13 @@
       "when": 1790400000000,
       "tag": "0029_onec",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "6",
+      "when": 1790500000000,
+      "tag": "0030_stock_history",
+      "breakpoints": true
     }
   ]
 }

@@ -7,7 +7,7 @@
  */
 import type { SendableRow } from "@/lib/stock-math";
 
-export type SyncTrigger = "manual" | "osv_upload" | "orders_sync" | "warehouse_enabled" | "warehouse_disabled" | "manual_zero" | "canary";
+export type SyncTrigger = "manual" | "full_sync" | "osv_upload" | "orders_sync" | "warehouse_enabled" | "warehouse_disabled" | "manual_zero" | "canary";
 export type SyncRunStatus = "running" | "success" | "partial" | "error" | "cancelled";
 export type LogStatus = "success" | "error" | "blocked" | "skipped";
 
