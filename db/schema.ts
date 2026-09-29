@@ -928,6 +928,35 @@ export const dmdkRegistryItems = sqliteTable(
   ],
 );
 
+/** Ключ обмена с 1С. Хранится только хеш; сам ключ показывается один раз. */
+export const onecApiKeys = sqliteTable(
+  "onec_api_keys",
+  {
+    id: integer("id").primaryKey({ autoIncrement: true }),
+    tokenHash: text("token_hash").notNull(),
+    tokenHint: text("token_hint").notNull(),
+    createdBy: text("created_by"),
+    createdAt: text("created_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+    lastUsedAt: text("last_used_at"),
+    revokedAt: text("revoked_at"),
+    revokedBy: text("revoked_by"),
+  },
+  (table) => [uniqueIndex("onec_api_key_hash_unique").on(table.tokenHash)],
+);
+
+/** Что 1С ответила по заданию на сборку: подтверждённая версия и документ «Расход ГП». */
+export const onecTaskSync = sqliteTable("onec_task_sync", {
+  taskId: integer("task_id").primaryKey(),
+  ackedVersion: text("acked_version"),
+  documentId: text("document_id"),
+  documentNumber: text("document_number"),
+  documentDate: text("document_date"),
+  lastOk: integer("last_ok", { mode: "boolean" }),
+  lastMessage: text("last_message"),
+  attempts: integer("attempts").notNull().default(0),
+  updatedAt: text("updated_at").notNull().default(sql`CURRENT_TIMESTAMP`),
+});
+
 export const dmdkRegistryUploads = sqliteTable("dmdk_registry_uploads", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   fileName: text("file_name").notNull(),
