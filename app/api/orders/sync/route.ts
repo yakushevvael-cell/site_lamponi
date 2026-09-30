@@ -529,7 +529,14 @@ export async function POST(request: Request) {
     try {
       results.push(await sync());
     } catch (error) {
-      errors.push({ marketplace, message: error instanceof Error ? error.message : "Ошибка синхронизации" });
+      const message = error instanceof Error ? error.message : "Ошибка синхронизации";
+      errors.push({ marketplace, message });
+      // Без этой записи сбой площадки виден только в логе сервера, а на сайте
+      // заказы просто молча не появляются.
+      await runtime.DB.prepare(
+        `INSERT INTO sync_events (marketplace_id, direction, kind, status, item_count, message)
+         VALUES (?, 'inbound', 'orders', 'error', 0, ?)`,
+      ).bind(marketplace, `Заказы не загружены: ${message}`.slice(0, 500)).run().catch(() => undefined);
     }
   }
 

@@ -15,6 +15,7 @@ import {
   retryAfterFromHeaders,
   withRetry,
 } from "@/lib/http-retry";
+import { yandexOrderWindows } from "@/lib/yandex-core.mjs";
 
 const YANDEX_API_BASE = "https://api.partner.market.yandex.ru";
 
@@ -227,37 +228,23 @@ export async function getYandexOfferMappings(apiKey: string, businessId: string)
   return offers;
 }
 
-/** ДД-ММ-ГГГГ — формат дат в фильтрах заказов Маркета. */
-function marketDate(value: Date) {
-  const day = String(value.getUTCDate()).padStart(2, "0");
-  const month = String(value.getUTCMonth() + 1).padStart(2, "0");
-  return `${day}-${month}-${value.getUTCFullYear()}`;
-}
-
 /**
  * Заказы магазина за последние дни.
  *
- * Окно ограничено 30 днями на запрос — за больший период Маркет отвечает
- * ошибкой, поэтому длинный период режется на куски. Постранично ходим по
- * page_token: параметры page/pageSize Маркет отключает 05.10.2026.
+ * Окна дат считает yandexOrderWindows: не больше 30 дней на запрос и конец
+ * окна — завтра по Москве, потому что `toDate` Маркет не включает. Постранично
+ * ходим по page_token: параметры page/pageSize Маркет отключает 05.10.2026.
  */
 export async function getYandexOrders(apiKey: string, campaignId: string, days: number): Promise<YandexOrder[]> {
   const orders: YandexOrder[] = [];
   const seen = new Set<number>();
-  const now = Date.now();
-  const windows = Math.max(1, Math.ceil(Math.max(1, days) / 30));
 
-  for (let index = 0; index < windows; index += 1) {
-    const toDate = new Date(now - index * 30 * 86_400_000);
-    const fromMs = Math.max(now - days * 86_400_000, toDate.getTime() - 29 * 86_400_000);
-    const fromDate = new Date(fromMs);
-    if (fromDate.getTime() > toDate.getTime()) break;
-
+  for (const window of yandexOrderWindows(Date.now(), days)) {
     let pageToken = "";
     for (let page = 0; page < 200; page += 1) {
       const query = new URLSearchParams({
-        fromDate: marketDate(fromDate),
-        toDate: marketDate(toDate),
+        fromDate: window.fromDate,
+        toDate: window.toDate,
         limit: "50",
       });
       if (pageToken) query.set("page_token", pageToken);

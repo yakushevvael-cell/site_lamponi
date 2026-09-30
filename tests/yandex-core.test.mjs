@@ -12,6 +12,7 @@ import {
   toKopecks,
   yandexHandoverSteps,
   yandexOrderAmount,
+  yandexOrderWindows,
   yandexShipmentDeadline,
   yandexStatusInfo,
   yandexStatusKey,
@@ -165,4 +166,33 @@ test("заявка Доставки: одно место, оплата уже п
   assert.equal(request.recipient_info.last_name, "Иванова");
   assert.equal(request.recipient_info.phone, "+79990000000");
   assert.equal(request.last_mile_policy, "time_interval");
+});
+
+test("окно заказов заканчивается завтрашним днём по Москве: сегодняшние заказы попадают в выборку", () => {
+  // 30.09.2026 14:34 по Москве.
+  const windows = yandexOrderWindows(Date.parse("2026-09-30T11:34:00Z"), 30);
+  assert.equal(windows[0].toDate, "01-10-2026");
+  assert.equal(windows.at(-1).fromDate, "31-08-2026");
+});
+
+test("после полуночи по Москве, но до полуночи UTC, «сегодня» уже московское", () => {
+  // 01.10.2026 00:30 по Москве = 30.09.2026 21:30 UTC.
+  const windows = yandexOrderWindows(Date.parse("2026-09-30T21:30:00Z"), 7);
+  assert.equal(windows[0].toDate, "02-10-2026");
+});
+
+test("окна заказов не длиннее 29 дней и без разрывов", () => {
+  const day = (value) => {
+    const [dd, mm, yyyy] = value.split("-");
+    return Date.UTC(Number(yyyy), Number(mm) - 1, Number(dd));
+  };
+  const windows = yandexOrderWindows(Date.parse("2026-09-30T11:34:00Z"), 90);
+  for (const window of windows) {
+    const span = (day(window.toDate) - day(window.fromDate)) / 86_400_000;
+    assert.ok(span > 0 && span <= 29, `${window.fromDate} – ${window.toDate}`);
+  }
+  for (let index = 1; index < windows.length; index += 1) {
+    assert.equal(windows[index].toDate, windows[index - 1].fromDate);
+  }
+  assert.equal(windows.at(-1).fromDate, "02-07-2026");
 });
