@@ -155,7 +155,8 @@ async function pushChangedStocks() {
   }
   const wb = data.wildberries?.sent ?? 0;
   const ozon = data.ozon?.sent ?? 0;
-  log(`Доотправка: позиций ${data.selected}, WB ${wb}, Ozon ${ozon}. В очереди осталось: ${data.pendingLeft ?? 0}.`);
+  const yandex = data.yandex?.sent ?? 0;
+  log(`Доотправка: позиций ${data.selected}, WB ${wb}, Ozon ${ozon}, Маркет ${yandex}. В очереди осталось: ${data.pendingLeft ?? 0}.`);
   if (Array.isArray(data.failures) && data.failures.length > 0) {
     for (const failure of data.failures) log(`Замечание: ${failure}`);
     process.exitCode = 2;
@@ -188,19 +189,27 @@ async function syncStocks() {
       if (result.done) break;
     }
 
+    const yandexPlan = plan.yandex ?? { warehouses: [], mappingCount: 0 };
+    for (const [index, warehouse] of yandexPlan.warehouses.entries()) {
+      if (!yandexPlan.mappingCount) break;
+      log(`Яндекс Маркет: магазин ${index + 1} из ${yandexPlan.warehouses.length} — ${warehouse.name}`);
+      await step({ action: "yandex", jobId, warehouseId: warehouse.externalId }, "Яндекс Маркет");
+    }
+
     const summary = await step({ action: "finish", jobId }, "Итог");
     finished = true;
     log(
       `Готово. WB: ${summary.wildberries.completedWarehouseCount} из ${summary.wildberries.warehouseCount} складов, ` +
       `отправлено ${summary.wildberries.sent}. Ozon: обработано ${summary.ozon.processedMappings} из ${summary.ozon.mappingCount}, ` +
-      `отправлено ${summary.ozon.sent}.`,
+      `отправлено ${summary.ozon.sent}. Маркет: ${summary.yandex?.completedWarehouseCount ?? 0} из ` +
+      `${summary.yandex?.warehouseCount ?? 0} магазинов, отправлено ${summary.yandex?.sent ?? 0}.`,
     );
     if (summary.ozon.reserveDrift) {
       log(`Внимание: по ${summary.ozon.reserveDrift} позициям резерв Ozon больше нашего — проверьте загрузку заказов.`);
       process.exitCode = 2;
     }
     if (!summary.ok) {
-      const failure = [...summary.wildberries.failures, ...summary.ozon.failures][0];
+      const failure = [...summary.wildberries.failures, ...summary.ozon.failures, ...(summary.yandex?.failures ?? [])][0];
       log(`Синхронизация завершена частично: ${failure?.message ?? "см. журнал выгрузки"}`);
       process.exitCode = 2;
     }

@@ -6,6 +6,7 @@ import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow, type 
 import { scheduleRemoteChecks } from "@/lib/stock-checks";
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { updateYandexStocks } from "@/lib/yandex";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 /**
@@ -20,11 +21,12 @@ import { OSV_UNITS_SQL } from "@/lib/osv-units";
  * товаров не помещаются в один запрос и идут заданием в несколько шагов. Здесь
  * список заведомо короткий, поэтому всё делается за один заход.
  *
+ * Площадки — Wildberries, Ozon и Яндекс Маркет; на все уходит одно число.
  * Формула, гард от некорректных значений и запись в журнал — общие:
  * lib/stock-math и lib/stock-log, отдельной арифметики здесь нет.
  */
 
-type MarketplaceId = "wildberries" | "ozon";
+type MarketplaceId = "wildberries" | "ozon" | "yandex";
 type Warehouse = { externalId: string; name: string };
 
 type StockBasisRow = {
@@ -124,6 +126,7 @@ export type PushStocksResult = {
   unmapped: string[];
   wildberries: { warehouseCount: number; mappingCount: number; sent: number };
   ozon: { warehouseCount: number; mappingCount: number; sent: number; reserveDrift: number };
+  yandex: { warehouseCount: number; mappingCount: number; sent: number };
   failures: string[];
   rows: ResultRow[];
 };
@@ -141,11 +144,12 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   // а не от того, что осталось от прошлой загрузки.
   await rebuildReservations(db).catch(() => undefined);
 
-  const [wbWarehouses, ozonWarehouses] = await Promise.all([
+  const [wbWarehouses, ozonWarehouses, yandexWarehouses] = await Promise.all([
     readWarehouses(db, "wildberries"),
     readWarehouses(db, "ozon"),
+    readWarehouses(db, "yandex"),
   ]);
-  if (wbWarehouses.length === 0 && ozonWarehouses.length === 0) {
+  if (wbWarehouses.length === 0 && ozonWarehouses.length === 0 && yandexWarehouses.length === 0) {
     // Точечная отправка тоже идёт на склады с включённой выгрузкой: без этого
     // флага сервису просто некуда слать. В ручном режиме склад включается
     // «тихо» — с галочкой «Только включить, ничего не отправлять».
@@ -163,11 +167,13 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   const failures: string[] = [];
   let wbSent = 0;
   let ozonSent = 0;
+  let yandexSent = 0;
   let reserveDrift = 0;
 
   const wbBasis = wbWarehouses.length > 0 ? await readSelectedBasis(db, "wildberries", sourceSkus) : [];
   const ozonBasis = ozonWarehouses.length > 0 ? await readSelectedBasis(db, "ozon", sourceSkus) : [];
-  const mappedSkus = new Set([...wbBasis, ...ozonBasis].map((item) => item.sourceSku));
+  const yandexBasis = yandexWarehouses.length > 0 ? await readSelectedBasis(db, "yandex", sourceSkus) : [];
+  const mappedSkus = new Set([...wbBasis, ...ozonBasis, ...yandexBasis].map((item) => item.sourceSku));
   const unmapped = sourceSkus.filter((sku) => !mappedSkus.has(sku));
 
   // --- Wildberries: остатки отправляются по каждому включённому складу отдельно.
@@ -314,7 +320,6 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
             reserveQty: item.reserveQty,
             safetyStock: item.safetyStock,
             manualZero: Boolean(item.manualZero),
-            remoteReserved: remote.reserved,
           }));
         }
         for (const warehouseId of enabledWarehouses.keys()) {
@@ -332,7 +337,6 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
               reserveQty: item.reserveQty,
               safetyStock: item.safetyStock,
               manualZero: Boolean(item.manualZero),
-              remoteReserved: 0,
             }));
           }
         }
@@ -417,6 +421,103 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
     }
   }
 
+  // --- Яндекс Маркет: склад магазина DBS один, его номер — campaignId.
+  for (const warehouse of yandexWarehouses) {
+    if (yandexBasis.length === 0) {
+      failures.push("Для выбранных позиций нет активных сопоставлений Яндекс Маркета.");
+      break;
+    }
+    try {
+      const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+      if (!credentials.YANDEX_API_KEY) throw new Error("Api-Key Яндекс Маркета не добавлен.");
+
+      const rows = yandexBasis.map((item) => buildSendableRow({
+        marketplaceId: "yandex",
+        warehouseId: warehouse.externalId,
+        externalSku: item.externalSku,
+        productSku: item.sourceSku,
+        article: item.article,
+        size: item.size,
+        osvQty: item.osvQty,
+        reserveQty: item.reserveQty,
+        safetyStock: item.safetyStock,
+        manualZero: Boolean(item.manualZero),
+      }));
+
+      await updateYandexStocks(
+        credentials.YANDEX_API_KEY,
+        warehouse.externalId,
+        rows.map((row) => ({ offerId: row.externalSku, count: row.sentQty })),
+      );
+      yandexSent += rows.length;
+      await markWarehouseSync(db, "yandex", warehouse.externalId, true);
+      for (const row of rows) {
+        logRows.push({ ...row, apiStatus: "success" });
+        resultRows.push({
+          marketplaceId: "yandex",
+          warehouseId: warehouse.externalId,
+          warehouseName: warehouse.name,
+          sourceSku: row.productSku ?? "",
+          externalSku: row.externalSku,
+          article: row.article,
+          size: row.size,
+          osvQty: row.osvQty,
+          reserveQty: row.reserveQty,
+          computedQty: row.computedQty,
+          sentQty: row.sentQty,
+          status: "success",
+          message: null,
+        });
+      }
+    } catch (error) {
+      const guard = isStockGuardError(error);
+      const message = messageFrom(error, `Не удалось обновить склад ${warehouse.name}.`);
+      failures.push(`Яндекс Маркет, ${warehouse.name}: ${message}`);
+      await markWarehouseSync(db, "yandex", warehouse.externalId, false, message);
+      if (guard) {
+        logRows.push({
+          ...(error as { row: Partial<SendableRow> }).row,
+          marketplaceId: "yandex",
+          apiStatus: "blocked",
+          apiMessage: message,
+        } as LogRow);
+      } else {
+        // Как и у WB: ошибка по каждой позиции, чтобы её было видно в «Истории».
+        for (const item of yandexBasis) {
+          logRows.push({
+            marketplaceId: "yandex",
+            warehouseId: warehouse.externalId,
+            externalSku: item.externalSku,
+            productSku: item.sourceSku,
+            article: item.article,
+            size: item.size,
+            osvQty: item.osvQty,
+            reserveQty: item.reserveQty,
+            apiStatus: "error",
+            apiMessage: message,
+          });
+        }
+      }
+      for (const item of yandexBasis) {
+        resultRows.push({
+          marketplaceId: "yandex",
+          warehouseId: warehouse.externalId,
+          warehouseName: warehouse.name,
+          sourceSku: item.sourceSku,
+          externalSku: item.externalSku,
+          article: item.article,
+          size: item.size,
+          osvQty: item.osvQty,
+          reserveQty: item.reserveQty,
+          computedQty: 0,
+          sentQty: 0,
+          status: guard ? "blocked" : "error",
+          message,
+        });
+      }
+    }
+  }
+
   if (logRows.length > 0) await logStockRows(db, runId, actorEmail, logRows);
 
   const ok = failures.length === 0;
@@ -433,6 +534,12 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
        VALUES ('ozon', 'outbound', 'stocks', ?, ?, ?)`,
     ).bind(ozonSent > 0 ? "success" : "error", ozonSent, `${label}: позиций ${sourceSkus.length}, отправлено ${ozonSent} пар товар–склад.`));
   }
+  if (yandexWarehouses.length > 0) {
+    statements.push(db.prepare(
+      `INSERT INTO sync_events (marketplace_id, direction, kind, status, item_count, message)
+       VALUES ('yandex', 'outbound', 'stocks', ?, ?, ?)`,
+    ).bind(yandexSent > 0 ? "success" : "error", yandexSent, `${label}: позиций ${sourceSkus.length}, отправлено ${yandexSent}.`));
+  }
   if (statements.length > 0) await db.batch(statements);
 
   await finishSyncRun(db, runId, ok ? "success" : "partial", ok ? null : failures[0] ?? null);
@@ -446,6 +553,7 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
     unmapped,
     wildberries: { warehouseCount: wbWarehouses.length, mappingCount: wbBasis.length, sent: wbSent },
     ozon: { warehouseCount: ozonWarehouses.length, mappingCount: ozonBasis.length, sent: ozonSent, reserveDrift },
+    yandex: { warehouseCount: yandexWarehouses.length, mappingCount: yandexBasis.length, sent: yandexSent },
     failures,
     rows: resultRows,
   };

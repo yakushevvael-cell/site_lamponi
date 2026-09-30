@@ -262,7 +262,7 @@ async function pushZeros(db: D1Database, runtime: AppRuntimeEnv, sourceSkus: str
       label: "Блокировка проблемного товара",
     });
     if ("error" in result) return { sent: 0, error: result.error };
-    return { sent: result.wildberries.sent + result.ozon.sent, error: result.failures[0] ?? null };
+    return { sent: result.wildberries.sent + result.ozon.sent + result.yandex.sent, error: result.failures[0] ?? null };
   } catch (error) {
     return { sent: 0, error: error instanceof Error ? error.message : "Не удалось отправить нули на площадки." };
   }

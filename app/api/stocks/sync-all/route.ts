@@ -9,6 +9,7 @@ import { finishSyncRun, logStockRows, startSyncRun, type LogRow } from "@/lib/st
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
 import { clearAllDirtySkus } from "@/lib/stock-queue";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { updateYandexStocks } from "@/lib/yandex";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 const JOB_KEY = "stocks_full_sync_job";
@@ -21,7 +22,7 @@ const OZON_MAPPING_BATCH_SIZE = 100;
 const MASS_ZERO_RATIO = 0.5;
 const MASS_ZERO_MIN_ROWS = 20;
 
-type MarketplaceId = "wildberries" | "ozon";
+type MarketplaceId = "wildberries" | "ozon" | "yandex";
 type Warehouse = { externalId: string; name: string };
 type SyncFailure = { scope: string; message: string };
 
@@ -65,6 +66,17 @@ type FullSyncJob = {
     /** Позиции, где резерв Ozon больше нашего: расхождение учётов. */
     reserveDrift?: number;
     done: boolean;
+    failures: SyncFailure[];
+  };
+  /**
+   * Яндекс Маркет. Необязателен: у задания, начатого до появления выгрузки на
+   * Маркет, этого поля нет — такой запуск Маркет просто пропускает.
+   */
+  yandex?: {
+    warehouses: Warehouse[];
+    mappingCount: number;
+    completedWarehouseIds: string[];
+    sent: number;
     failures: SyncFailure[];
   };
 };
@@ -231,20 +243,26 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
   // данных, а не от того, что осталось от прошлой загрузки заказов.
   await rebuildReservations(db).catch(() => undefined);
 
-  const [wbWarehouses, ozonWarehouses, wbMappingCount, ozonMappingCount, osvUploadId] = await Promise.all([
+  const [
+    wbWarehouses, ozonWarehouses, yandexWarehouses,
+    wbMappingCount, ozonMappingCount, yandexMappingCount,
+    osvUploadId,
+  ] = await Promise.all([
     readWarehouses(db, "wildberries"),
     readWarehouses(db, "ozon"),
+    readWarehouses(db, "yandex"),
     readMappingCount(db, "wildberries", pilotSql),
     readMappingCount(db, "ozon", pilotSql),
+    readMappingCount(db, "yandex", pilotSql),
     readLatestOsvUploadId(db),
   ]);
-  if (wbWarehouses.length === 0 && ozonWarehouses.length === 0) {
+  if (wbWarehouses.length === 0 && ozonWarehouses.length === 0 && yandexWarehouses.length === 0) {
     return Response.json({ error: "Нет складов с включённой выгрузкой остатков. Включите нужный склад на вкладке «Склады»." }, { status: 400 });
   }
   if (osvUploadId === null) {
     return Response.json({ error: "ОСВ ещё не загружена. Остатки отправлять не с чего." }, { status: 400 });
   }
-  if (mode === "pilot" && wbMappingCount === 0 && ozonMappingCount === 0) {
+  if (mode === "pilot" && wbMappingCount === 0 && ozonMappingCount === 0 && yandexMappingCount === 0) {
     return Response.json({
       error: "Пилотный список пуст или в нём нет позиций, сопоставленных с площадками. "
         + "Отметьте позиции на вкладке «Остатки» и добавьте их в пилот.",
@@ -289,6 +307,15 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
         ? [{ scope: "mappings", message: "Нет активных сопоставлений товаров Ozon." }]
         : [],
     },
+    yandex: {
+      warehouses: yandexWarehouses,
+      mappingCount: yandexMappingCount,
+      completedWarehouseIds: [],
+      sent: 0,
+      failures: yandexWarehouses.length > 0 && yandexMappingCount === 0
+        ? [{ scope: "mappings", message: "Нет активных сопоставлений товаров Яндекс Маркета." }]
+        : [],
+    },
   };
 
   await startSyncRun(db, { runId: jobId, trigger: "full_sync", actorEmail: ownerEmail, osvUploadId });
@@ -308,6 +335,7 @@ async function startJob(db: D1Database, ownerEmail: string, mode: StockSyncMode,
     osvUploadId,
     wildberries: { warehouses: wbWarehouses, mappingCount: wbMappingCount },
     ozon: { warehouses: ozonWarehouses, mappingCount: ozonMappingCount, batchSize: OZON_MAPPING_BATCH_SIZE },
+    yandex: { warehouses: yandexWarehouses, mappingCount: yandexMappingCount },
   });
 }
 
@@ -449,7 +477,6 @@ async function syncOzonBatch(
         reserveQty: item.reserveQty,
         safetyStock: item.safetyStock,
         manualZero: Boolean(item.manualZero),
-        remoteReserved: remote.reserved,
       }));
     }
     for (const warehouseId of enabledWarehouseIds) {
@@ -467,7 +494,6 @@ async function syncOzonBatch(
           reserveQty: item.reserveQty,
           safetyStock: item.safetyStock,
           manualZero: Boolean(item.manualZero),
-          remoteReserved: 0,
         }));
       }
     }
@@ -558,6 +584,77 @@ async function syncOzonBatch(
   }
 }
 
+/** Магазин Маркета целиком за один шаг: как склад WB, весь ассортимент разом. */
+async function syncYandexWarehouse(
+  db: D1Database,
+  runtime: ReturnType<typeof getRuntimeEnv>,
+  job: FullSyncJob,
+  warehouseId: string,
+) {
+  const yandex = job.yandex;
+  const warehouse = yandex?.warehouses.find((item) => item.externalId === warehouseId);
+  if (!yandex || !warehouse) return Response.json({ error: "Магазин Яндекс Маркета не входит в текущую синхронизацию." }, { status: 400 });
+  if (yandex.completedWarehouseIds.includes(warehouseId)) {
+    return Response.json({ ok: true, alreadyProcessed: true, sent: yandex.mappingCount });
+  }
+  const previousFailure = yandex.failures.find((failure) => failure.scope === warehouseId);
+  if (previousFailure) return Response.json({ ok: false, alreadyProcessed: true, sent: 0, error: previousFailure.message }, { status: 207 });
+
+  const stale = await assertOsvUnchanged(db, job);
+  if (stale) return stale;
+
+  try {
+    const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+    if (!credentials.YANDEX_API_KEY) throw new Error("Api-Key Яндекс Маркета не добавлен.");
+
+    const basis = await readStockBasis(db, "yandex", pilotFilterSql(job.pilotOnly ? "pilot" : "auto"));
+    // Гард: одна некорректная строка — и на Маркет не уходит ничего.
+    const rows = basis.map((item) => buildSendableRow({
+      marketplaceId: "yandex",
+      warehouseId,
+      externalSku: item.externalSku,
+      productSku: item.sourceSku,
+      article: item.article,
+      size: item.size,
+      osvQty: item.osvQty,
+      reserveQty: item.reserveQty,
+      safetyStock: item.safetyStock,
+      manualZero: Boolean(item.manualZero),
+    }));
+    if (rows.length === 0) throw new Error("Не найдено сопоставлений товаров Яндекс Маркета.");
+
+    await updateYandexStocks(
+      credentials.YANDEX_API_KEY,
+      warehouseId,
+      rows.map((row) => ({ offerId: row.externalSku, count: row.sentQty })),
+    );
+
+    yandex.completedWarehouseIds.push(warehouseId);
+    yandex.sent += rows.length;
+    await logStockRows(db, job.jobId, job.ownerEmail, rows.map((row): LogRow => ({ ...row, apiStatus: "success" })));
+    await markWarehouseSync(db, "yandex", warehouseId, true);
+    await saveJob(db, job);
+    return Response.json({ ok: true, sent: rows.length, warehouse: warehouse.name });
+  } catch (error) {
+    const guard = isStockGuardError(error);
+    const message = messageFrom(error, `Не удалось обновить склад ${warehouse.name}.`);
+    const retryAfterSeconds = retryAfterSecondsOf(error);
+    if (retryAfterSeconds !== null) {
+      return Response.json({ ok: false, retry: true, retryAfterSeconds, warehouse: warehouse.name, error: message }, { status: 429 });
+    }
+    yandex.failures.push({ scope: warehouseId, message });
+    await logStockRows(db, job.jobId, job.ownerEmail, [{
+      ...(guard ? (error as { row: Partial<SendableRow> }).row : { warehouseId }),
+      marketplaceId: "yandex",
+      apiStatus: guard ? "blocked" : "error",
+      apiMessage: message,
+    } as LogRow]);
+    await markWarehouseSync(db, "yandex", warehouseId, false, message);
+    await saveJob(db, job);
+    return Response.json({ ok: false, sent: 0, warehouse: warehouse.name, error: message, guard }, { status: guard ? 422 : 207 });
+  }
+}
+
 async function finishJob(db: D1Database, job: FullSyncJob) {
   const wbPending = job.wildberries.warehouses.filter((warehouse) => (
     !job.wildberries.completedWarehouseIds.includes(warehouse.externalId)
@@ -568,6 +665,14 @@ async function finishJob(db: D1Database, job: FullSyncJob) {
   }
   if (job.ozon.warehouses.length > 0 && job.ozon.mappingCount > 0 && !job.ozon.done) {
     job.ozon.failures.push({ scope: "incomplete", message: "Синхронизация товаров Ozon не завершена." });
+  }
+  const yandex = job.yandex ?? { warehouses: [], mappingCount: 0, completedWarehouseIds: [], sent: 0, failures: [] };
+  const yandexPending = yandex.warehouses.filter((warehouse) => (
+    !yandex.completedWarehouseIds.includes(warehouse.externalId)
+    && !yandex.failures.some((failure) => failure.scope === warehouse.externalId)
+  ));
+  if (yandexPending.length > 0) {
+    yandex.failures.push({ scope: "incomplete", message: `Не обработано магазинов Яндекс Маркета: ${yandexPending.length}.` });
   }
 
   const wbActive = job.wildberries.warehouses.length > 0;
@@ -583,7 +688,13 @@ async function finishJob(db: D1Database, job: FullSyncJob) {
     && job.ozon.processedMappings >= job.ozon.mappingCount
     && job.ozon.failures.length === 0
   );
-  const ok = wbOk && ozonOk;
+  const yandexActive = yandex.warehouses.length > 0;
+  const yandexOk = !yandexActive || (
+    yandex.mappingCount > 0
+    && yandex.failures.length === 0
+    && yandex.completedWarehouseIds.length === yandex.warehouses.length
+  );
+  const ok = wbOk && ozonOk && yandexOk;
   const finishedAt = new Date().toISOString();
   const summary = {
     ok,
@@ -605,6 +716,13 @@ async function finishJob(db: D1Database, job: FullSyncJob) {
       skippedMappings: job.ozon.skippedMappings,
       reserveDrift: job.ozon.reserveDrift ?? 0,
       failures: job.ozon.failures,
+    },
+    yandex: {
+      mappingCount: yandex.mappingCount,
+      warehouseCount: yandex.warehouses.length,
+      completedWarehouseCount: yandex.completedWarehouseIds.length,
+      sent: yandex.sent,
+      failures: yandex.failures,
     },
   };
   const statements = [
@@ -640,12 +758,25 @@ async function finishJob(db: D1Database, job: FullSyncJob) {
     ));
     if (ozonOk) statements.push(db.prepare("UPDATE marketplaces SET last_sync_at = CURRENT_TIMESTAMP WHERE id = 'ozon'"));
   }
+  if (yandexActive) {
+    statements.push(db.prepare(
+      `INSERT INTO sync_events (marketplace_id, direction, kind, status, item_count, message)
+       VALUES ('yandex', 'outbound', 'stocks', ?, ?, ?)`,
+    ).bind(
+      yandexOk ? "success" : "error",
+      yandex.sent,
+      yandexOk
+        ? `Полная синхронизация: ${yandex.mappingCount} товаров, магазинов: ${yandex.warehouses.length}.`
+        : `Полная синхронизация завершена частично. Ошибок: ${yandex.failures.length}.`,
+    ));
+    if (yandexOk) statements.push(db.prepare("UPDATE marketplaces SET last_sync_at = CURRENT_TIMESTAMP WHERE id = 'yandex'"));
+  }
   await db.batch(statements);
   await finishSyncRun(
     db,
     job.jobId,
     ok ? "success" : "partial",
-    ok ? null : [...job.wildberries.failures, ...job.ozon.failures][0]?.message ?? "Синхронизация завершена частично.",
+    ok ? null : [...job.wildberries.failures, ...job.ozon.failures, ...yandex.failures][0]?.message ?? "Синхронизация завершена частично.",
   );
   // После полной выгрузки на площадках уже актуальные числа: очередь
   // доотправки обнуляется, чтобы не отправлять то же самое второй раз.
@@ -680,11 +811,13 @@ export async function GET() {
   // из итогового отчёта, когда остатки на площадках уже перезаписаны.
   // Считается по текущему режиму: в пилотном это только пилотные позиции.
   const pilotSql = pilotFilterSql((await readStockSyncState(runtime.DB)).mode);
-  const [wbWarehouses, ozonWarehouses, wbMappingCount, ozonMappingCount] = await Promise.all([
+  const [wbWarehouses, ozonWarehouses, yandexWarehouses, wbMappingCount, ozonMappingCount, yandexMappingCount] = await Promise.all([
     readWarehouses(runtime.DB, "wildberries"),
     readWarehouses(runtime.DB, "ozon"),
+    readWarehouses(runtime.DB, "yandex"),
     readMappingCount(runtime.DB, "wildberries", pilotSql),
     readMappingCount(runtime.DB, "ozon", pilotSql),
+    readMappingCount(runtime.DB, "yandex", pilotSql),
   ]);
 
   const startedAt = job ? Date.parse(job.startedAt) : Number.NaN;
@@ -699,6 +832,7 @@ export async function GET() {
     scope: {
       wildberries: { mappingCount: wbMappingCount, warehouseCount: wbWarehouses.length },
       ozon: { mappingCount: ozonMappingCount, warehouseCount: ozonWarehouses.length },
+      yandex: { mappingCount: yandexMappingCount, warehouseCount: yandexWarehouses.length },
     },
   });
 }
@@ -744,6 +878,10 @@ export async function POST(request: Request) {
     const offset = Number(body.offset);
     if (!Number.isInteger(offset) || offset < 0) return Response.json({ error: "Некорректный номер пакета Ozon." }, { status: 400 });
     return syncOzonBatch(runtime.DB, runtime, job, offset);
+  }
+  if (body?.action === "yandex") {
+    const warehouseId = typeof body.warehouseId === "string" ? body.warehouseId : "";
+    return syncYandexWarehouse(runtime.DB, runtime, job, warehouseId);
   }
   if (body?.action === "finish") return finishJob(runtime.DB, job);
   if (body?.action === "cancel") {

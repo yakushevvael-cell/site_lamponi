@@ -39,6 +39,7 @@ type StockRow = {
   /** Внешний код позиции на площадке; null — сопоставления нет, отправлять некуда. */
   wbSku: string | null;
   ozonSku: string | null;
+  yandexSku?: string | null;
   pilot: number | boolean;
   updatedAt: string;
 };
@@ -87,7 +88,7 @@ type StockTotals = {
 
 /** Строка отчёта выборочной синхронизации: что посчитали и что ушло на площадку. */
 type SelectedSyncRow = {
-  marketplaceId: "wildberries" | "ozon";
+  marketplaceId: "wildberries" | "ozon" | "yandex";
   warehouseId: string;
   warehouseName: string;
   sourceSku: string;
@@ -107,6 +108,7 @@ type SelectedSyncResult = {
   unmapped: string[];
   wildberries: { warehouseCount: number; mappingCount: number; sent: number };
   ozon: { warehouseCount: number; mappingCount: number; sent: number; reserveDrift: number };
+  yandex?: { warehouseCount: number; mappingCount: number; sent: number };
   failures: string[];
   rows: SelectedSyncRow[];
 };
@@ -186,6 +188,7 @@ function SyncScopeSummary({ scope }: { scope: SyncState["scope"] }) {
   const entries = [
     { name: "Wildberries", entry: scope.wildberries },
     { name: "Ozon", entry: scope.ozon },
+    ...(scope.yandex ? [{ name: "Яндекс Маркет", entry: scope.yandex }] : []),
   ];
   const total = entries.reduce((sum, item) => sum + item.entry.mappingCount * item.entry.warehouseCount, 0);
   return (
@@ -221,12 +224,13 @@ function SyncScopeSummary({ scope }: { scope: SyncState["scope"] }) {
 function MappingBadges({ row }: { row: StockRow }) {
   return (
     <span className="flex flex-wrap items-center gap-1">
-      {!row.wbSku && !row.ozonSku
+      {!row.wbSku && !row.ozonSku && !row.yandexSku
         ? <Badge variant="outline" className="border-dashed text-muted-foreground">Не сопоставлен</Badge>
         : (
           <>
             {row.wbSku ? <Badge className="bg-violet-100 text-violet-900 hover:bg-violet-100" title={`chrtId ${row.wbSku}`}>WB</Badge> : null}
             {row.ozonSku ? <Badge className="bg-blue-100 text-blue-900 hover:bg-blue-100" title={`offer_id ${row.ozonSku}`}>Ozon</Badge> : null}
+            {row.yandexSku ? <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100" title={`offerId ${row.yandexSku}`}>YM</Badge> : null}
           </>
         )}
       {row.pilot ? (
@@ -401,7 +405,8 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const selectedMapping = useMemo(() => ({
     wildberries: selectedRows.filter((row) => Boolean(row.wbSku)).length,
     ozon: selectedRows.filter((row) => Boolean(row.ozonSku)).length,
-    unmapped: selectedRows.filter((row) => !row.wbSku && !row.ozonSku).length,
+    yandex: selectedRows.filter((row) => Boolean(row.yandexSku)).length,
+    unmapped: selectedRows.filter((row) => !row.wbSku && !row.ozonSku && !row.yandexSku).length,
   }), [selectedRows]);
 
   const selectedPilot = useMemo(() => ({
@@ -578,7 +583,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       const data = await response.json() as SelectedSyncResult & { error?: string };
       if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Синхронизация не выполнена.");
       setSelectedResult(data);
-      const sent = data.wildberries.sent + data.ozon.sent;
+      const sent = data.wildberries.sent + data.ozon.sent + (data.yandex?.sent ?? 0);
       if (data.ok) toast.success("Выбранные остатки отправлены", { description: `Позиций: ${data.selected}. Отправлено значений: ${sent}.` });
       else toast.warning("Отправлено частично", { description: data.failures[0] ?? `Отправлено значений: ${sent}.` });
       await load(query);
@@ -602,7 +607,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       if (summary.ok) {
         toast.success("Все остатки синхронизированы", { description });
       } else {
-        const failure = [...summary.wildberries.failures, ...summary.ozon.failures][0]?.message;
+        const failure = [...summary.wildberries.failures, ...summary.ozon.failures, ...(summary.yandex?.failures ?? [])][0]?.message;
         toast.warning("Синхронизация завершена частично", { description: failure ? `${description} ${failure}` : description });
       }
       await load(query);
@@ -695,7 +700,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           <AlertDialogHeader>
             <AlertDialogTitle>Режим выгрузки остатков</AlertDialogTitle>
             <AlertDialogDescription>
-              Один переключатель решает, кто управляет остатками на Wildberries и Ozon — сервис или вы.
+              Один переключатель решает, кто управляет остатками на Wildberries, Ozon и Яндекс Маркете — сервис или вы.
               Загрузка заказов идёт в любом режиме: она только читает данные с площадок.
             </AlertDialogDescription>
           </AlertDialogHeader>
@@ -761,7 +766,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               <AlertDialogContent>
                 <AlertDialogHeader>
                   <AlertDialogTitle>Обнулить {selected.size} позиций?</AlertDialogTitle>
-                  <AlertDialogDescription>Сервис установит доступный остаток 0 для выбранных сочетаний «артикул + размер» и отправит ноль только по найденным соответствиям WB и Ozon. Физический остаток ОСВ сохранится.</AlertDialogDescription>
+                  <AlertDialogDescription>Сервис установит доступный остаток 0 для выбранных сочетаний «артикул + размер» и отправит ноль только по найденным соответствиям WB, Ozon и Яндекс Маркета. Физический остаток ОСВ сохранится.</AlertDialogDescription>
                 </AlertDialogHeader>
                 <AlertDialogFooter>
                   <AlertDialogCancel>Отмена</AlertDialogCancel>
@@ -781,7 +786,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                   <AlertDialogHeader>
                     <AlertDialogTitle>Синхронизировать {selected.size} позиций?</AlertDialogTitle>
                     <AlertDialogDescription>
-                      Сервис пересчитает резервы по текущим заказам и отправит остаток только по выбранным позициям — на все включённые склады WB и Ozon.
+                      Сервис пересчитает резервы по текущим заказам и отправит остаток только по выбранным позициям — на все включённые склады WB, Ozon и Яндекс Маркета.
                       Формула та же, что и при полной синхронизации: ОСВ минус активные резервы, минус страховой запас, с учётом ручного обнуления.
                       Остальной ассортимент не затрагивается.
                     </AlertDialogDescription>
@@ -791,6 +796,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                     <ul className="mt-1.5 space-y-1 text-muted-foreground">
                       <li>Wildberries: {selectedMapping.wildberries} из {selected.size}</li>
                       <li>Ozon: {selectedMapping.ozon} из {selected.size}</li>
+                      <li>Яндекс Маркет: {selectedMapping.yandex} из {selected.size}</li>
                     </ul>
                     {selectedMapping.unmapped > 0 ? (
                       <p className="mt-2 font-medium text-amber-700">
@@ -819,7 +825,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
                     <AlertDialogHeader>
                       <AlertDialogTitle>Синхронизировать все остатки?</AlertDialogTitle>
                       <AlertDialogDescription>
-                        Сервис перезапишет остатки всех сопоставленных товаров на всех подключённых складах WB и Ozon. Будут использованы текущая ОСВ, активные резервы, страховой запас и ручные обнуления.
+                        Сервис перезапишет остатки всех сопоставленных товаров на всех подключённых складах WB, Ozon и Яндекс Маркета. Будут использованы текущая ОСВ, активные резервы, страховой запас и ручные обнуления.
                       </AlertDialogDescription>
                     </AlertDialogHeader>
                     {scope ? <SyncScopeSummary scope={scope} /> : null}
@@ -943,6 +949,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               Позиций выбрано: {selectedResult?.selected ?? 0}.
               {" "}Wildberries: отправлено {selectedResult?.wildberries.sent ?? 0} значений на {selectedResult?.wildberries.warehouseCount ?? 0} складов.
               {" "}Ozon: отправлено {selectedResult?.ozon.sent ?? 0} пар товар–склад.
+              {selectedResult?.yandex?.warehouseCount ? ` Яндекс Маркет: отправлено ${selectedResult.yandex.sent} значений.` : ""}
               {selectedResult?.unmapped.length ? ` Без сопоставления на площадках: ${selectedResult.unmapped.length}.` : ""}
             </AlertDialogDescription>
           </AlertDialogHeader>

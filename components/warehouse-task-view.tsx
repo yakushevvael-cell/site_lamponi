@@ -350,7 +350,7 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
             <AlertDialogTitle>Товара нет в ячейке?</AlertDialogTitle>
             <AlertDialogDescription>
               {notFoundTarget?.article}{notFoundTarget?.size ? `, размер ${notFoundTarget.size}` : ""} —
-              остаток по артикулу сразу уйдёт в ноль на Wildberries и Ozon, чтобы его не заказали снова.
+              остаток по артикулу сразу уйдёт в ноль на Wildberries, Ozon и Яндекс Маркете, чтобы его не заказали снова.
               Артикул попадёт в проблемные: разбирает кладовщик, снимает блокировку начальник склада.
             </AlertDialogDescription>
           </AlertDialogHeader>

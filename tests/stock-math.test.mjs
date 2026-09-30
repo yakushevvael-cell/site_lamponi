@@ -5,46 +5,66 @@ import {
   assertSendable,
   buildSendableRow,
   computeAvailable,
-  ozonTotalStock,
-  wildberriesAmount,
+  marketplaceAmount,
 } from "../lib/stock-math.mjs";
 
 const base = { osvQty: 1, reserveQty: 0, safetyStock: 0 };
+const marketplaces = ["wildberries", "ozon", "yandex"];
+
+function sentFor(marketplaceId, basis) {
+  return buildSendableRow({
+    marketplaceId,
+    warehouseId: "1",
+    externalSku: "1001",
+    ...basis,
+  }).sentQty;
+}
 
 test("сценарий 1: ОСВ 1, резерв 0 — на склад уходит 1", () => {
   assert.equal(computeAvailable(base), 1);
-  assert.equal(wildberriesAmount(base), 1);
-  assert.equal(ozonTotalStock(base, 0), 1);
+  assert.equal(marketplaceAmount(base), 1);
 });
 
 test("сценарий 2: ОСВ 1, резерв 1 и больше — уходит 0", () => {
   assert.equal(computeAvailable({ ...base, reserveQty: 1 }), 0);
   assert.equal(computeAvailable({ ...base, reserveQty: 5 }), 0);
-  assert.equal(wildberriesAmount({ ...base, reserveQty: 5 }), 0);
+  assert.equal(marketplaceAmount({ ...base, reserveQty: 5 }), 0);
 });
 
-test("сценарий 3: резерв Ozon не может поднять остаток выше ОСВ", () => {
-  // Именно этот случай давал 102 при остатке 1.
-  assert.equal(ozonTotalStock(base, 101), 1);
-  assert.equal(ozonTotalStock({ osvQty: 1, reserveQty: 1, safetyStock: 0 }, 101), 1);
-  assert.equal(ozonTotalStock({ osvQty: 10, reserveQty: 3, safetyStock: 0 }, 3), 10);
-  assert.equal(ozonTotalStock({ osvQty: 10, reserveQty: 3, safetyStock: 0 }, 99), 10);
+test("на WB, Ozon и Маркет уходит одно и то же число: ОСВ − резерв − страховой", () => {
+  // Пример из обсуждения: ОСВ 10, резерв 2 — раньше в Ozon уходило 10, теперь 8.
+  for (const marketplaceId of marketplaces) {
+    assert.equal(sentFor(marketplaceId, { osvQty: 10, reserveQty: 2, safetyStock: 0 }), 8, marketplaceId);
+    assert.equal(sentFor(marketplaceId, { osvQty: 10, reserveQty: 2, safetyStock: 3 }), 5, marketplaceId);
+    assert.equal(sentFor(marketplaceId, { osvQty: 1, reserveQty: 0, safetyStock: 0 }), 1, marketplaceId);
+  }
 });
 
-test("резерв Ozon возвращается только в размере нашего собственного резерва", () => {
-  // Наш резерв 3, у Ozon 1: возвращаем 1, свободным у Ozon останется ровно 7.
-  assert.equal(ozonTotalStock({ osvQty: 10, reserveQty: 3, safetyStock: 0 }, 1), 8);
+test("резерв площадки не добавляется к отправляемому значению", () => {
+  // Даже если вызывающий код по старой памяти передал резерв площадки.
+  const row = buildSendableRow({
+    marketplaceId: "ozon",
+    warehouseId: "1",
+    externalSku: "П-3120з",
+    osvQty: 10,
+    reserveQty: 3,
+    safetyStock: 0,
+    remoteReserved: 3,
+  });
+  assert.equal(row.sentQty, 7);
+  assert.equal(row.sentQty, row.computedQty);
 });
 
 test("страховой запас уменьшает отправляемое значение", () => {
   assert.equal(computeAvailable({ osvQty: 10, reserveQty: 2, safetyStock: 3 }), 5);
-  assert.equal(ozonTotalStock({ osvQty: 10, reserveQty: 2, safetyStock: 3 }, 2), 7);
+  assert.equal(marketplaceAmount({ osvQty: 10, reserveQty: 2, safetyStock: 3 }), 5);
 });
 
-test("ручное обнуление отправляет ровно ноль на обе площадки", () => {
+test("ручное обнуление отправляет ровно ноль на все площадки", () => {
   const manual = { osvQty: 10, reserveQty: 0, safetyStock: 0, manualZero: true };
-  assert.equal(wildberriesAmount(manual), 0);
-  assert.equal(ozonTotalStock(manual, 4), 0);
+  for (const marketplaceId of marketplaces) {
+    assert.equal(sentFor(marketplaceId, manual), 0, marketplaceId);
+  }
 });
 
 test("дробные и мусорные значения приводятся к целым", () => {
@@ -74,12 +94,11 @@ test("сценарий 6: два склада получают одинаков�
     osvQty: 4,
     reserveQty: 1,
     safetyStock: 0,
-    remoteReserved: 1,
   };
   const first = buildSendableRow({ ...input, warehouseId: "111" });
   const second = buildSendableRow({ ...input, warehouseId: "222" });
   assert.equal(first.sentQty, second.sentQty);
-  assert.equal(first.sentQty, 4);
+  assert.equal(first.sentQty, 3);
   assert.ok(first.sentQty <= first.osvQty);
 });
 

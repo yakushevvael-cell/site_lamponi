@@ -1,17 +1,17 @@
 import { authorizeApi } from "@/lib/app-auth";
 import { bulkStockSyncScope, pilotFilterSql } from "@/lib/sync-pause";
 import { getMarketplaceCredentials } from "@/lib/credentials";
-import { getOzonStocksByWarehouse, updateOzonStocks } from "@/lib/ozon";
+import { updateOzonStocks } from "@/lib/ozon";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow } from "@/lib/stock-log";
 import { buildSendableRow, isStockGuardError, type SendableRow } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { updateYandexStocks } from "@/lib/yandex";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 const ACTIVE_JOB_TTL_MS = 30 * 60 * 1000;
-const OZON_LOOKUP_CHUNK = 1000;
 
-type MarketplaceId = "wildberries" | "ozon";
+type MarketplaceId = "wildberries" | "ozon" | "yandex";
 
 type WarehouseRow = {
   marketplaceId: MarketplaceId;
@@ -74,20 +74,6 @@ async function readStockBasis(db: D1Database, marketplaceId: MarketplaceId, pilo
   return rows.results;
 }
 
-/** Резерв Ozon по паре товар–склад: нужен, чтобы вернуть в `stock` ровно ту часть, что мы вычли. */
-async function readOzonReserved(clientId: string, apiKey: string, offerIds: string[], warehouseId: string) {
-  const reserved = new Map<string, number>();
-  for (let start = 0; start < offerIds.length; start += OZON_LOOKUP_CHUNK) {
-    const chunk = offerIds.slice(start, start + OZON_LOOKUP_CHUNK);
-    const remote = await getOzonStocksByWarehouse(clientId, apiKey, chunk);
-    for (const stock of remote) {
-      if (String(stock.warehouseId) !== warehouseId) continue;
-      reserved.set(stock.offerId, Number(stock.reserved) || 0);
-    }
-  }
-  return reserved;
-}
-
 /**
  * Отправляет на склад рассчитанный остаток (mode = "publish") либо честный ноль
  * (mode = "zero", ТЗ п. 6). Возвращает строки для журнала. Любая ошибка API
@@ -127,11 +113,32 @@ async function pushWarehouseStock(
     return { rows, sent: stocks.length };
   }
 
+  if (marketplaceId === "yandex") {
+    const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+    if (!credentials.YANDEX_API_KEY) throw new Error("Api-Key Яндекс Маркета не добавлен.");
+    // Склад магазина DBS — это сам магазин: его номер и есть campaignId.
+    const rows = basis.map((item) => buildSendableRow({
+      marketplaceId: "yandex",
+      warehouseId,
+      externalSku: item.externalSku,
+      productSku: item.sourceSku,
+      article: item.article,
+      size: item.size,
+      osvQty: item.osvQty,
+      reserveQty: item.reserveQty,
+      safetyStock: item.safetyStock,
+      manualZero: mode === "zero" ? true : Boolean(item.manualZero),
+    }));
+    await updateYandexStocks(
+      credentials.YANDEX_API_KEY,
+      warehouseId,
+      rows.map((row) => ({ offerId: row.externalSku, count: row.sentQty })),
+    );
+    return { rows, sent: rows.length };
+  }
+
   const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
   if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Client-Id или API-ключ Ozon не добавлен.");
-  const reserved = mode === "publish"
-    ? await readOzonReserved(credentials.OZON_CLIENT_ID, credentials.OZON_API_KEY, basis.map((item) => item.externalSku), warehouseId)
-    : new Map<string, number>();
 
   const rows = basis.map((item) => buildSendableRow({
     marketplaceId: "ozon",
@@ -145,7 +152,6 @@ async function pushWarehouseStock(
     safetyStock: item.safetyStock,
     // При отключении склада передаём ровно ноль — не «резерв», как было раньше.
     manualZero: mode === "zero" ? true : Boolean(item.manualZero),
-    remoteReserved: reserved.get(item.externalSku) ?? 0,
   }));
 
   const failures = await updateOzonStocks(
@@ -186,7 +192,7 @@ export async function POST(request: Request) {
    * «последняя успешная выгрузка» должна означать реальную отправку.
    */
   const pushStock = body?.pushStock !== false;
-  if ((marketplaceId !== "wildberries" && marketplaceId !== "ozon") || !warehouseId || typeof publishFullStock !== "boolean") {
+  if ((marketplaceId !== "wildberries" && marketplaceId !== "ozon" && marketplaceId !== "yandex") || !warehouseId || typeof publishFullStock !== "boolean") {
     return Response.json({ error: "Некорректные параметры склада." }, { status: 400 });
   }
   // Режим ограничивает отправку, а не настройку: тихое переключение ничего не

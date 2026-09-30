@@ -30,6 +30,8 @@ export async function GET(request: Request) {
          WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'wildberries' AND sm.active = 1 LIMIT 1) AS wbSku,
        (SELECT sm.external_sku FROM sku_mappings sm
          WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'ozon' AND sm.active = 1 LIMIT 1) AS ozonSku,
+       (SELECT sm.external_sku FROM sku_mappings sm
+         WHERE sm.product_sku = p.source_sku AND sm.marketplace_id = 'yandex' AND sm.active = 1 LIMIT 1) AS yandexSku,
        p.pilot AS pilot,
        p.updated_at AS updatedAt
      FROM products p

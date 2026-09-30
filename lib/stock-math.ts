@@ -7,7 +7,7 @@
  */
 import * as core from "./stock-math.mjs";
 
-export type MarketplaceStockId = "wildberries" | "ozon";
+export type MarketplaceStockId = "wildberries" | "ozon" | "yandex";
 
 export type StockBasis = {
   osvQty: number;
@@ -23,8 +23,6 @@ export type SendableInput = StockBasis & {
   productSku?: string | null;
   article?: string | null;
   size?: string | null;
-  /** Значение `reserved`, которое вернул Ozon по паре товар–склад. Для WB не используется. */
-  remoteReserved?: number;
 };
 
 export type SendableRow = {
@@ -42,8 +40,7 @@ export type SendableRow = {
 
 export const toWholeQty = core.toWholeQty as unknown as (value: unknown) => number;
 export const computeAvailable = core.computeAvailable as unknown as (basis: StockBasis) => number;
-export const wildberriesAmount = core.wildberriesAmount as unknown as (basis: StockBasis) => number;
-export const ozonTotalStock = core.ozonTotalStock as unknown as (basis: StockBasis, remoteReserved: number) => number;
+export const marketplaceAmount = core.marketplaceAmount as unknown as (basis: StockBasis) => number;
 export const assertSendable = core.assertSendable as unknown as (row: Partial<SendableRow>) => number;
 export const buildSendableRow = core.buildSendableRow as unknown as (input: SendableInput) => SendableRow;
 

@@ -18,6 +18,7 @@ export type FullSyncStart = {
   osvUploadId: number | null;
   wildberries: { warehouses: SyncWarehouse[]; mappingCount: number };
   ozon: { warehouses: SyncWarehouse[]; mappingCount: number; batchSize: number };
+  yandex?: { warehouses: SyncWarehouse[]; mappingCount: number };
 };
 
 export type FullSyncStep = {
@@ -36,6 +37,8 @@ export type FullSyncSummary = {
   finishedAt: string;
   wildberries: { mappingCount: number; warehouseCount: number; completedWarehouseCount: number; sent: number; failures: Array<{ scope: string; message: string }> };
   ozon: { mappingCount: number; warehouseCount: number; processedMappings: number; sent: number; skippedMappings: number; reserveDrift?: number; failures: Array<{ scope: string; message: string }> };
+  /** Нет в итогах запусков, сделанных до появления выгрузки на Маркет. */
+  yandex?: { mappingCount: number; warehouseCount: number; completedWarehouseCount: number; sent: number; failures: Array<{ scope: string; message: string }> };
 };
 
 export type SyncRunnerOptions = {
@@ -157,6 +160,15 @@ export async function runFullStockSync(options: SyncRunnerOptions = {}): Promise
       if (step.done) break;
     }
 
+    const yandex = plan.yandex ?? { warehouses: [], mappingCount: 0 };
+    if (yandex.mappingCount > 0) {
+      for (let index = 0; index < yandex.warehouses.length; index += 1) {
+        const warehouse = yandex.warehouses[index];
+        onProgress?.(`Яндекс Маркет: магазин ${index + 1} из ${yandex.warehouses.length} — ${warehouse.name}`);
+        await stepWithRetry({ action: "yandex", jobId, warehouseId: warehouse.externalId }, options, "Яндекс Маркет");
+      }
+    }
+
     onProgress?.("Формируем итог синхронизации…");
     const summary = await request<FullSyncSummary>({ action: "finish", jobId }, options.signal);
     finished = true;
@@ -183,7 +195,7 @@ export type SyncState = {
   ownedByMe: boolean;
   stale: boolean;
   lastResult: FullSyncSummary | null;
-  scope: { wildberries: SyncScopeEntry; ozon: SyncScopeEntry };
+  scope: { wildberries: SyncScopeEntry; ozon: SyncScopeEntry; yandex?: SyncScopeEntry };
 };
 
 /** Состояние задания: используется для автоподхвата незавершённого запуска. */
@@ -198,6 +210,9 @@ export function describeSummary(summary: FullSyncSummary) {
     `WB: ${summary.wildberries.completedWarehouseCount} из ${summary.wildberries.warehouseCount} складов`,
     `Ozon: ${summary.ozon.processedMappings} из ${summary.ozon.mappingCount} товаров`,
   ];
+  if (summary.yandex?.warehouseCount) {
+    parts.push(`Маркет: ${summary.yandex.completedWarehouseCount} из ${summary.yandex.warehouseCount} магазинов`);
+  }
   if (summary.ozon.reserveDrift) {
     parts.push(`расхождение резерва по ${summary.ozon.reserveDrift} позициям — проверьте загрузку заказов`);
   }

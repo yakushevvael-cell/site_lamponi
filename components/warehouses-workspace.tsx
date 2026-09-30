@@ -96,6 +96,8 @@ type PendingDisable = { marketplaceId: string; marketplaceName: string; warehous
 type PendingEnable = { marketplaceId: string; marketplaceName: string; warehouse: WarehouseItem; alreadyPublishing: number };
 
 const colors: Record<string, string> = { wildberries: "bg-violet-600", ozon: "bg-blue-600", yandex: "bg-amber-500" };
+/** Площадки, на которые сервис выгружает остатки: у них есть переключатель на складе. */
+const stockMarketplaces = new Set(["wildberries", "ozon", "yandex"]);
 
 export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
   const [integrations, setIntegrations] = useState<Integration[]>([]);
@@ -139,7 +141,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
   }, [load]);
 
   async function refreshWarehouses(integration: Integration) {
-    if (integration.id !== "wildberries" && integration.id !== "ozon") return;
+    if (!stockMarketplaces.has(integration.id)) return;
     // ТЗ, п. 5: кнопка и список складов остаются видимыми и без ключа.
     if (!integration.configured) {
       toast.error("Добавьте API-ключ для обновления списка складов.");
@@ -216,7 +218,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
 
     <div className="rounded-2xl border border-blue-200 bg-blue-50 px-5 py-4">
       <p className="text-sm font-semibold text-blue-950">Остатки отправляются только на выбранные склады</p>
-      <p className="mt-1 text-xs leading-5 text-blue-800">Формула доступного остатка для каждого SKU: ОСВ − активные резервы WB и Ozon − страховой запас. Архивные и отключённые склады в синхронизации не участвуют.</p>
+      <p className="mt-1 text-xs leading-5 text-blue-800">Формула доступного остатка для каждого SKU: ОСВ − активные резервы по заказам WB, Ozon и Яндекс Маркета − страховой запас. На все площадки уходит одно и то же число. Архивные и отключённые склады в синхронизации не участвуют.</p>
       <p className="mt-2 text-xs leading-5 text-blue-800">Если остатки на складе выставлены вручную, при переключении отметьте «не отправлять»: флаг изменится, а значения на площадке останутся прежними. У такого склада строка «Последняя успешная выгрузка» не обновляется — по ней видно, что сервис его ещё не наполнял.</p>
     </div>
 
@@ -225,7 +227,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
         <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3">
             <span className={`grid size-10 place-items-center rounded-xl text-xs font-bold text-white ${colors[integration.id]}`}>{integration.shortName}</span>
-            <div><CardTitle className="text-base">{integration.name}</CardTitle><p className="mt-1 text-xs text-muted-foreground">FBS</p></div>
+            <div><CardTitle className="text-base">{integration.name}</CardTitle><p className="mt-1 text-xs text-muted-foreground">{integration.id === "yandex" ? "DBS" : "FBS"}</p></div>
           </div>
           <Badge className={integration.connected ? "bg-emerald-100 text-emerald-800 hover:bg-emerald-100" : "bg-muted text-muted-foreground hover:bg-muted"}>
             {integration.connected ? <CheckCircle2 /> : <CircleDashed />}{integration.connected ? "Подключено" : integration.configured ? "Ключ добавлен" : "API-ключ не добавлен"}
@@ -233,7 +235,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
         </div>
       </CardHeader>
       <CardContent className="space-y-4 px-5">
-        {!integration.configured && (integration.id === "wildberries" || integration.id === "ozon")
+        {!integration.configured && stockMarketplaces.has(integration.id)
           ? <p className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-2 text-xs text-amber-900">
               API-ключ не добавлен. Список складов и настройки сохранены, новые остатки не отправляются.
             </p>
@@ -266,7 +268,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
                 <p className="text-xs font-medium">Выгружать остатки</p>
                 <p className="mt-0.5 text-[10px] text-muted-foreground">{warehouse.publishFullStock ? "Выгрузка включена" : "Выгрузка выключена"}</p>
               </div>
-              {canManage && (integration.id === "wildberries" || integration.id === "ozon") ? <div className="flex items-center gap-2">
+              {canManage && stockMarketplaces.has(integration.id) ? <div className="flex items-center gap-2">
                 {isSaving ? <Loader2 className="size-4 animate-spin text-muted-foreground" /> : null}
                 <Switch
                   aria-label={`Выгружать остатки на склад ${warehouse.name}`}
@@ -301,7 +303,7 @@ export function WarehousesWorkspace({ canManage }: { canManage: boolean }) {
           </div>;
         })}</div> : <p className="text-sm text-muted-foreground">Склады не загружены.</p>}
 
-        {canManage && (integration.id === "wildberries" || integration.id === "ozon") ? <Button variant="outline" className="w-full" disabled={Boolean(refreshing) || Boolean(saving)} onClick={() => void refreshWarehouses(integration)}>
+        {canManage && stockMarketplaces.has(integration.id) ? <Button variant="outline" className="w-full" disabled={Boolean(refreshing) || Boolean(saving)} onClick={() => void refreshWarehouses(integration)}>
           {refreshing === integration.id ? <Loader2 className="animate-spin" /> : <RefreshCw />}
           Обновить список складов
         </Button> : null}

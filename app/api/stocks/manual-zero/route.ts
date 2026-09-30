@@ -6,6 +6,7 @@ import { getRuntimeEnv } from "@/lib/runtime-env";
 import { finishSyncRun, logStockRows, newRunId, startSyncRun, type LogRow } from "@/lib/stock-log";
 import type { MarketplaceStockId } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
+import { updateYandexStocks } from "@/lib/yandex";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
 
 type MappingRow = {
@@ -100,6 +101,34 @@ async function pushOzonZeros(
   return { sent: Math.max(0, targets.length - failures.length), failures: failures.map((failure) => failure.message) };
 }
 
+async function pushYandexZeros(
+  db: D1Database,
+  runtime: ReturnType<typeof getRuntimeEnv>,
+  runId: string,
+  actorEmail: string,
+  mappings: MappingRow[],
+  warehouses: WarehouseRow[],
+) {
+  const credentials = await getMarketplaceCredentials(db, runtime, "yandex");
+  if (!credentials.YANDEX_API_KEY || mappings.length === 0 || warehouses.length === 0) return { sent: 0, failures: [] as string[] };
+  const stocks = mappings.map((mapping) => ({ offerId: mapping.externalSku, count: 0 }));
+  const failures: string[] = [];
+  let sent = 0;
+  // Склад магазина DBS — сам магазин: его номер и есть campaignId.
+  for (const warehouse of warehouses) {
+    try {
+      await updateYandexStocks(credentials.YANDEX_API_KEY, warehouse.externalId, stocks);
+      sent += stocks.length;
+      await logStockRows(db, runId, actorEmail, zeroLogRows("yandex", warehouse.externalId, mappings));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : `Яндекс Маркет: магазин ${warehouse.externalId}`;
+      failures.push(message);
+      await logStockRows(db, runId, actorEmail, zeroLogRows("yandex", warehouse.externalId, mappings, message));
+    }
+  }
+  return { sent, failures };
+}
+
 export async function POST(request: Request) {
   const auth = await authorizeApi(true);
   if ("response" in auth) return auth.response;
@@ -137,12 +166,12 @@ export async function POST(request: Request) {
             ${OSV_UNITS_SQL} AS osvQty
      FROM sku_mappings sm
      JOIN products p ON p.source_sku = sm.product_sku
-     WHERE sm.active = 1 AND sm.product_sku IN (${placeholders}) AND sm.marketplace_id IN ('wildberries', 'ozon')`,
+     WHERE sm.active = 1 AND sm.product_sku IN (${placeholders}) AND sm.marketplace_id IN ('wildberries', 'ozon', 'yandex')`,
   ).bind(...sourceSkus).all<MappingRow>();
   const warehouseRows = await db.prepare(
     `SELECT marketplace_id AS marketplaceId, external_id AS externalId
      FROM marketplace_warehouses
-     WHERE remote_active = 1 AND publish_full_stock = 1 AND marketplace_id IN ('wildberries', 'ozon')`,
+     WHERE remote_active = 1 AND publish_full_stock = 1 AND marketplace_id IN ('wildberries', 'ozon', 'yandex')`,
   ).all<WarehouseRow>();
 
   const runId = newRunId();
@@ -152,12 +181,16 @@ export async function POST(request: Request) {
   const ozonMappings = mappingRows.results.filter((row) => row.marketplaceId === "ozon");
   const wbWarehouses = warehouseRows.results.filter((row) => row.marketplaceId === "wildberries");
   const ozonWarehouses = warehouseRows.results.filter((row) => row.marketplaceId === "ozon");
+  const yandexMappings = mappingRows.results.filter((row) => row.marketplaceId === "yandex");
+  const yandexWarehouses = warehouseRows.results.filter((row) => row.marketplaceId === "yandex");
   const results: Record<string, unknown> = {};
   const errors: string[] = [];
   try { results.wildberries = await pushWildberriesZeros(db, runtime, runId, auth.user.email, wbMappings, wbWarehouses); }
   catch (error) { errors.push(error instanceof Error ? error.message : "Ошибка WB"); }
   try { results.ozon = await pushOzonZeros(db, runtime, runId, auth.user.email, ozonMappings, ozonWarehouses); }
   catch (error) { errors.push(error instanceof Error ? error.message : "Ошибка Ozon"); }
+  try { results.yandex = await pushYandexZeros(db, runtime, runId, auth.user.email, yandexMappings, yandexWarehouses); }
+  catch (error) { errors.push(error instanceof Error ? error.message : "Ошибка Яндекс Маркета"); }
 
   await db.prepare(
     `INSERT INTO sync_events (direction, kind, status, item_count, message)

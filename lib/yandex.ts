@@ -391,11 +391,10 @@ export type YandexOfferStock = {
 };
 
 /**
- * Остатки магазина по артикулам — только чтение.
+ * Остатки магазина по артикулам — чтение.
  *
- * Выгрузку остатков на Маркет сервис не делает (см. ЯНДЕКС.md), но смотреть,
- * что лежит на площадке, нужно так же, как на WB и Ozon: для «Истории»
- * позиции на странице «Остатки».
+ * Смотреть, что лежит на площадке, нужно так же, как на WB и Ozon: для
+ * «Истории» позиции на странице «Остатки». Выгрузка — updateYandexStocks.
  */
 export async function getYandexOfferStocks(apiKey: string, campaignId: string, offerIds: string[]): Promise<YandexOfferStock[]> {
   const stocks: YandexOfferStock[] = [];
@@ -440,4 +439,32 @@ export async function getYandexOfferStocks(apiKey: string, campaignId: string, o
     }
   }
   return stocks;
+}
+
+export type YandexStockUpdate = { offerId: string; count: number };
+
+/** Маркет принимает до 2000 артикулов в одном запросе на обновление остатков. */
+const YANDEX_STOCKS_CHUNK = 2000;
+
+/**
+ * Выгрузка остатков магазина.
+ *
+ * Уходит ровно расчёт сайта (lib/stock-math), как и на WB с Ozon. Склад у
+ * магазина DBS один и задаётся самим campaignId, поэтому номер склада в теле
+ * не передаётся. Маркет отвечает на пакет целиком: при ошибке не обновится ни
+ * один артикул пакета, и ошибка пробрасывается наверх.
+ */
+export async function updateYandexStocks(apiKey: string, campaignId: string, stocks: YandexStockUpdate[]) {
+  const updatedAt = new Date().toISOString();
+  for (let start = 0; start < stocks.length; start += YANDEX_STOCKS_CHUNK) {
+    const chunk = stocks.slice(start, start + YANDEX_STOCKS_CHUNK);
+    await yandexRequest(
+      `/v2/campaigns/${campaignId}/offers/stocks`,
+      apiKey,
+      {
+        method: "PUT",
+        body: { skus: chunk.map((stock) => ({ sku: stock.offerId, items: [{ count: stock.count, updatedAt }] })) },
+      },
+    );
+  }
 }

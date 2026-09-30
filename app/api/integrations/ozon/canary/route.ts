@@ -490,7 +490,6 @@ export async function POST() {
         reserveQty: local.reserveQty,
         safetyStock: local.safetyStock,
         manualZero: Boolean(local.manualZero),
-        remoteReserved: remote.reserved,
       });
       return [{
         sourceSku: local.sourceSku,
