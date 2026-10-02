@@ -333,7 +333,7 @@ export const appUsers = sqliteTable(
     email: text("email").primaryKey(),
     phone: text("phone"),
     fullName: text("full_name"),
-    role: text("role", { enum: ["admin", "manager", "user"] }).notNull().default("user"),
+    role: text("role", { enum: ["admin", "deputy", "manager", "user"] }).notNull().default("user"),
     status: text("status", { enum: ["pending", "active", "blocked"] }).notNull().default("pending"),
     /** scrypt-хеш пароля. Сам пароль нигде не хранится. */
     passwordHash: text("password_hash"),

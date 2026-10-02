@@ -12,7 +12,7 @@ export async function GET() {
     `SELECT u.email, u.full_name AS fullName, u.role, u.last_seen_at AS lastSeenAt
      FROM app_users u
      WHERE u.status = 'active'
-       AND (u.role IN ('admin', 'manager')
+       AND (u.role IN ('admin', 'deputy', 'manager')
             OR EXISTS (SELECT 1 FROM user_permissions p WHERE p.email = u.email AND p.code = 'warehouse.pick'))
      ORDER BY u.full_name, u.email`,
   ).all<{ email: string; fullName: string | null; role: string; lastSeenAt: string | null }>();

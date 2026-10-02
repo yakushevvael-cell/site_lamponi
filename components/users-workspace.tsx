@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { Check, ChevronDown, Copy, Crown, KeyRound, ListChecks, Loader2, Shield, ShieldCheck, UserRoundX } from "lucide-react";
+import { Check, ChevronDown, Copy, Crown, KeyRound, ListChecks, Loader2, Shield, ShieldCheck, UserCog, UserRoundX } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -39,8 +39,8 @@ import {
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { PERMISSIONS, PERMISSION_PRESETS, type PermissionCode } from "@/lib/permission-codes";
 
-type UserRole = "admin" | "manager" | "user";
-type AccessLevel = "simple" | "full" | "owner";
+type UserRole = "admin" | "deputy" | "manager" | "user";
+type AccessLevel = "simple" | "full" | "deputy" | "owner";
 type UserRow = {
   email: string;
   fullName: string | null;
@@ -60,6 +60,7 @@ function displayName(user: UserRow) {
 
 function roleLabel(role: UserRole) {
   if (role === "admin") return "Владелец";
+  if (role === "deputy") return "Администратор";
   if (role === "manager") return "Полный доступ";
   return "Простой доступ";
 }
@@ -67,15 +68,20 @@ function roleLabel(role: UserRole) {
 function RoleBadge({ user }: { user: UserRow }) {
   if (user.status === "pending") return <Badge variant="secondary">Права не назначены</Badge>;
   if (user.role === "admin") return <Badge>Владелец</Badge>;
+  if (user.role === "deputy") return <Badge className="bg-amber-100 text-amber-900 hover:bg-amber-100">Администратор</Badge>;
   if (user.role === "manager") return <Badge className="bg-violet-100 text-violet-800 hover:bg-violet-100">Полный доступ</Badge>;
   return <Badge variant="outline">Простой доступ</Badge>;
 }
 
-export function UsersWorkspace() {
+export function UsersWorkspace({ viewerRole }: { viewerRole: UserRole }) {
+  // Подсказка интерфейсу; те же ограничения сервер проверяет сам.
+  const viewerIsOwner = viewerRole === "admin";
+  const viewerCanGrantDeputy = viewerRole === "admin" || viewerRole === "deputy";
   const [users, setUsers] = useState<UserRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [busyEmail, setBusyEmail] = useState<string | null>(null);
   const [fullAccessTarget, setFullAccessTarget] = useState<UserRow | null>(null);
+  const [deputyTarget, setDeputyTarget] = useState<UserRow | null>(null);
   const [ownerTarget, setOwnerTarget] = useState<UserRow | null>(null);
   const [resetTarget, setResetTarget] = useState<UserRow | null>(null);
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
@@ -142,6 +148,11 @@ export function UsersWorkspace() {
     }
   }
 
+  // Владельца не меняет никто, администратора — только владелец и администратор.
+  function isLocked(user: UserRow) {
+    return user.role === "admin" || (user.role === "deputy" && !viewerCanGrantDeputy);
+  }
+
   function requestFullAccess(user: UserRow) {
     setFullAccessTarget(user);
   }
@@ -172,7 +183,7 @@ export function UsersWorkspace() {
   }
 
   function RightsMenu({ user }: { user: UserRow }) {
-    const value: AccessLevel = user.role === "admin" ? "owner" : user.role === "manager" ? "full" : "simple";
+    const value: AccessLevel = user.role === "admin" ? "owner" : user.role === "deputy" ? "deputy" : user.role === "manager" ? "full" : "simple";
     return (
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
@@ -189,13 +200,19 @@ export function UsersWorkspace() {
             onValueChange={(nextValue) => {
               if (nextValue === value) return;
               if (nextValue === "owner") setOwnerTarget(user);
+              else if (nextValue === "deputy") setDeputyTarget(user);
               else if (nextValue === "full") requestFullAccess(user);
               else void update(user.email, "set_role", "Установлен простой доступ", "simple");
             }}
           >
             <DropdownMenuRadioItem value="simple">Простой — просмотр плюс галочки обязанностей</DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="full">Полный — все права администратора</DropdownMenuRadioItem>
-            <DropdownMenuRadioItem value="owner">Владелец — полный доступ, нельзя заблокировать</DropdownMenuRadioItem>
+            <DropdownMenuRadioItem value="full">Полный — пользователи, остатки и синхронизация</DropdownMenuRadioItem>
+            {viewerCanGrantDeputy ? (
+              <DropdownMenuRadioItem value="deputy">Администратор — все права, кроме смены владельца</DropdownMenuRadioItem>
+            ) : null}
+            {viewerIsOwner ? (
+              <DropdownMenuRadioItem value="owner">Владелец — полный доступ, нельзя заблокировать</DropdownMenuRadioItem>
+            ) : null}
           </DropdownMenuRadioGroup>
         </DropdownMenuContent>
       </DropdownMenu>
@@ -207,17 +224,21 @@ export function UsersWorkspace() {
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2"><ShieldCheck className="size-5" /> Доступ к Lamponi Hub</CardTitle>
-          <CardDescription>Разрешите регистрацию по e-mail и сразу назначьте один из двух уровней прав. Владелец защищён от блокировки и изменения роли.</CardDescription>
+          <CardDescription>Разрешите регистрацию по e-mail и сразу назначьте уровень прав. Владелец защищён от блокировки и изменения роли.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
-          <div className="grid gap-3 md:grid-cols-2">
+          <div className="grid gap-3 md:grid-cols-3">
             <div className="rounded-xl border bg-muted/35 p-4">
               <p className="flex items-center gap-2 text-sm font-semibold"><Shield className="size-4" /> Простой доступ</p>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">Просмотр остатков и ручное обнуление. Складские экраны, загрузка ОСВ и суммы — отдельными галочками в «Обязанностях».</p>
             </div>
             <div className="rounded-xl border border-violet-200 bg-violet-50/60 p-4">
               <p className="flex items-center gap-2 text-sm font-semibold text-violet-950"><ShieldCheck className="size-4" /> Полный доступ</p>
-              <p className="mt-1 text-xs leading-5 text-violet-800">Все функции простого доступа, управление пользователями и подключениями, обновление заказов и полная синхронизация остатков.</p>
+              <p className="mt-1 text-xs leading-5 text-violet-800">Все функции простого доступа, все складские права, управление пользователями и полная синхронизация остатков. Без подключений и ключей маркетплейсов.</p>
+            </div>
+            <div className="rounded-xl border border-amber-200 bg-amber-50/60 p-4">
+              <p className="flex items-center gap-2 text-sm font-semibold text-amber-950"><UserCog className="size-4" /> Администратор</p>
+              <p className="mt-1 text-xs leading-5 text-amber-800">Всё, что может владелец: подключения и ключи, ДМДК, выгрузка складов, обновление заказов. Не может назначать владельцев и менять их аккаунты.</p>
             </div>
           </div>
 
@@ -244,28 +265,33 @@ export function UsersWorkspace() {
                       <TableCell className="text-sm text-muted-foreground">{new Date(user.createdAt).toLocaleString("ru-RU")}</TableCell>
                       <TableCell>
                         <div className="flex min-w-max flex-wrap justify-end gap-2">
-                          {user.role === "admin" ? <span className="self-center text-xs text-muted-foreground">Владелец</span> : null}
-                          {user.role !== "admin" && user.status === "pending" ? (
+                          {isLocked(user) ? <span className="self-center text-xs text-muted-foreground">{roleLabel(user.role)}</span> : null}
+                          {!isLocked(user) && user.status === "pending" ? (
                             <>
                               <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => void update(user.email, "approve", "Регистрация разрешена: простой доступ", "simple")}>
                                 {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />} Разрешить: простой
                               </Button>
                               <Button size="sm" disabled={busyEmail === user.email} onClick={() => requestFullAccess(user)}><ShieldCheck className="size-4" /> Разрешить: полный</Button>
-                              <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setOwnerTarget(user)}><Crown className="size-4" /> Назначить владельцем</Button>
+                              {viewerCanGrantDeputy ? (
+                                <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setDeputyTarget(user)}><UserCog className="size-4" /> Разрешить: администратор</Button>
+                              ) : null}
+                              {viewerIsOwner ? (
+                                <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setOwnerTarget(user)}><Crown className="size-4" /> Назначить владельцем</Button>
+                              ) : null}
                             </>
                           ) : null}
-                          {user.role !== "admin" && user.status !== "pending" ? <RightsMenu user={user} /> : null}
+                          {!isLocked(user) && user.status !== "pending" ? <RightsMenu user={user} /> : null}
                           {user.role === "user" && user.status === "active" ? (
                             <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => openDuties(user)}>
                               <ListChecks className="size-4" /> Обязанности{(user.permissions ?? []).length ? `: ${(user.permissions ?? []).length}` : ""}
                             </Button>
                           ) : null}
-                          {user.role !== "admin" && user.status === "blocked" ? (
+                          {!isLocked(user) && user.status === "blocked" ? (
                             <Button size="sm" disabled={busyEmail === user.email} onClick={() => void update(user.email, "approve", "Доступ восстановлен")}>
                               {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <Check className="size-4" />} Разблокировать
                             </Button>
                           ) : null}
-                          {user.role !== "admin" && user.status === "active" ? (
+                          {!isLocked(user) && user.status === "active" ? (
                             <AlertDialog>
                               <AlertDialogTrigger asChild><Button size="sm" variant="outline" className="text-destructive hover:text-destructive" disabled={busyEmail === user.email}><UserRoundX className="size-4" /> Заблокировать</Button></AlertDialogTrigger>
                               <AlertDialogContent>
@@ -274,9 +300,11 @@ export function UsersWorkspace() {
                               </AlertDialogContent>
                             </AlertDialog>
                           ) : null}
-                          <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setResetTarget(user)}>
-                            {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />} Сбросить пароль
-                          </Button>
+                          {(user.role === "deputy" && !viewerCanGrantDeputy) || (user.role === "admin" && !viewerIsOwner) ? null : (
+                            <Button size="sm" variant="outline" disabled={busyEmail === user.email} onClick={() => setResetTarget(user)}>
+                              {busyEmail === user.email ? <Loader2 className="size-4 animate-spin" /> : <KeyRound className="size-4" />} Сбросить пароль
+                            </Button>
+                          )}
                         </div>
                       </TableCell>
                     </TableRow>
@@ -350,7 +378,7 @@ export function UsersWorkspace() {
         <AlertDialogContent>
           <AlertDialogHeader>
             <AlertDialogTitle>Выдать полный доступ?</AlertDialogTitle>
-            <AlertDialogDescription>{fullAccessTarget ? displayName(fullAccessTarget) : "Пользователь"} получит права администратора: сможет управлять пользователями, подключениями маркетплейсов и запускать полную синхронизацию остатков.</AlertDialogDescription>
+            <AlertDialogDescription>{fullAccessTarget ? displayName(fullAccessTarget) : "Пользователь"} получит полный доступ: все складские права, управление пользователями и полная синхронизация остатков. Подключения и ключи маркетплейсов останутся недоступны.</AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Отмена</AlertDialogCancel>
@@ -360,6 +388,33 @@ export function UsersWorkspace() {
               setFullAccessTarget(null);
               void update(user.email, user.status === "pending" ? "approve" : "set_role", user.status === "pending" ? "Регистрация разрешена: полный доступ" : "Выдан полный доступ", "full");
             }}>Выдать полный доступ</AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
+
+      <AlertDialog open={Boolean(deputyTarget)} onOpenChange={(open) => { if (!open) setDeputyTarget(null); }}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Назначить администратором?</AlertDialogTitle>
+            <AlertDialogDescription>
+              {deputyTarget ? displayName(deputyTarget) : "Пользователь"} получит все права владельца: подключения и ключи
+              маркетплейсов, ГИИС ДМДК, выгрузку складов, обновление заказов и управление пользователями. Назначать владельцев
+              и менять их аккаунты администратор не сможет.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Отмена</AlertDialogCancel>
+            <AlertDialogAction onClick={() => {
+              if (!deputyTarget) return;
+              const user = deputyTarget;
+              setDeputyTarget(null);
+              void update(
+                user.email,
+                user.status === "pending" ? "approve" : "set_role",
+                user.status === "pending" ? "Регистрация разрешена: администратор" : "Назначен администратором",
+                "deputy",
+              );
+            }}>Назначить администратором</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>

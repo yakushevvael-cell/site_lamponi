@@ -5,7 +5,7 @@ import { redirect } from "next/navigation";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { getSessionUser } from "@/lib/session";
 
-export type AppRole = "admin" | "manager" | "user";
+export type AppRole = "admin" | "deputy" | "manager" | "user";
 
 export type AppUser = {
   email: string;
@@ -19,14 +19,17 @@ export type AppUser = {
  * ТЗ, п. 13: обновлять список складов, включать и отключать выгрузку,
  * запускать полную синхронизацию и управлять ключами может ТОЛЬКО администратор.
  * Менеджер видит склады и статусы, но ничего не отправляет на маркетплейсы.
+ *
+ * Уровень «Администратор» (deputy) может всё то же, что владелец, кроме
+ * распоряжения владельцами: назначать их и менять их аккаунты нельзя.
  */
 export function hasAdminAccess(user: Pick<AppUser, "role">) {
-  return user.role === "admin";
+  return user.role === "admin" || user.role === "deputy";
 }
 
-/** Расширенный просмотр (аналитика, журнал) — администратор и менеджер. */
+/** Расширенный просмотр (аналитика, журнал) — владелец, администратор и менеджер. */
 export function hasManagerAccess(user: Pick<AppUser, "role">) {
-  return user.role === "admin" || user.role === "manager";
+  return user.role === "admin" || user.role === "deputy" || user.role === "manager";
 }
 
 /**

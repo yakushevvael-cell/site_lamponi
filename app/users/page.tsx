@@ -11,5 +11,5 @@ export default async function UsersPage() {
   // обещает пункт меню и описание уровня прав внутри страницы.
   const user = await requirePageUser("/users");
   if (!hasManagerAccess(user)) redirect("/");
-  return <main className="min-h-svh bg-background"><PageHeader title="Пользователи" description="Заявки на регистрацию и доступ к сервису" /><UsersWorkspace /></main>;
+  return <main className="min-h-svh bg-background"><PageHeader title="Пользователи" description="Заявки на регистрацию и доступ к сервису" /><UsersWorkspace viewerRole={user.role} /></main>;
 }

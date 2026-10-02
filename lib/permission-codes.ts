@@ -1,12 +1,12 @@
 /**
  * Права набором галочек.
  *
- * Уровни доступа («простой», «полный», «владелец») описывают доверие к
+ * Уровни доступа («простой», «полный», «администратор», «владелец») описывают доверие к
  * человеку в целом, а складские обязанности так не описываются: сборщику
  * нужно ровно своё задание, начальнику склада — снятие блокировок, и ни тому,
  * ни другому не нужны цены. Поэтому каждое право — отдельная галочка.
  *
- * Полный доступ и владелец получают все права без галочек: иначе владелец мог
+ * Полный доступ, администратор и владелец получают все права без галочек: иначе владелец мог
  * бы случайно отобрать доступ у самого себя.
  *
  * Файл намеренно без серверных импортов — его читают и страницы, и браузер.
@@ -93,20 +93,21 @@ export const PERMISSION_PRESETS: PermissionPreset[] = [
 ];
 
 /** Уровень доступа, как он называется в интерфейсе. */
-export type AccessLevel = "simple" | "full" | "owner";
+export type AccessLevel = "simple" | "full" | "deputy" | "owner";
 
 export function accessLevelOfRole(role: string): AccessLevel {
   if (role === "admin") return "owner";
+  if (role === "deputy") return "deputy";
   if (role === "manager") return "full";
   return "simple";
 }
 
 /**
  * Полный набор прав пользователя.
- * Полный доступ и владелец — все права, остальным считаются галочки.
+ * Полный доступ, администратор и владелец — все права, остальным считаются галочки.
  */
 export function effectivePermissions(role: string, granted: Iterable<string>): PermissionCode[] {
-  if (role === "admin" || role === "manager") return [...PERMISSION_CODES];
+  if (role === "admin" || role === "deputy" || role === "manager") return [...PERMISSION_CODES];
   const result: PermissionCode[] = [];
   for (const code of granted) if (isPermissionCode(code) && !result.includes(code)) result.push(code);
   return result;

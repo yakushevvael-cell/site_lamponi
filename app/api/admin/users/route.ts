@@ -1,4 +1,4 @@
-import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
+import { authorizeApi, hasAdminAccess, hasManagerAccess } from "@/lib/app-auth";
 import { generateTemporaryPassword, hashPassword } from "@/lib/password.mjs";
 import { isPermissionCode, type PermissionCode } from "@/lib/permission-codes";
 import { writeGrantedPermissions } from "@/lib/permissions";
@@ -52,17 +52,25 @@ export async function POST(request: Request) {
   const action = body?.action;
   const accessLevel = body?.accessLevel;
   if (!email || !["approve", "block", "set_role", "reset_password", "set_permissions"].includes(String(action))) return Response.json({ error: "Некорректное действие." }, { status: 400 });
-  if (action === "set_role" && accessLevel !== "simple" && accessLevel !== "full") return Response.json({ error: "Выберите уровень доступа." }, { status: 400 });
+  const grantedRole = accessLevel === "deputy" ? "deputy" : accessLevel === "full" ? "manager" : accessLevel === "simple" ? "user" : null;
+  if (action === "set_role" && !grantedRole) return Response.json({ error: "Выберите уровень доступа." }, { status: 400 });
   if (email === auth.user.email && (action === "block" || action === "set_role")) return Response.json({ error: "Нельзя изменить права или заблокировать собственный аккаунт." }, { status: 400 });
 
   const target = await runtime.DB.prepare("SELECT role, status FROM app_users WHERE email = ?").bind(email).first<{ role: string; status: string }>();
   if (!target) return Response.json({ error: "Пользователь не найден." }, { status: 404 });
 
+  // Администратор по правам равен владельцу (кроме распоряжения владельцами).
+  // Выдавать этот уровень и трогать аккаунт администратора может только тот,
+  // у кого он есть сам: иначе полный доступ поднял бы себе или коллеге права.
+  if (!hasAdminAccess(auth.user) && (grantedRole === "deputy" || target.role === "deputy")) {
+    return Response.json({ error: "Уровень «Администратор» выдают и меняют только владелец или администратор." }, { status: 403 });
+  }
+
   if (action === "set_permissions") {
-    // Владельцу и полному доступу права уже даны уровнем: галочки им не нужны
-    // и, что важнее, не должны создавать ощущение, что доступ урезан.
+    // Владельцу, администратору и полному доступу права уже даны уровнем: галочки
+    // им не нужны и, что важнее, не должны создавать ощущение, что доступ урезан.
     if (target.role !== "user") {
-      return Response.json({ error: "У полного доступа и владельца все права уже есть — галочки нужны простому уровню." }, { status: 400 });
+      return Response.json({ error: "У полного доступа, администратора и владельца все права уже есть — галочки нужны простому уровню." }, { status: 400 });
     }
     const raw = Array.isArray(body?.permissions) ? body.permissions : [];
     const codes = raw.filter(isPermissionCode) as PermissionCode[];
@@ -72,10 +80,15 @@ export async function POST(request: Request) {
     // всё равно откажет в том, чего больше нет.
     return Response.json({ ok: true, email, permissions: saved });
   }
-  // Сброс пароля разрешён и для владельца: иначе забытый пароль админа
-  // означал бы потерю доступа ко всей системе.
   if (target.role === "admin" && action !== "reset_password") {
     return Response.json({ error: "Права владельца изменить нельзя." }, { status: 403 });
+  }
+  // Сбросивший пароль получает временный пароль и может войти под этим
+  // аккаунтом. Для владельца это означало бы захват его аккаунта, поэтому
+  // пароль владельца сбрасывает только другой владелец. Забытый пароль
+  // единственного владельца восстанавливается через базу на сервере.
+  if (target.role === "admin" && auth.user.role !== "admin") {
+    return Response.json({ error: "Пароль владельца может сбросить только другой владелец." }, { status: 403 });
   }
 
   if (action === "reset_password") {
@@ -101,13 +114,12 @@ export async function POST(request: Request) {
 
   let result;
   if (action === "approve") {
-    const role = accessLevel === "full" ? "manager" : accessLevel === "simple" ? "user" : target.role;
+    const role = grantedRole ?? target.role;
     result = await runtime.DB.prepare(
       "UPDATE app_users SET status = 'active', role = ?, approved_by = ?, approved_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE email = ?",
     ).bind(role, auth.user.email, email).run();
   } else if (action === "set_role") {
-    const role = accessLevel === "full" ? "manager" : "user";
-    result = await runtime.DB.prepare("UPDATE app_users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?").bind(role, email).run();
+    result = await runtime.DB.prepare("UPDATE app_users SET role = ?, updated_at = CURRENT_TIMESTAMP WHERE email = ?").bind(grantedRole, email).run();
   } else {
     result = await runtime.DB.prepare("UPDATE app_users SET status = 'blocked', updated_at = CURRENT_TIMESTAMP WHERE email = ? AND role <> 'admin'").bind(email).run();
   }

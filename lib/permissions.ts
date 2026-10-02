@@ -25,9 +25,9 @@ export async function readGrantedPermissions(email: string): Promise<PermissionC
   return rows.results.map((row) => row.code).filter(isPermissionCode);
 }
 
-/** Права с учётом уровня доступа: полный доступ и владелец получают всё. */
+/** Права с учётом уровня доступа: полный доступ, администратор и владелец получают всё. */
 export async function readEffectivePermissions(user: Pick<AppUser, "email" | "role">): Promise<PermissionCode[]> {
-  if (user.role === "admin" || user.role === "manager") return effectivePermissions(user.role, []);
+  if (user.role === "admin" || user.role === "deputy" || user.role === "manager") return effectivePermissions(user.role, []);
   return effectivePermissions(user.role, await readGrantedPermissions(user.email));
 }
 

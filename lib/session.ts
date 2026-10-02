@@ -21,7 +21,7 @@ const TOUCH_INTERVAL_MS = 15 * 60 * 1000;
 export type SessionUser = {
   email: string;
   fullName: string | null;
-  role: "admin" | "manager" | "user";
+  role: "admin" | "deputy" | "manager" | "user";
   status: "pending" | "active" | "blocked";
   createdAt: string;
 };

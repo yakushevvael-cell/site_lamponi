@@ -19,8 +19,9 @@ export function SiteFrame({ children }: { children: React.ReactNode }) {
     void fetch("/api/auth/me", { cache: "no-store" })
       .then((response) => response.json())
       .then((user: { role?: string; permissions?: string[] }) => {
-        setFullAccess(user.role === "admin" || user.role === "manager");
-        setOwner(user.role === "admin");
+        setFullAccess(user.role === "admin" || user.role === "deputy" || user.role === "manager");
+        // Пункты владельца видит и администратор: сервер пускает его туда так же.
+        setOwner(user.role === "admin" || user.role === "deputy");
         setPermissions(Array.isArray(user.permissions) ? user.permissions : []);
       })
       .catch(() => { setFullAccess(false); setOwner(false); setPermissions([]); });
