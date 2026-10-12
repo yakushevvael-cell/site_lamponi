@@ -264,6 +264,22 @@ test("русские буквы, похожие на латинские, ищу�
   assert.deepEqual(attachCells(items, placements).map((item) => item.cellCode), ["1", "2"]);
 });
 
+test("ячейка находится, если в раскладке длинное тире или лишние пробелы", () => {
+  assert.equal(confusableArticle("К–1234"), confusableArticle("K-1234"));
+  assert.equal(confusableArticle("С-3005\u00A0р "), confusableArticle("C-3005P"));
+  assert.equal(confusableArticle("К 1234"), confusableArticle("К-1234").replace("-", ""));
+
+  const items = [
+    { article: "К-1234", size: "17" },
+    { article: "С-3005Р", size: null },
+  ];
+  const placements = [
+    { article: "К–1234", size: null, cellCode: "5", sortOrder: 5 },
+    { article: " с-3005р\u00A0", size: null, cellCode: "7", sortOrder: 7 },
+  ];
+  assert.deepEqual(attachCells(items, placements).map((item) => item.cellCode), ["5", "7"]);
+});
+
 test("золото — кириллическое «-з» на конце артикула", () => {
   assert.equal(isGoldArticle("С-3254зр001-З"), true);
   assert.equal(isGoldArticle("с-3254зр001-з"), true);

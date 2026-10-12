@@ -19,7 +19,6 @@ import {
   groupByPosting,
   isGoldArticle,
   normalizeBatchSize,
-  placementKey,
   sortByRoute,
   sortByWaiting,
   splitIntoBatches,
@@ -314,9 +313,6 @@ export async function readWaitingSummary(db: D1Database) {
   };
   const postings = availability.ready;
   const placements = await readPlacements(db);
-  // Ключ строится тем же placementKey, что и при сборке задания: иначе
-  // «без ячейки» на главной и в задании посчитались бы по-разному.
-  const cellIndex = new Map<string, unknown>(placements.map((placement) => [placementKey(placement.article, placement.size) as string, placement]));
 
   for (const posting of postings) {
     const key = `${posting.marketplaceId}::${posting.warehouseExternalId ?? ""}`;
@@ -345,10 +341,12 @@ export async function readWaitingSummary(db: D1Database) {
     if (posting.orderedAt && (!group.oldestOrderedAt || posting.orderedAt < group.oldestOrderedAt)) {
       group.oldestOrderedAt = posting.orderedAt;
     }
-    for (const item of posting.items) {
-      const exact = cellIndex.get(placementKey(item.article, item.size) as string)
-        ?? cellIndex.get(placementKey(item.article, null) as string);
-      if (!exact) group.withoutCell += 1;
+    // Ячейка ищется так же, как при создании задания: артикул отделяется от
+    // размера в скобках и сравнивается по виду. Иначе «без ячейки» на главной
+    // и в самом задании посчитались бы по-разному.
+    const split = posting.items.map((item) => splitArticleSize(item.article, item.size) as { article: string; size: string | null });
+    for (const item of attachCells(split, placements) as Array<{ cellCode: string | null }>) {
+      if (!item.cellCode) group.withoutCell += 1;
     }
     groups.set(key, group);
   }
@@ -725,7 +723,41 @@ export async function readTask(db: D1Database, taskId: number) {
   return db.prepare(`SELECT ${TASK_COLUMNS} FROM pick_tasks WHERE id = ?`).bind(taskId).first<PickTask>();
 }
 
+/**
+ * Дозаполняет ячейки строк задания, у которых адреса не было.
+ *
+ * Ячейка записывается в строку при создании задания. Если артикул разложили
+ * по ячейкам позже — задание уже создано утром, а раскладку загрузили днём, —
+ * строка так и оставалась «нет адреса», хотя в справочнике ячейка есть.
+ * Поэтому при каждом чтении задания пустые адреса ищутся заново по текущей
+ * раскладке. Уже записанная ячейка не меняется: сборщик мог по ней идти.
+ */
+async function fillMissingCells(db: D1Database, taskId: number) {
+  const missing = await db.prepare(
+    `SELECT pti.id, pti.article, pti.size
+     FROM pick_task_items pti
+     JOIN pick_tasks pt ON pt.id = pti.task_id
+     WHERE pti.task_id = ? AND pti.cell_code IS NULL AND pt.status NOT IN ('shipped', 'cancelled')`,
+  ).bind(taskId).all<{ id: number; article: string; size: string | null }>();
+  if (missing.results.length === 0) return 0;
+
+  const placements = await readPlacements(db);
+  const found = (attachCells(missing.results, placements) as Array<{ id: number; cellCode: string | null; cellSort: number | null }>)
+    .filter((item) => item.cellCode);
+  if (found.length === 0) return 0;
+
+  const statements = found.map((item) => db.prepare(
+    "UPDATE pick_task_items SET cell_code = ?, cell_sort = ? WHERE id = ? AND cell_code IS NULL",
+  ).bind(item.cellCode, item.cellSort, item.id));
+  for (let start = 0; start < statements.length; start += 100) {
+    await db.batch(statements.slice(start, start + 100));
+  }
+  await refreshTaskCounters(db, taskId);
+  return found.length;
+}
+
 export async function readTaskItems(db: D1Database, taskId: number) {
+  await fillMissingCells(db, taskId);
   const rows = await db.prepare(
     `SELECT id, task_id AS taskId, marketplace_id AS marketplaceId, external_order_id AS externalOrderId,
             external_sku AS externalSku, product_sku AS productSku, article, size, quantity,
