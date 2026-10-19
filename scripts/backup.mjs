@@ -9,7 +9,9 @@
  * Запускается таймером systemd раз в сутки; копии старше срока хранения удаляются.
  */
 import { DatabaseSync } from "node:sqlite";
-import { mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { createReadStream, createWriteStream, mkdirSync, readdirSync, statSync, unlinkSync } from "node:fs";
+import { pipeline } from "node:stream/promises";
+import { createGzip } from "node:zlib";
 import { join, resolve } from "node:path";
 
 const KEEP_DAYS = Number(process.env.BACKUP_KEEP_DAYS ?? 14);
@@ -36,10 +38,15 @@ try {
   database.close();
 }
 
+// Сжимаем копию (SQLite жмётся в несколько раз), иначе бэкапы забивают диск.
+await pipeline(createReadStream(target), createGzip({ level: 6 }), createWriteStream(`${target}.gz`));
+unlinkSync(target);
+log(`Копия сжата: ${target}.gz`);
+
 const cutoff = Date.now() - KEEP_DAYS * 24 * 60 * 60 * 1000;
 let removed = 0;
 for (const name of readdirSync(backupDir)) {
-  if (!name.startsWith("lamponi-") || !name.endsWith(".db")) continue;
+  if (!name.startsWith("lamponi-") || !/\.db(\.gz)?$/.test(name)) continue;
   const path = join(backupDir, name);
   if (statSync(path).mtimeMs < cutoff) {
     unlinkSync(path);

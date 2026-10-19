@@ -11,7 +11,9 @@ export type SyncTrigger = "manual" | "full_sync" | "osv_upload" | "orders_sync" 
 export type SyncRunStatus = "running" | "success" | "partial" | "error" | "cancelled";
 export type LogStatus = "success" | "error" | "blocked" | "skipped";
 
-const LOG_RETENTION_DAYS = 60;
+const LOG_RETENTION_DAYS = 30;
+/** Успешные строки — самые массовые (~1,3 млн в сутки): храним их коротко, иначе база растёт на 0,5 ГБ в день. */
+const SUCCESS_RETENTION_DAYS = 3;
 const BATCH_SIZE = 50;
 
 export type LogRow = Partial<SendableRow> & {
@@ -61,8 +63,9 @@ export async function finishSyncRun(
   ).bind(status, text(message), runId).run();
   await db.prepare(
     `DELETE FROM stock_sync_log
-     WHERE created_at < datetime('now', ?)`,
-  ).bind(`-${LOG_RETENTION_DAYS} days`).run().catch(() => undefined);
+     WHERE created_at < datetime('now', ?)
+        OR (api_status = 'success' AND created_at < datetime('now', ?))`,
+  ).bind(`-${LOG_RETENTION_DAYS} days`, `-${SUCCESS_RETENTION_DAYS} days`).run().catch(() => undefined);
 }
 
 /** Пишет пачку строк журнала. Ошибка записи журнала никогда не роняет синхронизацию. */
