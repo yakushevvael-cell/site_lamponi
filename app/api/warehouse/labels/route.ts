@@ -1,6 +1,7 @@
 /** Этикетки задания: состояние подготовки и запуск фоновой подготовки. */
 import {
   prepareLabelsForTask,
+  readLabelCancelled,
   readLabelErrors,
   readLabelWaiting,
   readPostingBoard,
@@ -30,6 +31,7 @@ export async function GET(request: Request) {
     task,
     summary: await readScanSummary(runtime.DB, taskId),
     errors: await readLabelErrors(runtime.DB, taskId),
+    cancelled: await readLabelCancelled(runtime.DB, taskId),
     waitingLabels: await readLabelWaiting(runtime.DB, taskId),
     board: await readPostingBoard(runtime.DB, taskId),
   });
@@ -41,7 +43,7 @@ export async function POST(request: Request) {
   const runtime = getRuntimeEnv();
   if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
 
-  const body = await request.json().catch(() => null) as { taskId?: unknown; limit?: unknown } | null;
+  const body = await request.json().catch(() => null) as { taskId?: unknown; limit?: unknown; retryStopped?: unknown } | null;
   const taskId = taskIdFrom(body?.taskId);
   if (!taskId) return Response.json({ error: "Не указано задание." }, { status: 400 });
   const limitRaw = Number(body?.limit);
@@ -55,6 +57,8 @@ export async function POST(request: Request) {
     taskId,
     limit,
     actorEmail: auth.user.email,
+    // Строки, на которые WB ответил 409, повторяются только по кнопке.
+    retryStopped: body?.retryStopped === true,
   });
 
   return Response.json({
@@ -62,6 +66,7 @@ export async function POST(request: Request) {
     ...result,
     summary: await readScanSummary(runtime.DB, taskId),
     errors: await readLabelErrors(runtime.DB, taskId),
+    cancelled: await readLabelCancelled(runtime.DB, taskId),
     waitingLabels: await readLabelWaiting(runtime.DB, taskId),
     board: await readPostingBoard(runtime.DB, taskId),
   });

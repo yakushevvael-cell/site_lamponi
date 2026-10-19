@@ -25,6 +25,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
+  Ban,
   Boxes,
   CheckCircle2,
   ClipboardCheck,
@@ -66,6 +67,8 @@ type Summary = {
   labelsReady: number;
   labelsError: number;
   labelsPending: number;
+  /** Отменено площадкой: не ошибка, а «не упаковывать». */
+  labelsCancelled?: number;
 };
 
 /** УПД задания: сверена ли и что не сошлось в последней загрузке. */
@@ -92,6 +95,9 @@ type BoardRow = {
 
 type LabelError = { id: number; externalOrderId: string; article: string | null; error: string | null };
 
+/** Отправление, отменённое площадкой: изделие возвращается в ячейку. */
+type LabelCancelled = { id: number; marketplaceId: string; externalOrderId: string; article: string | null; size: string | null };
+
 /** Отправление, по которому УИН уже у площадки и идёт проверка. */
 type LabelWaiting = {
   id: number;
@@ -117,6 +123,7 @@ type Outcome =
   | { status: "uin_unknown"; uin: string }
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
+  | { status: "cancelled"; uin: string; item: ScanItem; message: string }
   | { status: "label_not_ready"; uin: string; item: ScanItem; error: string | null };
 
 type HistoryRow = { at: string; uin: string; status: Outcome["status"]; text: string };
@@ -152,6 +159,7 @@ const OUTCOME_TEXT: Record<Outcome["status"], string> = {
   repeat: "Этот УИН уже сканировали",
   uin_unknown: "Этого УИН нет в этом сборочном задании",
   foreign_task: "Изделие из другого задания",
+  cancelled: "Заказ отменён — не упаковывать",
   label_not_ready: "Этикетка ещё не готова",
 };
 
@@ -163,6 +171,7 @@ export function WarehouseScanWorkspace() {
   const [sheetCode, setSheetCode] = useState<string | null>(null);
   const [summary, setSummary] = useState<Summary | null>(null);
   const [labelErrors, setLabelErrors] = useState<LabelError[]>([]);
+  const [labelCancelled, setLabelCancelled] = useState<LabelCancelled[]>([]);
   const [labelWaiting, setLabelWaiting] = useState<LabelWaiting[]>([]);
   const [board, setBoard] = useState<BoardRow[]>([]);
   const [outcome, setOutcome] = useState<Outcome | null>(null);
@@ -197,11 +206,13 @@ export function WarehouseScanWorkspace() {
   const loadLabels = useCallback(async (id: number) => {
     const response = await fetch(`/api/warehouse/labels?task=${id}`, { cache: "no-store" });
     const data = await response.json() as {
-      summary?: Summary; errors?: LabelError[]; waitingLabels?: LabelWaiting[]; board?: BoardRow[]; error?: string;
+      summary?: Summary; errors?: LabelError[]; cancelled?: LabelCancelled[];
+      waitingLabels?: LabelWaiting[]; board?: BoardRow[]; error?: string;
     };
     if (!response.ok) throw new Error(data.error ?? "Состояние этикеток не загрузилось.");
     setSummary(data.summary ?? null);
     setLabelErrors(data.errors ?? []);
+    setLabelCancelled(data.cancelled ?? []);
     setLabelWaiting(data.waitingLabels ?? []);
     setBoard(data.board ?? []);
   }, []);
@@ -248,21 +259,25 @@ export function WarehouseScanWorkspace() {
     };
   }, []);
 
-  const prepare = useCallback(async (id: number, limit = 8) => {
+  // retryStopped — только по кнопке: строки, на которые WB ответил 409, сам
+  // стол больше не повторяет.
+  const prepare = useCallback(async (id: number, limit = 8, retryStopped = false) => {
     setPreparing(true);
     try {
       const response = await fetch("/api/warehouse/labels", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ taskId: id, limit }),
+        body: JSON.stringify({ taskId: id, limit, retryStopped }),
       });
       const data = await response.json() as {
         prepared?: number; failed?: number; validating?: number; summary?: Summary;
-        errors?: LabelError[]; waitingLabels?: LabelWaiting[]; board?: BoardRow[]; messages?: string[]; error?: string;
+        errors?: LabelError[]; cancelled?: LabelCancelled[]; waitingLabels?: LabelWaiting[];
+        board?: BoardRow[]; messages?: string[]; error?: string;
       };
       if (!response.ok) throw new Error(data.error ?? "Подготовка не прошла.");
       setSummary(data.summary ?? null);
       setLabelErrors(data.errors ?? []);
+      setLabelCancelled(data.cancelled ?? []);
       setLabelWaiting(data.waitingLabels ?? []);
       setBoard(data.board ?? []);
       for (const message of data.messages ?? []) toast.warning(message);
@@ -279,7 +294,7 @@ export function WarehouseScanWorkspace() {
     if (!taskId || !summary || !summary.updMatched || preparing || offline) return;
     // Отправление из нескольких изделий готовится только после того, как
     // отсканировано целиком: пока не собрано, дёргать площадку нечем.
-    const left = summary.preparable - summary.labelsReady - summary.labelsError;
+    const left = summary.preparable - summary.labelsReady - summary.labelsError - (summary.labelsCancelled ?? 0);
     if (left <= 0) return;
     // Проверка УИН в Ozon идёт минутами. Пока весь остаток — это ожидание
     // площадки, спрашивать чаще незачем: работы от этого не прибавится, а
@@ -393,7 +408,7 @@ export function WarehouseScanWorkspace() {
         beep("warn");
         // Этикетка ещё готовится — подтолкнём подготовку, повторный скан напечатает.
         if (taskId) void prepare(taskId, 4).catch(() => undefined);
-      } else if (result.status === "foreign_task") {
+      } else if (result.status === "foreign_task" || result.status === "cancelled") {
         beep("error");
       } else {
         beep("warn");
@@ -454,7 +469,7 @@ export function WarehouseScanWorkspace() {
     ? "border-emerald-300 bg-emerald-50 text-emerald-950"
     : outcome?.status === "grouped"
       ? "border-sky-400 bg-sky-50 text-sky-950"
-      : outcome?.status === "foreign_task"
+      : outcome?.status === "foreign_task" || outcome?.status === "cancelled"
         ? "border-red-400 bg-red-100 text-red-950"
         : outcome
           ? "border-amber-300 bg-amber-50 text-amber-950"
@@ -553,7 +568,7 @@ export function WarehouseScanWorkspace() {
                 size="sm"
                 variant="outline"
                 disabled={!taskId || preparing || !updInfo?.matched}
-                onClick={() => { if (taskId) void prepare(taskId, 20).catch(() => undefined); }}
+                onClick={() => { if (taskId) void prepare(taskId, 20, true).catch(() => undefined); }}
               >
                 {preparing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Подготовить этикетки
               </Button>
@@ -604,6 +619,7 @@ export function WarehouseScanWorkspace() {
                   </span>
                 ) : null}
                 {summary.labelsError > 0 ? <span className="text-destructive">{summary.labelsError} с ошибкой</span> : null}
+                {summary.labelsCancelled ? <span className="font-semibold text-red-700">{summary.labelsCancelled} отменено — не упаковывать</span> : null}
               </div>
             ) : null}
           </div>
@@ -655,6 +671,19 @@ export function WarehouseScanWorkspace() {
                 <p className="text-lg">Артикул <span className="font-mono font-bold">{outcome.article}</span> относится к заданию {outcome.taskNumber ?? "—"}.</p>
                 <p className="text-sm">Этикетка не напечатана. Отложите изделие и проверьте, из какой партии оно пришло.</p>
               </div>
+            ) : outcome.status === "cancelled" ? (
+              <div className="space-y-1">
+                <p className="flex items-center gap-2 text-xl font-bold"><Ban className="size-6" /> Заказ отменён — не упаковывать</p>
+                <p className="font-mono text-2xl font-bold">{outcome.item.article}{outcome.item.size ? ` / ${outcome.item.size}` : ""}</p>
+                <p className="text-lg">
+                  Верните изделие в ячейку{" "}
+                  <span className="rounded bg-red-200 px-2 font-mono text-3xl font-bold">{outcome.item.cellCode ?? "—"}</span>
+                </p>
+                <p className="text-sm">
+                  {marketplaceLabel(outcome.item.marketplaceId)} · отправление{" "}
+                  <span className="font-mono">{outcome.item.externalOrderId}</span>. {outcome.message}
+                </p>
+              </div>
             ) : outcome.status === "repeat" ? (
               <div className="space-y-1">
                 <p className="flex items-center gap-2 text-xl font-bold"><AlertTriangle className="size-6" /> Повторный скан</p>
@@ -684,7 +713,7 @@ export function WarehouseScanWorkspace() {
                   Отправление <span className="font-mono">{outcome.item.externalOrderId}</span>.
                   {outcome.error ? ` ${outcome.error}` : " Подготовка идёт, повторите скан через несколько секунд."}
                 </p>
-                <Button size="sm" variant="outline" className="mt-2" disabled={preparing} onClick={() => { if (taskId) void prepare(taskId, 5).catch(() => undefined); }}>
+                <Button size="sm" variant="outline" className="mt-2" disabled={preparing} onClick={() => { if (taskId) void prepare(taskId, 5, true).catch(() => undefined); }}>
                   {preparing ? <Loader2 className="size-4 animate-spin" /> : <RefreshCw className="size-4" />} Подготовить сейчас
                 </Button>
               </div>
@@ -783,6 +812,30 @@ export function WarehouseScanWorkspace() {
                   {row.note}
                   {row.exemplarStatus ? ` (статус ${row.exemplarStatus})` : ""}
                 </p>
+              </div>
+            ))}
+          </CardContent>
+        </Card>
+      ) : null}
+
+      {labelCancelled.length > 0 ? (
+        <Card className="border-red-300">
+          <CardHeader className="pb-3">
+            <CardTitle className="flex items-center gap-2 text-base text-red-800">
+              <Ban className="size-4" /> Отменены площадкой — не упаковывать ({labelCancelled.length})
+            </CardTitle>
+            <CardDescription>
+              Этикеток по этим отправлениям не будет. Изделия верните в ячейки: при скане стол покажет, в какую.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="grid gap-2 px-5 md:grid-cols-2">
+            {labelCancelled.map((row) => (
+              <div key={row.id} className="rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-sm">
+                <span className="font-mono">{row.externalOrderId}</span>
+                <span className="ml-2 text-xs text-muted-foreground">{marketplaceLabel(row.marketplaceId)}</span>
+                {row.article ? (
+                  <p className="font-mono text-xs">{row.article}{row.size ? ` / ${row.size}` : ""}</p>
+                ) : null}
               </div>
             ))}
           </CardContent>

@@ -76,6 +76,7 @@ type Item = {
   shipmentDeadline: string | null;
   resolvedBy: string | null;
   resolvedAt: string | null;
+  orderCancelled?: boolean;
 };
 
 const MARKETPLACE_LABEL = { ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс Маркет" } as const;
@@ -244,7 +245,10 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
             </TableHeader>
             <TableBody>
               {items.map((item) => (
-                <TableRow key={item.id} className={item.status === "not_found" ? "bg-red-50/70" : item.status === "picked" ? "bg-emerald-50/50" : undefined}>
+                <TableRow
+                  key={item.id}
+                  className={(item.orderCancelled && task.status !== "shipped") || item.status === "not_found" ? "bg-red-50/70" : item.status === "picked" ? "bg-emerald-50/50" : undefined}
+                >
                   <TableCell className="pl-5">
                     {item.cellCode ? (
                       <span className="font-mono text-base font-bold">{item.cellCode}</span>
@@ -261,6 +265,9 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
                   </TableCell>
                   <TableCell className="pr-5">
                     <div className="flex flex-wrap justify-end gap-2">
+                      {item.orderCancelled && task.status !== "shipped" ? (
+                        <Badge variant="destructive">отменён {MARKETPLACE_LABEL[task.marketplaceId]}, не упаковывать</Badge>
+                      ) : null}
                       {item.status === "picked" ? <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">собрано</Badge> : null}
                       {item.status === "not_found" ? <Badge variant="destructive">не найден</Badge> : null}
                       {canWork ? (

@@ -38,11 +38,14 @@ import { stampLabelLines } from "@/lib/label-stamp.mjs";
 import type { AppRuntimeEnv } from "@/lib/runtime-env";
 import { ensureWildberriesSupply } from "@/lib/supplies";
 import {
+  WildberriesApiError,
   addOrdersToWildberriesSupply,
+  getWildberriesOrderStatuses,
   getWildberriesStickers,
   setWildberriesUin,
 } from "@/lib/wildberries";
 import { logWarehouseEvent } from "@/lib/warehouse";
+import { isWildberriesCancelled } from "@/lib/warehouse-core.mjs";
 import {
   getYandexOrder,
   getYandexOrderLabels,
@@ -78,6 +81,29 @@ const LABEL_COLUMNS = `
   error, exemplar_status AS exemplarStatus, note, ship_postings AS shipPostings,
   attempts, prepared_at AS preparedAt, printed_at AS printedAt, print_count AS printCount
 `;
+
+/**
+ * Метки в exemplar_status строки этикетки с ошибкой.
+ *
+ * `cancelled` — площадка отменила отправление: этикетки не будет никогда,
+ * изделие возвращается в ячейку. `stopped` — площадка отказала так, что
+ * повтор без человека ничего не даст (WB ответил 409 по живому заданию):
+ * сам стол такую строку больше не трогает, повтор — только по кнопке.
+ */
+const LABEL_CANCELLED = "cancelled";
+const LABEL_STOPPED = "stopped";
+
+/** Площадка отменила отправление. */
+class PostingCancelledError extends Error {}
+
+/** Отказ площадки, после которого автоповтор только тратит лимит запросов. */
+class LabelStoppedError extends Error {}
+
+const MARKETPLACE_NAMES: Record<string, string> = { ozon: "Ozon", wildberries: "Wildberries", yandex: "Яндекс Маркет" };
+
+function cancelledMessage(marketplaceId: string) {
+  return `Заказ отменён ${MARKETPLACE_NAMES[marketplaceId] ?? "площадкой"} — не упаковывать, верните изделие в ячейку.`;
+}
 
 /** Номера отправлений после сборки хранятся строкой через запятую. */
 function splitPostings(value: string | null | undefined) {
@@ -200,6 +226,8 @@ export type PrepareResult = {
   /** Отправлений, по которым УИН уже у Ozon и идёт проверка. */
   validating: number;
   ready: number;
+  /** Отправлений, отменённых площадкой: упаковывать не нужно. */
+  cancelled: number;
   total: number;
   messages: string[];
 };
@@ -230,28 +258,38 @@ const STATUS_POLLS_PER_PASS = 40;
 export async function prepareLabelsForTask(
   db: D1Database,
   runtime: AppRuntimeEnv,
-  input: { taskId: number; limit?: number; actorEmail: string },
+  input: { taskId: number; limit?: number; actorEmail: string; retryStopped?: boolean },
 ): Promise<PrepareResult> {
   const limit = Math.min(20, Math.max(1, input.limit ?? 8));
   const messages: string[] = [];
+  const empty = { prepared: 0, failed: 0, skipped: 0, waiting: 0, validating: 0, ready: 0, cancelled: 0, total: 0 };
   // Номер задания нужен как имя поставки Wildberries.
   const taskRow = await db.prepare("SELECT number, upd_matched_at AS updMatchedAt FROM pick_tasks WHERE id = ?")
     .bind(input.taskId).first<{ number: string; updMatchedAt: string | null }>();
   if (!taskRow?.updMatchedAt) {
     messages.push("УПД задания не сверена: этикетки готовятся только после загрузки верной УПД.");
-    return { prepared: 0, failed: 0, skipped: 0, waiting: 0, validating: 0, ready: 0, total: 0, messages };
+    return { ...empty, messages };
   }
   const taskNumber = taskRow.number ?? String(input.taskId);
 
   const items = await readTaskItemsForLabels(db, input.taskId);
-  if (items.length === 0) {
-    return { prepared: 0, failed: 0, skipped: 0, waiting: 0, validating: 0, ready: 0, total: 0, messages };
-  }
+  if (items.length === 0) return { ...empty, messages };
 
   const existing = await db.prepare(
     `SELECT ${LABEL_COLUMNS} FROM shipment_labels WHERE task_id = ?`,
   ).bind(input.taskId).all<LabelRow>();
   const byPosting = new Map(existing.results.map((row) => [`${row.marketplaceId}::${row.externalOrderId}`, row]));
+
+  // Отмену WB синхронизация заказов уже видела — площадку о ней не спрашиваем:
+  // WB такое задание в поставку не возьмёт, а каждый лишний запрос с ошибкой
+  // приближает ограничение частоты для всего стола.
+  const cancelledRows = await db.prepare(
+    `SELECT DISTINCT o.external_order_id AS externalOrderId
+     FROM orders o
+     JOIN pick_task_items ti ON ti.marketplace_id = o.marketplace_id AND ti.external_order_id = o.external_order_id
+     WHERE ti.task_id = ? AND o.marketplace_id = 'wildberries' AND o.canceled_at IS NOT NULL`,
+  ).bind(input.taskId).all<{ externalOrderId: string }>();
+  const cancelledWb = new Set(cancelledRows.results.map((row) => row.externalOrderId));
 
   // Отправление — единица подготовки: этикетка выдаётся на отправление, а не на строку.
   const postings = new Map<string, TaskItemRow[]>();
@@ -266,6 +304,9 @@ export async function prepareLabelsForTask(
   let waiting = 0;
   let validating = 0;
   let ready = 0;
+  let cancelled = 0;
+  // Отменённые на этом заходе: только они попадают в журнал, а не все уже известные.
+  let newlyCancelled = 0;
   let statusPolls = 0;
 
   for (const [key, group] of postings) {
@@ -274,13 +315,40 @@ export async function prepareLabelsForTask(
       ready += 1;
       continue;
     }
-    // Отменено в Ozon — спрашивать площадку на каждом заходе незачем.
-    if (label?.status === "error" && label.exemplarStatus === "cancelled") continue;
+    // Отменено площадкой — спрашивать её на каждом заходе незачем.
+    if (label?.status === "error" && label.exemplarStatus === LABEL_CANCELLED) {
+      cancelled += 1;
+      continue;
+    }
+    // Каждый скан на столе запускает подготовку, и строка, на которую WB
+    // отвечает 409, раньше уходила на площадку сотни раз подряд. Теперь сам
+    // стол её не повторяет — только кнопка «Подготовить этикетки».
+    if (label?.status === "error" && label.exemplarStatus === LABEL_STOPPED && !input.retryStopped) continue;
 
     const first = group[0];
     const marketplaceId = first.marketplaceId;
     const multi = group.length > 1;
     const articles = [...new Set(group.map((row) => row.article))].join(", ").slice(0, 200);
+
+    const markCancelled = (message: string) => upsertLabel(db, {
+      marketplaceId,
+      externalOrderId: first.externalOrderId,
+      taskId: input.taskId,
+      article: articles,
+      size: multi ? null : first.size,
+      uin: null,
+      status: "error",
+      error: message,
+      note: null,
+      exemplarStatus: LABEL_CANCELLED,
+    });
+
+    if (marketplaceId === "wildberries" && cancelledWb.has(first.externalOrderId)) {
+      await markCancelled(cancelledMessage(marketplaceId));
+      cancelled += 1;
+      newlyCancelled += 1;
+      continue;
+    }
 
     // Пока отправление не отсканировано целиком, готовить нечего: передать
     // Ozon половину УИН и собрать отправление — значит разделить посылку.
@@ -376,9 +444,10 @@ export async function prepareLabelsForTask(
             status: "error",
             error: step.message,
             note: null,
-            exemplarStatus: "cancelled",
+            exemplarStatus: LABEL_CANCELLED,
           });
-          failed += 1;
+          cancelled += 1;
+          newlyCancelled += 1;
           continue;
         }
 
@@ -468,6 +537,12 @@ export async function prepareLabelsForTask(
       await persistUins();
       prepared += 1;
     } catch (error) {
+      if (error instanceof PostingCancelledError) {
+        await markCancelled(error.message);
+        cancelled += 1;
+        newlyCancelled += 1;
+        continue;
+      }
       const message = error instanceof Error ? error.message : "Не удалось подготовить этикетку.";
       await upsertLabel(db, {
         marketplaceId,
@@ -479,21 +554,25 @@ export async function prepareLabelsForTask(
         status: "error",
         error: message.slice(0, 500),
         note: null,
+        // У WB метка решает, повторит ли стол подготовку сам. Пустая строка, а
+        // не null: null оставил бы прежнюю метку «остановлено» после ручного
+        // повтора, закончившегося другой ошибкой.
+        exemplarStatus: marketplaceId === "wildberries" ? (error instanceof LabelStoppedError ? LABEL_STOPPED : "") : null,
       });
       failed += 1;
     }
   }
 
-  if (prepared > 0 || failed > 0) {
+  if (prepared > 0 || failed > 0 || newlyCancelled > 0) {
     await logWarehouseEvent(db, {
       kind: "labels_prepared",
       taskId: input.taskId,
       actorEmail: input.actorEmail,
-      payload: { prepared, failed, ready, waiting, validating, total: postings.size },
+      payload: { prepared, failed, ready, waiting, validating, cancelled, total: postings.size },
     });
   }
 
-  return { prepared, failed, skipped, waiting, validating, ready, total: postings.size, messages };
+  return { prepared, failed, skipped, waiting, validating, ready, cancelled, total: postings.size, messages };
 }
 
 /**
@@ -697,6 +776,14 @@ async function runOzonSteps(db: D1Database, runtime: AppRuntimeEnv, input: OzonI
   return finish(labelPostings);
 }
 
+/** Статус задания WB; null, если WB не ответил — тогда решаем по самой ошибке. */
+async function readWildberriesOrderState(token: string, orderId: string) {
+  const id = Number(orderId);
+  if (!Number.isFinite(id) || id <= 0) return null;
+  const rows = await getWildberriesOrderStatuses(token, [id]).catch(() => []);
+  return rows.find((row) => String(row.id) === String(orderId)) ?? null;
+}
+
 async function prepareWildberriesLabel(
   db: D1Database,
   runtime: AppRuntimeEnv,
@@ -716,12 +803,20 @@ async function prepareWildberriesLabel(
   });
 
   let addError: string | null = null;
+  let addConflict = false;
   try {
     await addOrdersToWildberriesSupply(token, supply.externalId, [input.orderId]);
   } catch (error) {
     // Задание уже в этой поставке — обычное дело при повторной подготовке.
     // Настоящую причину покажет запрос стикера, поэтому ошибку запоминаем.
     addError = error instanceof Error ? error.message : "не удалось добавить задание в поставку";
+    // 409 бывает и у отменённого задания: его WB в поставку не возьмёт
+    // никогда. Узнаём сразу, чтобы не передавать УИН и не просить стикер.
+    addConflict = error instanceof WildberriesApiError && error.status === 409;
+    if (addConflict) {
+      const state = await readWildberriesOrderState(token, input.orderId);
+      if (isWildberriesCancelled(state)) throw new PostingCancelledError(cancelledMessage("wildberries"));
+    }
   }
 
   let warning: string | null = null;
@@ -739,9 +834,26 @@ async function prepareWildberriesLabel(
     }
   }
 
-  const stickers = await getWildberriesStickers(token, [input.orderId]);
+  let stickers: Awaited<ReturnType<typeof getWildberriesStickers>> = [];
+  try {
+    stickers = await getWildberriesStickers(token, [input.orderId]);
+  } catch (error) {
+    // После 409 отказ в стикере ожидаем — причину решает статус задания ниже.
+    if (!addConflict) throw error;
+  }
   const sticker = stickers.find((row) => String(row.orderId) === String(input.orderId)) ?? stickers[0];
   if (!sticker?.file) {
+    if (addConflict) {
+      // Задание живое, но в поставку не берётся: повтор каждые несколько
+      // секунд ничего не изменит, а лимит запросов WB общий на весь стол.
+      const state = await readWildberriesOrderState(token, input.orderId);
+      if (isWildberriesCancelled(state)) throw new PostingCancelledError(cancelledMessage("wildberries"));
+      throw new LabelStoppedError(
+        `Wildberries не берёт задание ${input.orderId} в поставку ${supply.externalId} (ошибка 409)`
+        + (state ? `, статус задания ${state.supplierStatus}/${state.wbStatus}` : "")
+        + ". Автоповтор остановлен: проверьте задание в кабинете WB и нажмите «Подготовить этикетки».",
+      );
+    }
     throw new Error(
       `Wildberries не отдал стикер по заданию ${input.orderId} (поставка ${supply.externalId}).`
       + (addError ? ` Задание не добавилось в поставку: ${addError}` : " Повторите подготовку этикеток через минуту."),
@@ -958,6 +1070,7 @@ export type ScanOutcome =
   | { status: "foreign_task"; uin: string; article: string; taskNumber: string | null }
   | { status: "repeat"; uin: string; item: ScanItem }
   | { status: "not_in_task"; uin: string; article: string; size: string | null }
+  | { status: "cancelled"; uin: string; item: ScanItem; message: string }
   | { status: "label_not_ready"; uin: string; item: ScanItem; error: string | null };
 
 export type ScanItem = {
@@ -983,6 +1096,22 @@ function scanStatements(db: D1Database, input: { itemId: number; uin: string; ac
        WHERE id = ? AND uin = ? AND scanned_at IS NULL`,
     ).bind(input.actorEmail, input.itemId, input.uin),
   ];
+}
+
+/**
+ * Отменено ли отправление площадкой — по строке этикетки или по синхронизации
+ * заказов. Возвращает текст для стола или null.
+ */
+async function readPostingCancelled(db: D1Database, marketplaceId: string, externalOrderId: string) {
+  const row = await db.prepare(
+    `SELECT
+       (SELECT error FROM shipment_labels
+        WHERE marketplace_id = ?1 AND external_order_id = ?2 AND status = 'error' AND exemplar_status = '${LABEL_CANCELLED}') AS labelError,
+       (SELECT canceled_at FROM orders WHERE marketplace_id = ?1 AND external_order_id = ?2) AS canceledAt`,
+  ).bind(marketplaceId, externalOrderId).first<{ labelError: string | null; canceledAt: string | null }>();
+  if (row?.labelError) return row.labelError;
+  if (row?.canceledAt) return cancelledMessage(marketplaceId);
+  return null;
 }
 
 /**
@@ -1024,6 +1153,10 @@ export async function resolveScan(
     if (foreign) return { status: "foreign_task", uin, article: foreign.article, taskNumber: foreign.taskNumber };
     return { status: "uin_unknown", uin };
   }
+
+  // Отменённое площадкой не упаковываем: скан не засчитываем, изделие — в ячейку.
+  const cancelledNote = await readPostingCancelled(db, target.marketplaceId, target.externalOrderId);
+  if (cancelledNote) return { status: "cancelled", uin, item: target, message: cancelledNote };
 
   if (target.scannedAt) return { status: "repeat", uin, item: target };
 
@@ -1127,8 +1260,12 @@ export async function readScanSummary(db: D1Database, taskId: number) {
     items: number; scanned: number; postings: number;
     multiPostings: number; multiComplete: number; preparable: number;
   }>();
+  // Отменённое площадкой — не ошибка стола: считаем отдельно, иначе кладовщик
+  // видит красное и ищет, что починить, там, где надо вернуть товар в ячейку.
   const labels = await db.prepare(
-    `SELECT status, COUNT(*) AS count FROM shipment_labels WHERE task_id = ? GROUP BY status`,
+    `SELECT CASE WHEN status = 'error' AND exemplar_status = '${LABEL_CANCELLED}' THEN 'cancelled' ELSE status END AS status,
+            COUNT(*) AS count
+     FROM shipment_labels WHERE task_id = ? GROUP BY 1`,
   ).bind(taskId).all<{ status: string; count: number }>();
   const byStatus = new Map(labels.results.map((entry) => [entry.status, Number(entry.count)]));
   const task = await db.prepare("SELECT upd_matched_at AS updMatchedAt FROM pick_tasks WHERE id = ?")
@@ -1145,12 +1282,25 @@ export async function readScanSummary(db: D1Database, taskId: number) {
     labelsReady: byStatus.get("ready") ?? 0,
     labelsError: byStatus.get("error") ?? 0,
     labelsPending: byStatus.get("pending") ?? 0,
+    labelsCancelled: byStatus.get("cancelled") ?? 0,
   };
 }
 
 export async function readLabelErrors(db: D1Database, taskId: number) {
   const rows = await db.prepare(
-    `SELECT ${LABEL_COLUMNS} FROM shipment_labels WHERE task_id = ? AND status = 'error' ORDER BY id LIMIT 50`,
+    `SELECT ${LABEL_COLUMNS} FROM shipment_labels
+     WHERE task_id = ? AND status = 'error' AND COALESCE(exemplar_status, '') <> '${LABEL_CANCELLED}'
+     ORDER BY id LIMIT 50`,
+  ).bind(taskId).all<LabelRow>();
+  return rows.results;
+}
+
+/** Отправления задания, отменённые площадкой: упаковывать не нужно. */
+export async function readLabelCancelled(db: D1Database, taskId: number) {
+  const rows = await db.prepare(
+    `SELECT ${LABEL_COLUMNS} FROM shipment_labels
+     WHERE task_id = ? AND status = 'error' AND exemplar_status = '${LABEL_CANCELLED}'
+     ORDER BY id LIMIT 200`,
   ).bind(taskId).all<LabelRow>();
   return rows.results;
 }

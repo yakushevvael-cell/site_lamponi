@@ -119,6 +119,8 @@ export type PickTaskItem = {
   shipmentDeadline: string | null;
   resolvedBy: string | null;
   resolvedAt: string | null;
+  /** Заказ отменён площадкой: изделие не упаковывают, оно возвращается в ячейку. */
+  orderCancelled?: boolean;
 };
 
 /** Событие процесса. Из этих записей потом считается весь хронометраж. */
@@ -758,16 +760,24 @@ async function fillMissingCells(db: D1Database, taskId: number) {
 
 export async function readTaskItems(db: D1Database, taskId: number) {
   await fillMissingCells(db, taskId);
+  // Отмену видно двумя путями: синхронизация заказов или отказ площадки при
+  // подготовке этикетки (WB ответил, что задание отменено, раньше синхронизации).
   const rows = await db.prepare(
-    `SELECT id, task_id AS taskId, marketplace_id AS marketplaceId, external_order_id AS externalOrderId,
-            external_sku AS externalSku, product_sku AS productSku, article, size, quantity,
-            cell_code AS cellCode, cell_sort AS cellSort, status, ordered_at AS orderedAt,
-            shipment_deadline AS shipmentDeadline, resolved_by AS resolvedBy, resolved_at AS resolvedAt
-     FROM pick_task_items
-     WHERE task_id = ?
-     ORDER BY CASE WHEN cell_code IS NULL THEN 1 ELSE 0 END, cell_sort, cell_code, article, size`,
-  ).bind(taskId).all<PickTaskItem>();
-  return rows.results;
+    `SELECT ti.id, ti.task_id AS taskId, ti.marketplace_id AS marketplaceId, ti.external_order_id AS externalOrderId,
+            ti.external_sku AS externalSku, ti.product_sku AS productSku, ti.article, ti.size, ti.quantity,
+            ti.cell_code AS cellCode, ti.cell_sort AS cellSort, ti.status, ti.ordered_at AS orderedAt,
+            ti.shipment_deadline AS shipmentDeadline, ti.resolved_by AS resolvedBy, ti.resolved_at AS resolvedAt,
+            CASE WHEN o.canceled_at IS NOT NULL OR EXISTS (
+              SELECT 1 FROM shipment_labels sl
+              WHERE sl.marketplace_id = ti.marketplace_id AND sl.external_order_id = ti.external_order_id
+                AND sl.status = 'error' AND sl.exemplar_status = 'cancelled'
+            ) THEN 1 ELSE 0 END AS orderCancelled
+     FROM pick_task_items ti
+     LEFT JOIN orders o ON o.marketplace_id = ti.marketplace_id AND o.external_order_id = ti.external_order_id
+     WHERE ti.task_id = ?
+     ORDER BY CASE WHEN ti.cell_code IS NULL THEN 1 ELSE 0 END, ti.cell_sort, ti.cell_code, ti.article, ti.size`,
+  ).bind(taskId).all<Omit<PickTaskItem, "orderCancelled"> & { orderCancelled: number }>();
+  return rows.results.map((row) => ({ ...row, orderCancelled: Number(row.orderCancelled) === 1 }));
 }
 
 /**

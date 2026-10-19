@@ -5,6 +5,7 @@ import {
   attachCells,
   buildTaskNumber,
   isGoldArticle,
+  isWildberriesCancelled,
   splitPostingsByAvailability,
   splitPostingsByMetal,
   cellSortOrder,
@@ -278,6 +279,16 @@ test("ячейка находится, если в раскладке длинн
     { article: " с-3005р\u00A0", size: null, cellCode: "7", sortOrder: 7 },
   ];
   assert.deepEqual(attachCells(items, placements).map((item) => item.cellCode), ["5", "7"]);
+});
+
+test("отменённое задание WB: продавцом, покупателем или самим WB", () => {
+  assert.equal(isWildberriesCancelled({ supplierStatus: "cancel", wbStatus: "canceled" }), true);
+  assert.equal(isWildberriesCancelled({ supplierStatus: "new", wbStatus: "canceled_by_client" }), true);
+  assert.equal(isWildberriesCancelled({ supplierStatus: "confirm", wbStatus: "declined_by_client" }), true);
+  assert.equal(isWildberriesCancelled({ supplierStatus: "new", wbStatus: "waiting" }), false);
+  assert.equal(isWildberriesCancelled({ supplierStatus: "confirm", wbStatus: "waiting" }), false);
+  assert.equal(isWildberriesCancelled({ supplierStatus: "complete", wbStatus: "sorted" }), false);
+  assert.equal(isWildberriesCancelled(null), false);
 });
 
 test("золото — кириллическое «-з» на конце артикула", () => {
