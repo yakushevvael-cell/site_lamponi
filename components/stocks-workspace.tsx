@@ -1,7 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Ban, Boxes, CloudUpload, FlaskConical, History, Layers, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, Zap } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { Ban, Boxes, CloudUpload, FlaskConical, History, Layers, ListFilter, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, X, Zap } from "lucide-react";
 import { toast } from "sonner";
 
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
@@ -23,6 +23,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 
 type StockRow = {
@@ -305,11 +306,254 @@ function RemoteRowCard({ row }: { row: RemoteStockRow }) {
   );
 }
 
+type StockStatus = "manualZero" | "out" | "low" | "in";
+
+const stockStatusLabel: Record<StockStatus, string> = {
+  manualZero: "Обнулено вручную",
+  out: "Нет в наличии",
+  low: "Мало",
+  in: "В наличии",
+};
+
+function stockStatus(row: StockRow): StockStatus {
+  if (row.manualZero) return "manualZero";
+  if (row.availableQuantity <= 0) return "out";
+  if (row.availableQuantity < 5) return "low";
+  return "in";
+}
+
 function StatusBadge({ row }: { row: StockRow }) {
-  if (row.manualZero) return <Badge variant="destructive">Обнулено вручную</Badge>;
-  if (row.availableQuantity <= 0) return <Badge variant="secondary">Нет в наличии</Badge>;
-  if (row.availableQuantity < 5) return <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">Мало</Badge>;
-  return <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">В наличии</Badge>;
+  const status = stockStatus(row);
+  if (status === "manualZero") return <Badge variant="destructive">{stockStatusLabel.manualZero}</Badge>;
+  if (status === "out") return <Badge variant="secondary">{stockStatusLabel.out}</Badge>;
+  if (status === "low") return <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">{stockStatusLabel.low}</Badge>;
+  return <Badge className="bg-emerald-100 text-emerald-800 hover:bg-emerald-100">{stockStatusLabel.in}</Badge>;
+}
+
+/**
+ * Фильтры по колонкам таблицы остатков.
+ *
+ * Поиск сужает выборку на сервере по артикулу и размеру, а дальше нужны вопросы
+ * вида «что не сопоставлено» или «что продаётся только на одной площадке» —
+ * их решаем на клиенте: список и так приходит целиком.
+ */
+type Presence = "any" | "yes" | "no";
+type Coverage = "none" | "one" | "two" | "three";
+type NumberRange = { min: string; max: string };
+
+type StockFilters = {
+  coverage: Coverage[];
+  wildberries: Presence;
+  ozon: Presence;
+  yandex: Presence;
+  pilot: Presence;
+  sized: Presence;
+  sizes: string[];
+  units: "any" | "single" | "multi";
+  physical: NumberRange;
+  reserved: NumberRange;
+  available: NumberRange;
+  statuses: StockStatus[];
+};
+
+const emptyRange: NumberRange = { min: "", max: "" };
+
+const emptyFilters: StockFilters = {
+  coverage: [],
+  wildberries: "any",
+  ozon: "any",
+  yandex: "any",
+  pilot: "any",
+  sized: "any",
+  sizes: [],
+  units: "any",
+  physical: emptyRange,
+  reserved: emptyRange,
+  available: emptyRange,
+  statuses: [],
+};
+
+const coverageLabel: Record<Coverage, string> = {
+  none: "Не сопоставлен",
+  one: "Только на одной площадке",
+  two: "На двух площадках",
+  three: "На всех трёх",
+};
+
+function coverageOf(row: StockRow): Coverage {
+  const count = [row.wbSku, row.ozonSku, row.yandexSku].filter(Boolean).length;
+  return count === 0 ? "none" : count === 1 ? "one" : count === 2 ? "two" : "three";
+}
+
+function presenceMatches(filter: Presence, value: boolean) {
+  return filter === "any" || (filter === "yes") === value;
+}
+
+function rangeMatches(range: NumberRange, value: number) {
+  const min = range.min.trim() === "" ? null : Number(range.min);
+  const max = range.max.trim() === "" ? null : Number(range.max);
+  if (min !== null && Number.isFinite(min) && value < min) return false;
+  if (max !== null && Number.isFinite(max) && value > max) return false;
+  return true;
+}
+
+function rangeActive(range: NumberRange) {
+  return range.min.trim() !== "" || range.max.trim() !== "";
+}
+
+function applyStockFilters(rows: StockRow[], filters: StockFilters) {
+  return rows.filter((row) => {
+    if (filters.coverage.length > 0 && !filters.coverage.includes(coverageOf(row))) return false;
+    if (!presenceMatches(filters.wildberries, Boolean(row.wbSku))) return false;
+    if (!presenceMatches(filters.ozon, Boolean(row.ozonSku))) return false;
+    if (!presenceMatches(filters.yandex, Boolean(row.yandexSku))) return false;
+    if (!presenceMatches(filters.pilot, Boolean(row.pilot))) return false;
+    if (!presenceMatches(filters.sized, Boolean(row.size))) return false;
+    if (filters.sizes.length > 0 && !filters.sizes.includes(row.size ?? "")) return false;
+    const units = Number(row.unitsPerItem ?? 1);
+    if (filters.units === "single" && units > 1) return false;
+    if (filters.units === "multi" && units <= 1) return false;
+    if (!rangeMatches(filters.physical, Number(row.physicalQuantity))) return false;
+    if (!rangeMatches(filters.reserved, Number(row.reservedQuantity))) return false;
+    if (!rangeMatches(filters.available, Number(row.availableQuantity))) return false;
+    if (filters.statuses.length > 0 && !filters.statuses.includes(stockStatus(row))) return false;
+    return true;
+  });
+}
+
+const presenceText = { yes: "есть", no: "нет" } as const;
+
+function formatRange(range: NumberRange) {
+  const min = range.min.trim();
+  const max = range.max.trim();
+  if (min && max) return `${min}–${max}`;
+  return min ? `от ${min}` : `до ${max}`;
+}
+
+/** Активные фильтры человеческим языком — для строки над таблицей. */
+function describeFilters(filters: StockFilters): Array<{ key: string; label: string; reset: Partial<StockFilters> }> {
+  const chips: Array<{ key: string; label: string; reset: Partial<StockFilters> }> = [];
+  if (filters.coverage.length) chips.push({ key: "coverage", label: filters.coverage.map((value) => coverageLabel[value]).join(" / "), reset: { coverage: [] } });
+  if (filters.wildberries !== "any") chips.push({ key: "wildberries", label: `WB: ${presenceText[filters.wildberries]}`, reset: { wildberries: "any" } });
+  if (filters.ozon !== "any") chips.push({ key: "ozon", label: `Ozon: ${presenceText[filters.ozon]}`, reset: { ozon: "any" } });
+  if (filters.yandex !== "any") chips.push({ key: "yandex", label: `YM: ${presenceText[filters.yandex]}`, reset: { yandex: "any" } });
+  if (filters.pilot !== "any") chips.push({ key: "pilot", label: filters.pilot === "yes" ? "В пилоте" : "Не в пилоте", reset: { pilot: "any" } });
+  if (filters.sized !== "any") chips.push({ key: "sized", label: filters.sized === "yes" ? "С размером" : "Без размера", reset: { sized: "any" } });
+  if (filters.sizes.length) chips.push({ key: "sizes", label: `Размер: ${filters.sizes.map((size) => size || "без размера").join(", ")}`, reset: { sizes: [] } });
+  if (filters.units !== "any") chips.push({ key: "units", label: filters.units === "multi" ? "Кратность > 1" : "Кратность 1", reset: { units: "any" } });
+  if (rangeActive(filters.physical)) chips.push({ key: "physical", label: `Физически ${formatRange(filters.physical)}`, reset: { physical: emptyRange } });
+  if (rangeActive(filters.reserved)) chips.push({ key: "reserved", label: `Резерв ${formatRange(filters.reserved)}`, reset: { reserved: emptyRange } });
+  if (rangeActive(filters.available)) chips.push({ key: "available", label: `Доступно ${formatRange(filters.available)}`, reset: { available: emptyRange } });
+  if (filters.statuses.length) chips.push({ key: "statuses", label: `Статус: ${filters.statuses.map((value) => stockStatusLabel[value].toLowerCase()).join(", ")}`, reset: { statuses: [] } });
+  return chips;
+}
+
+function toggleValue<T>(values: T[], value: T, checked: boolean) {
+  return checked ? (values.includes(value) ? values : [...values, value]) : values.filter((item) => item !== value);
+}
+
+/** Заголовок колонки с воронкой: подсвечена, когда по колонке стоит фильтр. */
+function FilterHead({ label, active, align = "start", className, children }: {
+  label: string;
+  active: boolean;
+  align?: "start" | "end";
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <TableHead className={className}>
+      <span className={`inline-flex items-center gap-1 ${align === "end" ? "justify-end" : ""}`}>
+        {label}
+        <Popover>
+          <PopoverTrigger asChild>
+            <button
+              type="button"
+              className={`grid size-6 place-items-center rounded-md transition hover:bg-accent ${active ? "bg-sky-100 text-sky-800 hover:bg-sky-100" : "text-muted-foreground"}`}
+              aria-label={`Фильтр: ${label}`}
+              title={`Фильтр: ${label}`}
+            >
+              <ListFilter className="size-3.5" />
+            </button>
+          </PopoverTrigger>
+          <PopoverContent align={align} className="w-72 space-y-3 p-3 text-sm">
+            {children}
+          </PopoverContent>
+        </Popover>
+      </span>
+    </TableHead>
+  );
+}
+
+function FilterSection({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div className="space-y-1.5">
+      <p className="text-xs font-semibold text-muted-foreground">{title}</p>
+      {children}
+    </div>
+  );
+}
+
+function CheckOption({ checked, onChange, label, count }: { checked: boolean; onChange: (checked: boolean) => void; label: string; count?: number }) {
+  return (
+    <label className="flex cursor-pointer items-center gap-2 rounded-md px-1 py-1 hover:bg-accent">
+      <Checkbox checked={checked} onCheckedChange={(value) => onChange(Boolean(value))} />
+      <span className="flex-1">{label}</span>
+      {count === undefined ? null : <span className="text-xs tabular-nums text-muted-foreground">{count.toLocaleString("ru-RU")}</span>}
+    </label>
+  );
+}
+
+/** Переключатель «Все / Есть / Нет» — для признаков, у которых важно и наличие, и отсутствие. */
+function PresenceToggle({ value, onChange, labels = ["Все", "Есть", "Нет"] }: { value: Presence; onChange: (value: Presence) => void; labels?: [string, string, string] }) {
+  const options: Presence[] = ["any", "yes", "no"];
+  return (
+    <div className="inline-flex rounded-md border p-0.5">
+      {options.map((option, index) => (
+        <button
+          key={option}
+          type="button"
+          onClick={() => onChange(option)}
+          className={`rounded px-2.5 py-1 text-xs transition ${value === option ? "bg-primary text-primary-foreground" : "hover:bg-accent"}`}
+        >
+          {labels[index]}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function RangeInputs({ value, onChange }: { value: NumberRange; onChange: (value: NumberRange) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <Input type="number" inputMode="numeric" placeholder="от" value={value.min} onChange={(event) => onChange({ ...value, min: event.target.value })} className="h-8" />
+      <span className="text-muted-foreground">—</span>
+      <Input type="number" inputMode="numeric" placeholder="до" value={value.max} onChange={(event) => onChange({ ...value, max: event.target.value })} className="h-8" />
+    </div>
+  );
+}
+
+function RangeFilter({ value, onChange, presets }: {
+  value: NumberRange;
+  onChange: (value: NumberRange) => void;
+  presets: Array<{ label: string; range: NumberRange }>;
+}) {
+  return (
+    <>
+      <FilterSection title="Диапазон">
+        <RangeInputs value={value} onChange={onChange} />
+      </FilterSection>
+      <div className="flex flex-wrap gap-1.5">
+        {presets.map((preset) => (
+          <Button key={preset.label} type="button" size="sm" variant="outline" className="h-7 px-2 text-xs" onClick={() => onChange(preset.range)}>
+            {preset.label}
+          </Button>
+        ))}
+        {rangeActive(value) ? (
+          <Button type="button" size="sm" variant="ghost" className="h-7 px-2 text-xs" onClick={() => onChange(emptyRange)}>Сбросить</Button>
+        ) : null}
+      </div>
+    </>
+  );
 }
 
 export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: boolean; canSyncSelected: boolean }) {
@@ -338,6 +582,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [checkingRemote, setCheckingRemote] = useState(false);
   /** Позиция, чья «История» открыта. */
   const [historyRow, setHistoryRow] = useState<StockRow | null>(null);
+  const [filters, setFilters] = useState<StockFilters>(emptyFilters);
 
   const load = useCallback(async (search: string) => {
     setLoading(true);
@@ -397,7 +642,38 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const paused = mode === "stopped";
   const bulkAllowedHere = mode === "auto" || mode === "pilot";
   const bulkBlocked = !bulkAllowedHere;
-  const allSelected = stocks.length > 0 && stocks.slice(0, 50).every((row) => selected.has(row.variantKey));
+  const visibleStocks = useMemo(() => applyStockFilters(stocks, filters), [stocks, filters]);
+  const filterChips = useMemo(() => describeFilters(filters), [filters]);
+  const filtered = filterChips.length > 0;
+  // Счётчики в фильтрах — по всему, что нашёл поиск, а не по уже отфильтрованному.
+  const filterCounts = useMemo(() => {
+    const coverage: Record<Coverage, number> = { none: 0, one: 0, two: 0, three: 0 };
+    const statuses: Record<StockStatus, number> = { manualZero: 0, out: 0, low: 0, in: 0 };
+    const sizes = new Map<string, number>();
+    for (const row of stocks) {
+      coverage[coverageOf(row)] += 1;
+      statuses[stockStatus(row)] += 1;
+      if (row.size) sizes.set(row.size, (sizes.get(row.size) ?? 0) + 1);
+    }
+    const sizeList = [...sizes.entries()].sort((a, b) => a[0].localeCompare(b[0], "ru", { numeric: true }));
+    return { coverage, statuses, sizes: sizeList };
+  }, [stocks]);
+
+  /**
+   * Смена фильтра снимает отметки со строк, которые ушли из таблицы:
+   * иначе «Обнулить выбранные» задело бы позиции, которых человек не видит.
+   */
+  function updateFilters(patch: Partial<StockFilters> | null) {
+    const next = patch === null ? emptyFilters : { ...filters, ...patch };
+    setFilters(next);
+    const visible = new Set(applyStockFilters(stocks, next).map((row) => row.variantKey));
+    setSelected((current) => {
+      const kept = [...current].filter((key) => visible.has(key));
+      return kept.length === current.size ? current : new Set(kept);
+    });
+  }
+
+  const allSelected = visibleStocks.length > 0 && visibleStocks.slice(0, 50).every((row) => selected.has(row.variantKey));
   const selectedRows = useMemo(() => stocks.filter((row) => selected.has(row.variantKey)), [selected, stocks]);
   const canRestore = selectedRows.some((row) => Boolean(row.manualZero));
   // Сколько из отмеченных вообще есть на площадках: раньше это выяснялось
@@ -530,9 +806,13 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
       const response = await fetch("/api/stocks/units", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
+        // При фильтрах по колонкам «всем найденным» — это ровно строки таблицы,
+        // а не весь серверный поиск: иначе задело бы скрытые фильтром позиции.
         body: JSON.stringify(scope === "selected"
           ? { unitsPerItem: parsed, scope: "selected", sourceSkus: [...selected] }
-          : { unitsPerItem: parsed, scope: "search", query }),
+          : filtered
+            ? { unitsPerItem: parsed, scope: "selected", sourceSkus: visibleStocks.map((row) => row.variantKey) }
+            : { unitsPerItem: parsed, scope: "search", query }),
       });
       const data = await response.json() as { updated?: number; error?: string };
       if (!response.ok) throw new Error(data.error ?? "Не удалось изменить кратность.");
@@ -863,6 +1143,25 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             <Button variant="outline" asChild><a href="/upload">Загрузить ОСВ</a></Button>
           </div>
         </div>
+        {filtered && !loading ? (
+          <div className="flex flex-wrap items-center gap-2 border-b bg-sky-50/60 px-4 py-2.5 text-xs">
+            <span className="font-medium text-sky-950">
+              Показано {visibleStocks.length.toLocaleString("ru-RU")} из {stocks.length.toLocaleString("ru-RU")}
+            </span>
+            {filterChips.map((chip) => (
+              <button
+                key={chip.key}
+                type="button"
+                onClick={() => updateFilters(chip.reset)}
+                className="inline-flex items-center gap-1 rounded-full border border-sky-200 bg-white px-2.5 py-0.5 text-sky-900 transition hover:bg-sky-100"
+                title="Убрать фильтр"
+              >
+                {chip.label}<X className="size-3" />
+              </button>
+            ))}
+            <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" onClick={() => updateFilters(null)}>Сбросить все</Button>
+          </div>
+        ) : null}
         <div className="min-h-72 overflow-x-auto">
           {loading ? (
             <div className="grid min-h-72 place-items-center text-sm text-muted-foreground"><Loader2 className="mr-2 inline size-4 animate-spin" />Загружаем остатки…</div>
@@ -872,12 +1171,113 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead className="w-12 pl-5"><Checkbox checked={allSelected} onCheckedChange={(checked) => setSelected(checked ? new Set(stocks.slice(0, 50).map((row) => row.variantKey)) : new Set())} aria-label="Выбрать строки" /></TableHead>
-                  <TableHead>Артикул из 1С</TableHead><TableHead>Размер</TableHead><TableHead>Площадки</TableHead><TableHead className="text-right">Физически</TableHead><TableHead className="text-right">Ед. в товаре</TableHead><TableHead className="text-right">Резерв</TableHead><TableHead className="text-right">Доступно</TableHead><TableHead className="pr-5 text-right">Статус</TableHead>
+                  <TableHead className="w-12 pl-5"><Checkbox checked={allSelected} onCheckedChange={(checked) => setSelected(checked ? new Set(visibleStocks.slice(0, 50).map((row) => row.variantKey)) : new Set())} aria-label="Выбрать строки" /></TableHead>
+                  <TableHead>Артикул из 1С</TableHead>
+                  <FilterHead label="Размер" active={filters.sized !== "any" || filters.sizes.length > 0}>
+                    <FilterSection title="Размер указан">
+                      <PresenceToggle value={filters.sized} onChange={(sized) => updateFilters({ sized })} labels={["Все", "С размером", "Без"]} />
+                    </FilterSection>
+                    {filterCounts.sizes.length > 0 ? (
+                      <FilterSection title="Конкретные размеры">
+                        <div className="max-h-56 overflow-y-auto">
+                          {filterCounts.sizes.map(([size, count]) => (
+                            <CheckOption
+                              key={size}
+                              label={size}
+                              count={count}
+                              checked={filters.sizes.includes(size)}
+                              onChange={(checked) => updateFilters({ sizes: toggleValue(filters.sizes, size, checked) })}
+                            />
+                          ))}
+                        </div>
+                      </FilterSection>
+                    ) : null}
+                  </FilterHead>
+                  <FilterHead
+                    label="Площадки"
+                    active={filters.coverage.length > 0 || filters.wildberries !== "any" || filters.ozon !== "any" || filters.yandex !== "any" || filters.pilot !== "any"}
+                  >
+                    <FilterSection title="Сопоставление">
+                      {(Object.keys(coverageLabel) as Coverage[]).map((value) => (
+                        <CheckOption
+                          key={value}
+                          label={coverageLabel[value]}
+                          count={filterCounts.coverage[value]}
+                          checked={filters.coverage.includes(value)}
+                          onChange={(checked) => updateFilters({ coverage: toggleValue(filters.coverage, value, checked) })}
+                        />
+                      ))}
+                    </FilterSection>
+                    <FilterSection title="По площадкам">
+                      {([
+                        ["wildberries", "WB"],
+                        ["ozon", "Ozon"],
+                        ["yandex", "Яндекс"],
+                      ] as const).map(([key, label]) => (
+                        <div key={key} className="flex items-center justify-between gap-2">
+                          <span>{label}</span>
+                          <PresenceToggle value={filters[key]} onChange={(value) => updateFilters({ [key]: value } as Partial<StockFilters>)} />
+                        </div>
+                      ))}
+                      <p className="text-xs leading-5 text-muted-foreground">Например, «только WB»: WB — есть, Ozon и Яндекс — нет.</p>
+                    </FilterSection>
+                    <FilterSection title="Пилот">
+                      <PresenceToggle value={filters.pilot} onChange={(pilot) => updateFilters({ pilot })} labels={["Все", "В пилоте", "Не в пилоте"]} />
+                    </FilterSection>
+                  </FilterHead>
+                  <FilterHead label="Физически" align="end" className="text-right" active={rangeActive(filters.physical)}>
+                    <RangeFilter
+                      value={filters.physical}
+                      onChange={(physical) => updateFilters({ physical })}
+                      presets={[{ label: "0", range: { min: "", max: "0" } }, { label: "Больше 0", range: { min: "1", max: "" } }]}
+                    />
+                  </FilterHead>
+                  <FilterHead label="Ед. в товаре" align="end" className="text-right" active={filters.units !== "any"}>
+                    <FilterSection title="Кратность">
+                      {([["any", "Все"], ["single", "1 — как в ОСВ"], ["multi", "Больше 1 (наборы, пары)"]] as const).map(([value, label]) => (
+                        <CheckOption key={value} label={label} checked={filters.units === value} onChange={() => updateFilters({ units: value })} />
+                      ))}
+                    </FilterSection>
+                  </FilterHead>
+                  <FilterHead label="Резерв" align="end" className="text-right" active={rangeActive(filters.reserved)}>
+                    <RangeFilter
+                      value={filters.reserved}
+                      onChange={(reserved) => updateFilters({ reserved })}
+                      presets={[{ label: "Без резерва", range: { min: "", max: "0" } }, { label: "Есть резерв", range: { min: "1", max: "" } }]}
+                    />
+                  </FilterHead>
+                  <FilterHead label="Доступно" align="end" className="text-right" active={rangeActive(filters.available)}>
+                    <RangeFilter
+                      value={filters.available}
+                      onChange={(available) => updateFilters({ available })}
+                      presets={[{ label: "0", range: { min: "", max: "0" } }, { label: "1–4", range: { min: "1", max: "4" } }, { label: "5 и больше", range: { min: "5", max: "" } }]}
+                    />
+                  </FilterHead>
+                  <FilterHead label="Статус" align="end" className="pr-5 text-right" active={filters.statuses.length > 0}>
+                    <FilterSection title="Статус">
+                      {(Object.keys(stockStatusLabel) as StockStatus[]).map((value) => (
+                        <CheckOption
+                          key={value}
+                          label={stockStatusLabel[value]}
+                          count={filterCounts.statuses[value]}
+                          checked={filters.statuses.includes(value)}
+                          onChange={(checked) => updateFilters({ statuses: toggleValue(filters.statuses, value, checked) })}
+                        />
+                      ))}
+                    </FilterSection>
+                  </FilterHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {stocks.map((row) => (
+                {visibleStocks.length === 0 ? (
+                  <TableRow>
+                    <TableCell colSpan={9} className="h-40 text-center text-sm text-muted-foreground">
+                      По фильтрам ничего не найдено.{" "}
+                      <Button variant="link" className="h-auto p-0" onClick={() => updateFilters(null)}>Сбросить фильтры</Button>
+                    </TableCell>
+                  </TableRow>
+                ) : null}
+                {visibleStocks.map((row) => (
                   <TableRow key={row.variantKey} data-state={selected.has(row.variantKey) ? "selected" : undefined}>
                     <TableCell className="pl-5"><Checkbox checked={selected.has(row.variantKey)} disabled={!selected.has(row.variantKey) && selected.size >= 50} onCheckedChange={(checked) => toggle(row.variantKey, Boolean(checked))} aria-label={`Выбрать ${row.sku} ${row.size ?? "без размера"}`} /></TableCell>
                     <TableCell className="font-mono text-xs font-semibold">{row.sku}</TableCell>
@@ -924,18 +1324,20 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
               Быстрый способ: наберите в поиске нужный признак (например, «С» для серёг), проверьте, что в таблице остались только они,
               и примените ко всему найденному — отмечать галочками каждую строку не нужно.
             </p>
-            {query
-              ? <p className="text-xs font-medium text-amber-700">Поиск «{query}» — найдено позиций: {stocks.length}.</p>
-              : <p className="text-xs font-medium text-red-700">Поиск пуст: «всем по поиску» затронет весь ассортимент ({stocks.length}). Сначала сузьте поиск.</p>}
+            {filtered
+              ? <p className="text-xs font-medium text-amber-700">{query ? `Поиск «${query}» и фильтры` : "Фильтры"} — в таблице позиций: {visibleStocks.length}.</p>
+              : query
+                ? <p className="text-xs font-medium text-amber-700">Поиск «{query}» — найдено позиций: {stocks.length}.</p>
+                : <p className="text-xs font-medium text-red-700">Поиск пуст: «всем по поиску» затронет весь ассортимент ({stocks.length}). Сначала сузьте поиск.</p>}
           </div>
           <AlertDialogFooter>
             <AlertDialogCancel disabled={savingUnits}>Отмена</AlertDialogCancel>
             <Button variant="outline" onClick={() => void applyUnits("selected")} disabled={savingUnits || selected.size === 0}>
               Выбранным ({selected.size})
             </Button>
-            <Button onClick={() => void applyUnits("search")} disabled={savingUnits}>
+            <Button onClick={() => void applyUnits("search")} disabled={savingUnits || (filtered && visibleStocks.length === 0)}>
               {savingUnits ? <Loader2 className="animate-spin" /> : <Layers />}
-              Всем по поиску ({stocks.length})
+              {filtered ? `Всем в таблице (${visibleStocks.length})` : `Всем по поиску (${stocks.length})`}
             </Button>
           </AlertDialogFooter>
         </AlertDialogContent>
