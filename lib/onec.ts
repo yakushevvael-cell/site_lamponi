@@ -11,8 +11,10 @@ import {
   buildTaskLines,
   generateToken,
   hashToken,
+  knownRegistryQuery,
   taskVersion,
   tokenHint,
+  type KnownRange,
   type RegistryItem,
   type TaskAck,
   type TaskLine,
@@ -98,9 +100,13 @@ export async function readOnecStatus(db: D1Database) {
   };
 }
 
-/** Что из регистра уже есть на сайте: «ШК<TAB>УИН» построчно — 1С по нему решает, что досылать. */
-export async function readKnownRegistry(db: D1Database) {
-  const rows = await db.prepare("SELECT barcode, uin FROM dmdk_registry_items ORDER BY barcode").all<{ barcode: string; uin: string }>();
+/**
+ * Что из регистра уже есть на сайте: «ШК<TAB>УИН» построчно — 1С по нему решает, что досылать.
+ * С диапазоном — только ШК порции сверки; без него — весь регистр.
+ */
+export async function readKnownRegistry(db: D1Database, range: KnownRange | null = null) {
+  const query = knownRegistryQuery(range);
+  const rows = await db.prepare(query.sql).bind(...query.params).all<{ barcode: string; uin: string }>();
   return rows.results.map((row) => `${row.barcode}\t${row.uin}`).join("\n");
 }
 

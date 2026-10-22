@@ -1,18 +1,23 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import test from "node:test";
 
+import { applyMigrations } from "../lib/migrate.mjs";
 import {
   TOKEN_PREFIX,
   bearerToken,
   buildTaskLines,
   generateToken,
   hashToken,
+  knownRegistryQuery,
   normalizeBarcode,
+  parseKnownRange,
   parseRegistryItem,
   parseTaskAck,
   taskVersion,
   tokenHint,
 } from "../lib/onec-core.mjs";
+import { openDatabase } from "../lib/sqlite-d1.mjs";
 
 test("ключ 1С: случайный, с префиксом, в базе только хеш", () => {
   const first = generateToken();
@@ -53,6 +58,43 @@ test("строка регистра без ШК, УИН или артикула 
   assert.equal(parseRegistryItem({ barcode: "200000012345", uin: "", article: "С-1" }), null);
   assert.equal(parseRegistryItem({ barcode: "200000012345", uin: "1", article: "  " }), null);
   assert.equal(parseRegistryItem(null), null);
+});
+
+test("диапазон known: обе границы или ни одной, только цифры, from не больше to", () => {
+  const range = (query) => parseKnownRange(new URLSearchParams(query));
+  assert.deepEqual(range(""), { range: null });
+  assert.deepEqual(range("from=970000000001&to=970000050000"), { range: { from: "970000000001", to: "970000050000" } });
+  // EAN-13 со сканера приводится к 12 цифрам кода 1С, как и в регистре.
+  assert.deepEqual(range("from=9700000000013&to=+970000050000+"), { range: { from: "970000000001", to: "970000050000" } });
+  assert.deepEqual(range("from=970000000001&to=970000000001"), { range: { from: "970000000001", to: "970000000001" } });
+  assert.ok("error" in range("from=970000000001"));
+  assert.ok("error" in range("to=970000000001"));
+  assert.ok("error" in range("from=&to=970000000001"));
+  assert.ok("error" in range("from=97-1&to=970000000001"));
+  assert.ok("error" in range("from=970000050000&to=970000000001"));
+});
+
+test("known по диапазону: границы включительно, по возрастанию, по первичному ключу", async () => {
+  const db = openDatabase(":memory:");
+  await applyMigrations(db, join(import.meta.dirname, "..", "drizzle"));
+  await db.batch(["920000243279", "970000000001", "970000000002", "970000049999", "970000050000", "970000050001"].map(
+    (barcode, index) => db.prepare("INSERT INTO dmdk_registry_items (barcode, uin, article) VALUES (?, ?, 'С-1')").bind(barcode, `U${index}`),
+  ));
+  const read = async (range) => {
+    const query = knownRegistryQuery(range);
+    return (await db.prepare(query.sql).bind(...query.params).all()).results.map((row) => row.barcode);
+  };
+
+  assert.deepEqual(await read({ from: "970000000001", to: "970000050000" }),
+    ["970000000001", "970000000002", "970000049999", "970000050000"]);
+  assert.deepEqual(await read({ from: "970000050002", to: "970000099999" }), []);
+  assert.equal((await read(null)).length, 6);
+
+  // Два миллиона строк: порция должна искаться по индексу, а не просмотром таблицы.
+  const query = knownRegistryQuery({ from: "970000000001", to: "970000050000" });
+  const plan = (await db.prepare(`EXPLAIN QUERY PLAN ${query.sql}`).bind(...query.params).all()).results
+    .map((row) => row.detail).join("\n");
+  assert.match(plan, /SEARCH dmdk_registry_items USING .*barcode>\? AND barcode<\?/);
 });
 
 test("строки задания: только отсканированные изделия, по порядку, цена на изделие", () => {

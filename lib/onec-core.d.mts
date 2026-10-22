@@ -1,6 +1,7 @@
 /** Типы для lib/onec-core.mjs. */
 export type RegistryItem = { barcode: string; uin: string; article: string; size: string | null };
 export type TaskLine = { barcode: string; uin: string; sum: number };
+export type KnownRange = { from: string; to: string };
 export type TaskAck = {
   id: number;
   version: string;
@@ -20,6 +21,8 @@ export declare function tokenHint(token: string): string;
 export declare function bearerToken(header: string | null | undefined): string | null;
 export declare function normalizeBarcode(value: unknown): string;
 export declare function parseRegistryItem(raw: unknown): RegistryItem | null;
+export declare function parseKnownRange(params: URLSearchParams): { range: KnownRange | null } | { error: string };
+export declare function knownRegistryQuery(range: KnownRange | null): { sql: string; params: string[] };
 export declare function buildTaskLines(
   items: Array<{ id: number; uin: string | null; scannedAt: string | null; barcode: string | null; unitPrice: number | null }>,
 ): TaskLine[];
