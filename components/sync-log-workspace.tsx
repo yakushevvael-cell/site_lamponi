@@ -54,6 +54,7 @@ const runLabels: Record<string, string> = {
   warehouse_enabled: "Включение склада",
   warehouse_disabled: "Отключение склада",
   manual_zero: "Ручное обнуление",
+  osv_confirm: "Подтверждение остатка по ОСВ",
   canary: "Канареечный тест",
 };
 

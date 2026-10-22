@@ -23,6 +23,7 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
+import { ZeroDecisionsDialog, type ZeroDecision } from "@/components/zero-decisions";
 import { describeSummary, runFullStockSync } from "@/lib/stock-sync-client";
 
 type OsvDiff = {
@@ -86,6 +87,13 @@ export function OsvUploadWorkspace() {
   const [uploading, setUploading] = useState(false);
   const [history, setHistory] = useState<UploadHistoryItem[]>([]);
   const [historyLoading, setHistoryLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
+  const [zeroItems, setZeroItems] = useState<ZeroDecision[]>([]);
+  const [zeroOpen, setZeroOpen] = useState(false);
+  const [canDecideZero, setCanDecideZero] = useState(false);
+  // Выгрузка на площадки ждёт, пока закроют окно подтверждения остатков:
+  // иначе она отправила бы нули по позициям, которые как раз подтверждают.
+  const syncAfterDecisions = useRef(false);
 
   const loadHistory = useCallback(async () => {
     setHistoryLoading(true);
@@ -162,7 +170,12 @@ export function OsvUploadWorkspace() {
       body.set("balanceDate", balanceDate);
       if (acceptBlockers) body.set("acceptBlockers", "1");
       const response = await fetch("/api/osv", { method: "POST", body });
-      const data = await response.json() as { error?: string; reservations?: { active: number; reservedQuantity: number } };
+      const data = await response.json() as {
+        error?: string;
+        reservations?: { active: number; reservedQuantity: number };
+        zeroDecisions?: ZeroDecision[];
+        canDecideZero?: boolean;
+      };
       if (!response.ok) throw new Error(data.error ?? "Не удалось загрузить ОСВ.");
       toast.success("Остатки обновлены", {
         description: `${preview.articleCount.toLocaleString("ru-RU")} артикулов · ${preview.variantCount.toLocaleString("ru-RU")} позиций · ${preview.totalQuantity.toLocaleString("ru-RU")} шт. Резерв пересчитан: ${(data.reservations?.reservedQuantity ?? 0).toLocaleString("ru-RU")} шт.`,
@@ -173,30 +186,54 @@ export function OsvUploadWorkspace() {
       if (inputRef.current) inputRef.current.value = "";
       await loadHistory();
 
-      // ТЗ, п. 8: синхронизация запускается после загрузки новой ОСВ.
-      // Фоновых задач на этом хостинге нет, поэтому цикл ведёт эта же вкладка.
-      try {
-        const summary = await runFullStockSync({
-        onProgress: setSyncProgress,
-        // Массовое обнуление подтверждает человек: автоматически такой запуск не идёт.
-        onMassZero: (info) => window.confirm(`${info.message}\n\nОтправить нули на площадки?`),
-      });
-        const description = describeSummary(summary);
-        if (summary.ok) toast.success("Остатки отправлены на площадки", { description });
-        else toast.warning("Синхронизация завершена частично", { description });
-      } catch (error) {
-        toast.warning("ОСВ загружена, остатки не отправлены", {
-          description: `${error instanceof Error ? error.message : "Повторите попытку."} Запустите синхронизацию на вкладке «Остатки».`,
-        });
-      } finally {
-        setSyncProgress("");
+      if (data.zeroDecisions?.length) {
+        setZeroItems(data.zeroDecisions);
+        setCanDecideZero(Boolean(data.canDecideZero));
+        setZeroOpen(true);
+        syncAfterDecisions.current = true;
+        return;
       }
+      await syncStocksAfterUpload();
     } catch (error) {
       toast.error("Загрузка не завершена", { description: error instanceof Error ? error.message : "Повторите попытку." });
     } finally {
       setUploading(false);
     }
   };
+
+  // ТЗ, п. 8: синхронизация запускается после загрузки новой ОСВ.
+  // Фоновых задач на этом хостинге нет, поэтому цикл ведёт эта же вкладка.
+  async function syncStocksAfterUpload() {
+    setSyncing(true);
+    try {
+      const summary = await runFullStockSync({
+        onProgress: setSyncProgress,
+        // Массовое обнуление подтверждает человек: автоматически такой запуск не идёт.
+        onMassZero: (info) => window.confirm(`${info.message}\n\nОтправить нули на площадки?`),
+      });
+      const description = describeSummary(summary);
+      if (summary.ok) toast.success("Остатки отправлены на площадки", { description });
+      else toast.warning("Синхронизация завершена частично", { description });
+    } catch (error) {
+      toast.warning("ОСВ загружена, остатки не отправлены", {
+        description: `${error instanceof Error ? error.message : "Повторите попытку."} Запустите синхронизацию на вкладке «Остатки».`,
+      });
+    } finally {
+      setSyncProgress("");
+      setSyncing(false);
+    }
+  }
+
+  function closeZeroDecisions(remaining: number) {
+    setZeroOpen(false);
+    if (remaining > 0) {
+      toast.info(`Ждут решения: ${remaining}`, { description: "Позиции остаются с нулём. Список — на странице «Расхождения»." });
+    }
+    if (syncAfterDecisions.current) {
+      syncAfterDecisions.current = false;
+      void syncStocksAfterUpload();
+    }
+  }
 
   return (
     <div className="mx-auto grid max-w-[1320px] gap-5 p-4 md:p-7 xl:grid-cols-[0.9fr_1.1fr]">
@@ -330,7 +367,7 @@ export function OsvUploadWorkspace() {
 
             <Button
               className="h-11 w-full"
-              disabled={!preview || uploading || (preview.blockers.length > 0 && !acceptBlockers)}
+              disabled={!preview || uploading || syncing || (preview.blockers.length > 0 && !acceptBlockers)}
               onClick={upload}
             >
               {uploading ? <Loader2 className="animate-spin" /> : <RefreshCw />}
@@ -349,10 +386,19 @@ export function OsvUploadWorkspace() {
           <ol className="mt-3 space-y-2 text-xs leading-5 text-emerald-900">
             <li>1. Сервис сохранит остаток отдельно по каждому сочетанию «артикул + размер».</li>
             <li>2. Закроет резервы уже отгруженных заказов, чтобы не списать товар дважды.</li>
-            <li>3. Рассчитает доступный сток и отправит его на каждый активный FBS-склад.</li>
+            <li>3. Если по обнулённым товарам (не найден при сборке, обнулён вручную) в ОСВ есть остаток — спросит, верный ли он.</li>
+            <li>4. Рассчитает доступный сток и отправит его на каждый активный FBS-склад.</li>
           </ol>
         </div>
       </section>
+
+      <ZeroDecisionsDialog
+        open={zeroOpen}
+        items={zeroItems}
+        canDecide={canDecideZero}
+        onItemsChange={setZeroItems}
+        onClose={closeZeroDecisions}
+      />
 
       <Card className="h-fit border-border/80 shadow-[0_8px_24px_rgba(31,38,51,0.04)]">
         <CardHeader className="px-5">

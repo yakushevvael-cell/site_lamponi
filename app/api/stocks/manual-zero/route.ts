@@ -8,6 +8,7 @@ import type { MarketplaceStockId } from "@/lib/stock-math";
 import { updateWildberriesStocks } from "@/lib/wildberries";
 import { updateYandexStocks } from "@/lib/yandex";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
+import { PROBLEM_MATCHES_PRODUCT_SQL } from "@/lib/zero-decisions";
 
 type MappingRow = {
   productSku: string;
@@ -151,7 +152,20 @@ export async function POST(request: Request) {
   if (existing.results.length !== sourceSkus.length) return Response.json({ error: "Часть выбранных позиций не найдена." }, { status: 400 });
 
   if (action === "restore") {
-    await db.prepare(`UPDATE products SET manual_zero = 0, manual_zero_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE source_sku IN (${placeholders})`).bind(...sourceSkus).run();
+    // Не найденный при сборке товар возвращается в продажу только подтверждением
+    // остатка при загрузке ОСВ: кнопка «Снять обнуление» — для ручных обнулений.
+    const notFound = await db.prepare(
+      `SELECT p.article AS article, p.size AS size FROM products p
+       WHERE p.source_sku IN (${placeholders}) AND p.manual_zero = 1
+         AND EXISTS (SELECT 1 FROM problem_articles pa WHERE ${PROBLEM_MATCHES_PRODUCT_SQL})`,
+    ).bind(...sourceSkus).all<{ article: string; size: string | null }>();
+    if (notFound.results.length > 0) {
+      const list = notFound.results.slice(0, 5).map((row) => (row.size ? `${row.article} / ${row.size}` : row.article)).join(", ");
+      return Response.json({
+        error: `Не найдены при сборке: ${list}. Такие позиции возвращаются в продажу только подтверждением остатка при загрузке ОСВ.`,
+      }, { status: 409 });
+    }
+    await db.prepare(`UPDATE products SET manual_zero = 0, manual_zero_at = NULL, zero_declined_qty = NULL, updated_at = CURRENT_TIMESTAMP WHERE source_sku IN (${placeholders})`).bind(...sourceSkus).run();
     return Response.json({ ok: true, action, selected: sourceSkus.length, note: "Положительный остаток на площадки не отправлялся." });
   }
 

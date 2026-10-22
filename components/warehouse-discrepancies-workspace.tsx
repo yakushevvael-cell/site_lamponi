@@ -5,26 +5,19 @@
  *
  * Подсветка строки означает «количество в ОСВ выросло после блокировки» и
  * говорит только о том, куда смотреть первым делом: в ОСВ мог прийти новый
- * выпуск, а не найтись потерянное изделие. Решение всё равно за человеком.
+ * выпуск, а не найтись потерянное изделие. Решение всё равно за человеком:
+ * в продажу товар возвращается только подтверждением остатка по ОСВ — список
+ * «Ждут решения» вверху страницы.
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, History, Loader2, Scale, Unlock } from "lucide-react";
+import { AlertTriangle, ClipboardCheck, History, Loader2, Scale } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
+import { ZeroDecisionsList, type ZeroDecision } from "@/components/zero-decisions";
 import { formatAge, formatMoment } from "@/lib/utils";
 
 type Row = {
@@ -64,6 +57,8 @@ const ACTION_LABEL: Record<string, string> = {
   blocked: "заблокирован",
   repeat: "не найден повторно",
   released: "блокировка снята",
+  osv_confirmed: "остаток по ОСВ подтверждён",
+  osv_declined: "остаток по ОСВ не подтверждён",
   wb_cancelled: "отменено задание WB",
 };
 
@@ -71,20 +66,24 @@ export function WarehouseDiscrepanciesWorkspace() {
   const [items, setItems] = useState<Row[]>([]);
   const [log, setLog] = useState<LogRow[]>([]);
   const [lastOsv, setLastOsv] = useState<Osv>(null);
-  const [canRelease, setCanRelease] = useState(false);
+  const [pending, setPending] = useState<ZeroDecision[]>([]);
+  const [canDecide, setCanDecide] = useState(false);
   const [loading, setLoading] = useState(true);
-  const [busy, setBusy] = useState<number | null>(null);
-  const [releaseTarget, setReleaseTarget] = useState<Row | null>(null);
-  const [comment, setComment] = useState("");
 
   const load = useCallback(async () => {
-    const response = await fetch("/api/warehouse/discrepancies", { cache: "no-store" });
-    const data = await response.json() as { items?: Row[]; log?: LogRow[]; lastOsv?: Osv; canRelease?: boolean; error?: string };
+    const [response, pendingResponse] = await Promise.all([
+      fetch("/api/warehouse/discrepancies", { cache: "no-store" }),
+      fetch("/api/stocks/zero-decisions", { cache: "no-store" }),
+    ]);
+    const data = await response.json() as { items?: Row[]; log?: LogRow[]; lastOsv?: Osv; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Расхождения не загрузились.");
+    const pendingData = await pendingResponse.json() as { items?: ZeroDecision[]; canDecide?: boolean; error?: string };
+    if (!pendingResponse.ok) throw new Error(pendingData.error ?? "Список «Ждут решения» не загрузился.");
     setItems(data.items ?? []);
     setLog(data.log ?? []);
     setLastOsv(data.lastOsv ?? null);
-    setCanRelease(Boolean(data.canRelease));
+    setPending(pendingData.items ?? []);
+    setCanDecide(Boolean(pendingData.canDecide));
   }, []);
 
   useEffect(() => {
@@ -93,25 +92,6 @@ export function WarehouseDiscrepanciesWorkspace() {
       .catch((error: unknown) => toast.error(error instanceof Error ? error.message : "Расхождения не загрузились."))
       .finally(() => setLoading(false));
   }, [load]);
-
-  async function release(row: Row, text: string) {
-    setBusy(row.id);
-    try {
-      const response = await fetch("/api/warehouse/problems", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ action: "release", id: row.id, comment: text }),
-      });
-      const data = await response.json() as { error?: string };
-      if (!response.ok) throw new Error(data.error ?? "Не удалось снять блокировку.");
-      toast.success("Блокировка снята", { description: "Остаток вернётся в продажу при следующей выгрузке." });
-      await load();
-    } catch (error) {
-      toast.error(error instanceof Error ? error.message : "Не удалось снять блокировку.");
-    } finally {
-      setBusy(null);
-    }
-  }
 
   if (loading) {
     return <div className="grid min-h-72 place-items-center text-sm text-muted-foreground"><Loader2 className="mr-2 inline size-4 animate-spin" />Считаем расхождения…</div>;
@@ -124,8 +104,9 @@ export function WarehouseDiscrepanciesWorkspace() {
 
   return (
     <div className="mx-auto max-w-[1400px] space-y-6 p-4 md:p-7">
-      <section className="grid gap-4 sm:grid-cols-3">
+      <section className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
         {[
+          { label: "Ждут решения по ОСВ", value: pending.length, note: "в ОСВ есть остаток, на площадках 0" },
           { label: "Заблокировано артикулов", value: blocked.length, note: "остаток по ним обнулён" },
           { label: "Сорвано заказов", value: blocked.reduce((sum, row) => sum + row.failedOrderCount, 0), note: "с момента блокировки" },
           { label: "Количество в ОСВ выросло", value: grew.length, note: "смотреть первым делом" },
@@ -153,6 +134,29 @@ export function WarehouseDiscrepanciesWorkspace() {
         )}
       </div>
 
+      {pending.length > 0 ? (
+        <Card className="gap-0 overflow-hidden border-amber-300 py-0">
+          <CardHeader className="border-b px-5 py-4">
+            <CardTitle className="flex items-center gap-2 text-base"><ClipboardCheck className="size-4" /> Ждут решения: остаток в ОСВ у обнулённых товаров</CardTitle>
+            <CardDescription>
+              {canDecide
+                ? "«Да» — остаток по ОСВ верный: товар сразу вернётся в продажу. «Нет» — остаётся 0, снова спросим, когда количество в ОСВ изменится."
+                : "Подтвердить остаток может сотрудник с правом «Подтверждение остатка и расхождения». До тех пор на площадках 0."}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="p-4">
+            <ZeroDecisionsList
+              items={pending}
+              canDecide={canDecide}
+              onItemsChange={(next) => {
+                setPending(next);
+                void load().catch(() => undefined);
+              }}
+            />
+          </CardContent>
+        </Card>
+      ) : null}
+
       <Card className="gap-0 overflow-hidden py-0">
         <CardHeader className="border-b px-5 py-4">
           <CardTitle className="flex items-center gap-2 text-base"><AlertTriangle className="size-4" /> Расхождения по артикулам</CardTitle>
@@ -169,8 +173,7 @@ export function WarehouseDiscrepanciesWorkspace() {
                 <TableHead className="text-right">Было при блокировке</TableHead>
                 <TableHead>Заблокирован</TableHead>
                 <TableHead className="text-right">Сорвано заказов</TableHead>
-                <TableHead>Состояние</TableHead>
-                <TableHead className="pr-5 text-right">Действия</TableHead>
+                <TableHead className="pr-5">Состояние</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -190,7 +193,7 @@ export function WarehouseDiscrepanciesWorkspace() {
                     <span className="block">{row.blockedBy ?? ""}</span>
                   </TableCell>
                   <TableCell className="text-right text-sm">{row.failedOrderCount}</TableCell>
-                  <TableCell className="text-xs">
+                  <TableCell className="pr-5 text-xs">
                     {row.state === "blocked" ? (
                       <>
                         <Badge variant="destructive" className="text-[10px]">остаток обнулён</Badge>
@@ -204,17 +207,10 @@ export function WarehouseDiscrepanciesWorkspace() {
                       </>
                     )}
                   </TableCell>
-                  <TableCell className="pr-5 text-right">
-                    {row.state === "blocked" && canRelease ? (
-                      <Button size="sm" variant="outline" disabled={busy === row.id} onClick={() => { setReleaseTarget(row); setComment(""); }}>
-                        {busy === row.id ? <Loader2 className="size-4 animate-spin" /> : <Unlock className="size-4" />} Снять
-                      </Button>
-                    ) : null}
-                  </TableCell>
                 </TableRow>
               ))}
               {items.length === 0 ? (
-                <TableRow><TableCell colSpan={7} className="h-28 text-center text-muted-foreground">Расхождений нет.</TableCell></TableRow>
+                <TableRow><TableCell colSpan={6} className="h-28 text-center text-muted-foreground">Расхождений нет.</TableCell></TableRow>
               ) : null}
             </TableBody>
           </Table>
@@ -256,31 +252,6 @@ export function WarehouseDiscrepanciesWorkspace() {
         </div>
       </Card>
 
-      <Dialog open={Boolean(releaseTarget)} onOpenChange={(open) => { if (!open) setReleaseTarget(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Снять блокировку {releaseTarget?.article}</DialogTitle>
-            <DialogDescription>
-              Остаток вернётся в продажу при следующей выгрузке — по данным ОСВ. Комментарий обязателен:
-              по нему потом видно, что выяснилось.
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea rows={3} placeholder="Нашли в ячейке B-04-12, ошибка раскладки" value={comment} onChange={(event) => setComment(event.target.value)} />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setReleaseTarget(null)}>Отмена</Button>
-            <Button
-              disabled={comment.trim().length < 3}
-              onClick={() => {
-                const target = releaseTarget;
-                setReleaseTarget(null);
-                if (target) void release(target, comment);
-              }}
-            >
-              Снять блокировку
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

@@ -4,30 +4,20 @@
  * Проблемные товары.
  *
  * Товар числится в учёте, но его нет в ячейке. Пока артикул заблокирован, его
- * остаток равен нулю на обеих площадках и ОСВ его не поднимает. Снять
- * блокировку можно только вручную и только с комментарием — автоснятия нет
- * сознательно: скана при размещении в ячейку нет, а рост количества в ОСВ
- * сигнал ненадёжный.
+ * остаток равен нулю на всех площадках и ОСВ его не поднимает. Кнопки снятия
+ * нет: в продажу товар возвращается, только когда новая ОСВ показала по нему
+ * остаток и человек подтвердил его при загрузке ОСВ (или на «Расхождениях»).
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { AlertTriangle, Ban, History, Loader2, Unlock } from "lucide-react";
+import { AlertTriangle, Ban, History, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Textarea } from "@/components/ui/textarea";
 import { marketplaceLabel } from "@/lib/marketplaces";
 import { formatAge, formatMoment } from "@/lib/utils";
 
@@ -72,26 +62,24 @@ const ACTION_LABEL: Record<string, string> = {
   blocked: "заблокирован",
   repeat: "не найден повторно",
   released: "блокировка снята",
+  osv_confirmed: "остаток по ОСВ подтверждён",
+  osv_declined: "остаток по ОСВ не подтверждён",
   wb_cancelled: "отменено задание WB",
 };
 
 export function WarehouseProblemsWorkspace() {
   const [items, setItems] = useState<Problem[]>([]);
   const [log, setLog] = useState<LogRow[]>([]);
-  const [canRelease, setCanRelease] = useState(false);
   const [state, setState] = useState<"blocked" | "released" | "all">("blocked");
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState<string | null>(null);
-  const [releaseTarget, setReleaseTarget] = useState<Problem | null>(null);
-  const [comment, setComment] = useState("");
 
   const load = useCallback(async (nextState: typeof state) => {
     const response = await fetch(`/api/warehouse/problems?state=${nextState}`, { cache: "no-store" });
-    const data = await response.json() as { items?: Problem[]; log?: LogRow[]; canRelease?: boolean; error?: string };
+    const data = await response.json() as { items?: Problem[]; log?: LogRow[]; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Список не загрузился.");
     setItems(data.items ?? []);
     setLog(data.log ?? []);
-    setCanRelease(Boolean(data.canRelease));
   }, []);
 
   useEffect(() => {
@@ -225,12 +213,10 @@ export function WarehouseProblemsWorkspace() {
                             </Button>
                           )
                         ) : null}
-                        {item.state === "blocked" && canRelease ? (
-                          <Button size="sm" variant="outline" disabled={busy !== null} onClick={() => { setReleaseTarget(item); setComment(""); }}>
-                            <Unlock className="size-4" /> Снять блокировку
-                          </Button>
-                        ) : item.state === "blocked" ? (
-                          <span className="text-xs text-muted-foreground">снимает начальник склада</span>
+                        {item.state === "blocked" ? (
+                          <span className="block text-xs text-muted-foreground">
+                            не найден при сборке · в продажу — после подтверждения остатка при загрузке ОСВ
+                          </span>
                         ) : (
                           <span className="text-xs text-muted-foreground">{item.comment ?? ""}</span>
                         )}
@@ -282,36 +268,6 @@ export function WarehouseProblemsWorkspace() {
         </div>
       </Card>
 
-      <Dialog open={Boolean(releaseTarget)} onOpenChange={(open) => { if (!open) setReleaseTarget(null); }}>
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>Снять блокировку {releaseTarget?.article}</DialogTitle>
-            <DialogDescription>
-              Остаток вернётся в продажу при следующей выгрузке — по данным ОСВ.
-              Комментарий обязателен: без него потом не понять, что выяснилось.
-            </DialogDescription>
-          </DialogHeader>
-          <Textarea
-            rows={3}
-            placeholder="Нашли в ячейке B-04-12, ошибка раскладки"
-            value={comment}
-            onChange={(event) => setComment(event.target.value)}
-          />
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setReleaseTarget(null)}>Отмена</Button>
-            <Button
-              disabled={comment.trim().length < 3 || busy !== null}
-              onClick={() => {
-                const target = releaseTarget;
-                setReleaseTarget(null);
-                if (target) void post({ action: "release", id: target.id, comment }, "Блокировка снята");
-              }}
-            >
-              Снять блокировку
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   );
 }

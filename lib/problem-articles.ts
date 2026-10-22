@@ -1,14 +1,15 @@
 /**
  * Проблемные товары: в учёте есть, физически нет.
  *
- * ТЗ, п. 4. Отметка «не найден» уводит остаток артикула в ноль на обеих
+ * ТЗ, п. 4. Отметка «не найден» уводит остаток артикула в ноль на всех
  * площадках сразу. Блокировка — это именно нулевой остаток плюс игнорирование
  * артикула при загрузке ОСВ (признак manual_zero у товара уже так и работает),
  * а не резерв и не запрет отгрузки того, что уже заказано.
  *
- * Снятие — только вручную и только с комментарием: скана при размещении в
- * ячейку нет, а рост количества в ОСВ ненадёжный сигнал, поэтому автоснятия
- * здесь нет сознательно.
+ * Кнопки снятия нет: в продажу товар возвращается только тогда, когда новая
+ * ОСВ показала по нему остаток и человек подтвердил, что остаток верный
+ * (lib/zero-decisions). Скана при размещении в ячейку нет, а рост количества
+ * в ОСВ сам по себе ненадёжный сигнал — поэтому решение за человеком.
  */
 import { markStocksDirty } from "@/lib/stock-queue";
 import { pushStocksForSkus } from "@/lib/stock-push";
@@ -169,7 +170,7 @@ export async function blockArticle(db: D1Database, runtime: AppRuntimeEnv, input
     ]);
   }
 
-  const zeroed = await applyManualZero(db, sourceSkus, true);
+  const zeroed = await applyManualZero(db, sourceSkus);
   const pushed = await pushZeros(db, runtime, sourceSkus, input.actorEmail);
 
   return {
@@ -185,64 +186,14 @@ export async function blockArticle(db: D1Database, runtime: AppRuntimeEnv, input
   };
 }
 
-export type ReleaseInput = {
-  id: number;
-  actorEmail: string;
-  comment: string;
-};
-
-/** Снятие блокировки. Комментарий обязателен — иначе разбор потом не прочитать. */
-export async function releaseArticle(db: D1Database, runtime: AppRuntimeEnv, input: ReleaseInput) {
-  const comment = input.comment.trim();
-  if (comment.length < 3) return { ok: false as const, error: "Напишите, что выяснилось: комментарий обязателен." };
-
-  const row = await db.prepare(`SELECT ${PROBLEM_COLUMNS} FROM problem_articles WHERE id = ?`)
-    .bind(input.id).first<ProblemArticle>();
-  if (!row) return { ok: false as const, error: "Запись не найдена." };
-  if (row.state !== "blocked") return { ok: false as const, error: "Блокировка уже снята." };
-
-  const products = await readProductSkus(db, row.article, row.size);
-  const sourceSkus = products.map((item) => item.sourceSku);
-
-  await db.batch([
-    db.prepare(
-      `UPDATE problem_articles
-       SET state = 'released', released_by = ?, released_at = CURRENT_TIMESTAMP, comment = ?
-       WHERE id = ?`,
-    ).bind(input.actorEmail, comment, input.id),
-    db.prepare(
-      `INSERT INTO problem_article_log (article, size, action, actor_email, comment, task_number)
-       VALUES (?, ?, 'released', ?, ?, ?)`,
-    ).bind(row.article, row.size, input.actorEmail, comment, row.taskNumber),
-    eventStatement(db, {
-      kind: "problem_released",
-      taskId: row.taskId,
-      taskNumber: row.taskNumber,
-      article: row.article,
-      size: row.size,
-      actorEmail: input.actorEmail,
-      payload: { comment, failedOrderCount: row.failedOrderCount },
-    }),
-  ]);
-
-  const restored = await applyManualZero(db, sourceSkus, false);
-  // Положительный остаток сам не уедет: он посчитается от свежей ОСВ при
-  // следующей выгрузке, поэтому позиции просто ставятся в очередь.
-  if (sourceSkus.length > 0) await markStocksDirty(db, sourceSkus, "снята блокировка проблемного товара").catch(() => undefined);
-
-  return { ok: true as const, restored, skus: sourceSkus };
-}
-
-async function applyManualZero(db: D1Database, sourceSkus: string[], zero: boolean) {
+async function applyManualZero(db: D1Database, sourceSkus: string[]) {
   if (sourceSkus.length === 0) return 0;
   let changed = 0;
   for (let start = 0; start < sourceSkus.length; start += 100) {
     const chunk = sourceSkus.slice(start, start + 100);
     const placeholders = chunk.map(() => "?").join(",");
     const result = await db.prepare(
-      zero
-        ? `UPDATE products SET manual_zero = 1, manual_zero_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE source_sku IN (${placeholders})`
-        : `UPDATE products SET manual_zero = 0, manual_zero_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE source_sku IN (${placeholders})`,
+      `UPDATE products SET manual_zero = 1, manual_zero_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE source_sku IN (${placeholders})`,
     ).bind(...chunk).run();
     changed += Number(result.meta.changes ?? 0);
   }

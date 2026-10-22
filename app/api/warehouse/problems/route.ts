@@ -1,13 +1,13 @@
 /**
- * Проблемные товары: список, статусы разбора и снятие блокировки.
+ * Проблемные товары: список, статусы разбора и отмена заданий WB.
  *
- * Снятие — отдельное право («Снятие блокировки», уровень начальника склада) и
- * только с комментарием. Журнал блокировок отдаётся вместе со списком: строки
- * из него не удаляются и не правятся.
+ * Кнопки снятия блокировки нет: в продажу товар возвращается только
+ * подтверждением остатка при загрузке ОСВ (lib/zero-decisions). Журнал
+ * блокировок отдаётся вместе со списком: строки из него не удаляются и не правятся.
  */
 import { getMarketplaceCredentials } from "@/lib/credentials";
 import { authorizePermission } from "@/lib/permissions";
-import { readProblemArticles, releaseArticle, setProblemStatus } from "@/lib/problem-articles";
+import { readProblemArticles, setProblemStatus } from "@/lib/problem-articles";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { logWarehouseEvent } from "@/lib/warehouse";
 import { cancelWildberriesOrder } from "@/lib/wildberries";
@@ -34,7 +34,6 @@ export async function GET(request: Request) {
     state,
     items,
     log: log.results,
-    canRelease: auth.permissions.includes("warehouse.problems.release"),
   });
 }
 
@@ -48,7 +47,6 @@ export async function POST(request: Request) {
     action?: unknown;
     id?: unknown;
     status?: unknown;
-    comment?: unknown;
   } | null;
   const action = String(body?.action ?? "");
   const id = Number(body?.id);
@@ -124,16 +122,6 @@ export async function POST(request: Request) {
     });
 
     return Response.json({ ok: true, cancelled: row.externalOrderId });
-  }
-
-  if (action === "release") {
-    if (!auth.permissions.includes("warehouse.problems.release")) {
-      return Response.json({ error: "Снять блокировку может начальник склада." }, { status: 403 });
-    }
-    const comment = typeof body?.comment === "string" ? body.comment : "";
-    const result = await releaseArticle(runtime.DB, runtime, { id: Math.trunc(id), actorEmail: auth.user.email, comment });
-    if (!result.ok) return Response.json({ error: result.error }, { status: 400 });
-    return Response.json({ ok: true, restored: result.restored });
   }
 
   return Response.json({ error: "Неизвестное действие." }, { status: 400 });

@@ -48,6 +48,11 @@ export const products = sqliteTable(
     manualZero: integer("manual_zero", { mode: "boolean" }).notNull().default(false),
     manualZeroAt: text("manual_zero_at"),
     /**
+     * Остаток по ОСВ, который при обнулённой позиции не подтвердили («Нет»).
+     * Пока количество в ОСВ то же самое, повторно не спрашиваем.
+     */
+    zeroDeclinedQty: real("zero_declined_qty"),
+    /**
      * Позиция участвует в пилоте: в пилотном режиме автоматика трогает
      * только такие. Нужен, чтобы обкатать автоматическую выгрузку на
      * нескольких артикулах, прежде чем отдать ей весь ассортимент.

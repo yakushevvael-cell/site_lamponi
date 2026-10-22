@@ -27,7 +27,7 @@ import type { SyncTrigger } from "@/lib/stock-log";
  */
 
 export const CHECK_DELAY_MINUTES = 10;
-const CHECK_TRIGGERS = new Set<SyncTrigger>(["orders_sync", "manual"]);
+const CHECK_TRIGGERS = new Set<SyncTrigger>(["orders_sync", "manual", "osv_confirm"]);
 const RETENTION_DAYS = 14;
 const BATCH_LIMIT = 100;
 /** Проверка, взятая в работу и не завершённая за это время, считается брошенной. */

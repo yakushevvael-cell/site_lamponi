@@ -8,6 +8,7 @@ import { parseOsvWorkbook } from "@/lib/osv-parser";
 import { rebuildReservations } from "@/lib/reservations";
 import { mergeSizeSpellings } from "@/lib/size-merge.mjs";
 import { getRuntimeEnv } from "@/lib/runtime-env";
+import { readPendingZeroDecisions, resetDeclinedForEmptyOsv } from "@/lib/zero-decisions";
 
 const MAX_FILE_SIZE = 12 * 1024 * 1024;
 const PREVIEW_ROWS = 25;
@@ -198,6 +199,12 @@ export async function POST(request: Request) {
     // уже учла (сравнение с датой ОСВ), и снимаем протухшие резервы.
     const reservations = await rebuildReservations(db);
 
+    // Обнулённые позиции ОСВ в продажу не возвращает: где в ней остаток больше
+    // нуля, человек подтверждает его во всплывающем окне (lib/zero-decisions).
+    await resetDeclinedForEmptyOsv(db);
+    const zeroDecisions = await readPendingZeroDecisions(db);
+    const permissions = await readEffectivePermissions(auth.user);
+
     return Response.json({
       mode: "apply",
       upload: {
@@ -217,6 +224,8 @@ export async function POST(request: Request) {
       },
       diff,
       reservations,
+      zeroDecisions,
+      canDecideZero: permissions.includes("warehouse.problems.release"),
     }, { status: 201 });
   } catch (error) {
     return Response.json({ error: errorMessage(error) }, { status: 400 });

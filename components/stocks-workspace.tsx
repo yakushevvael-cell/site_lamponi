@@ -37,6 +37,8 @@ type StockRow = {
   availableQuantity: number;
   manualZero: number | boolean;
   manualZeroAt: string | null;
+  /** Обнулена потому, что товар не нашли при сборке. */
+  notFound: number | boolean;
   /** Внешний код позиции на площадке; null — сопоставления нет, отправлять некуда. */
   wbSku: string | null;
   ozonSku: string | null;
@@ -306,9 +308,10 @@ function RemoteRowCard({ row }: { row: RemoteStockRow }) {
   );
 }
 
-type StockStatus = "manualZero" | "out" | "low" | "in";
+type StockStatus = "notFound" | "manualZero" | "out" | "low" | "in";
 
 const stockStatusLabel: Record<StockStatus, string> = {
+  notFound: "Не найден при сборке",
   manualZero: "Обнулено вручную",
   out: "Нет в наличии",
   low: "Мало",
@@ -316,7 +319,7 @@ const stockStatusLabel: Record<StockStatus, string> = {
 };
 
 function stockStatus(row: StockRow): StockStatus {
-  if (row.manualZero) return "manualZero";
+  if (row.manualZero) return row.notFound ? "notFound" : "manualZero";
   if (row.availableQuantity <= 0) return "out";
   if (row.availableQuantity < 5) return "low";
   return "in";
@@ -324,6 +327,7 @@ function stockStatus(row: StockRow): StockStatus {
 
 function StatusBadge({ row }: { row: StockRow }) {
   const status = stockStatus(row);
+  if (status === "notFound") return <Badge variant="destructive">{stockStatusLabel.notFound}</Badge>;
   if (status === "manualZero") return <Badge variant="destructive">{stockStatusLabel.manualZero}</Badge>;
   if (status === "out") return <Badge variant="secondary">{stockStatusLabel.out}</Badge>;
   if (status === "low") return <Badge className="bg-amber-100 text-amber-800 hover:bg-amber-100">{stockStatusLabel.low}</Badge>;
@@ -648,7 +652,7 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   // Счётчики в фильтрах — по всему, что нашёл поиск, а не по уже отфильтрованному.
   const filterCounts = useMemo(() => {
     const coverage: Record<Coverage, number> = { none: 0, one: 0, two: 0, three: 0 };
-    const statuses: Record<StockStatus, number> = { manualZero: 0, out: 0, low: 0, in: 0 };
+    const statuses: Record<StockStatus, number> = { notFound: 0, manualZero: 0, out: 0, low: 0, in: 0 };
     const sizes = new Map<string, number>();
     for (const row of stocks) {
       coverage[coverageOf(row)] += 1;
@@ -675,7 +679,9 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
 
   const allSelected = visibleStocks.length > 0 && visibleStocks.slice(0, 50).every((row) => selected.has(row.variantKey));
   const selectedRows = useMemo(() => stocks.filter((row) => selected.has(row.variantKey)), [selected, stocks]);
-  const canRestore = selectedRows.some((row) => Boolean(row.manualZero));
+  // «Снять обнуление» — только для ручных обнулений: не найденный при сборке
+  // товар возвращается в продажу подтверждением остатка при загрузке ОСВ.
+  const canRestore = selectedRows.some((row) => Boolean(row.manualZero)) && !selectedRows.some((row) => Boolean(row.manualZero) && Boolean(row.notFound));
   // Сколько из отмеченных вообще есть на площадках: раньше это выяснялось
   // только из ответа после отправки, когда половина позиций оказывалась «unmapped».
   const selectedMapping = useMemo(() => ({

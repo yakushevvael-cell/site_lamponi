@@ -1,6 +1,7 @@
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { authorizeApi } from "@/lib/app-auth";
 import { OSV_UNITS_SQL } from "@/lib/osv-units";
+import { PROBLEM_MATCHES_PRODUCT_SQL } from "@/lib/zero-decisions";
 
 export async function GET(request: Request) {
   const auth = await authorizeApi();
@@ -22,6 +23,8 @@ export async function GET(request: Request) {
        p.safety_stock AS safetyStock,
        p.manual_zero AS manualZero,
        p.manual_zero_at AS manualZeroAt,
+       -- Обнулена не вручную, а потому что товар не нашли при сборке.
+       EXISTS (SELECT 1 FROM problem_articles pa WHERE ${PROBLEM_MATCHES_PRODUCT_SQL}) AS notFound,
        -- Та же формула, что и в lib/stock-math: MAX(0; ОСВ − резерв − страховой), целое.
        CASE WHEN p.manual_zero = 1 THEN 0 ELSE MAX(0, CAST(${OSV_UNITS_SQL} - COALESCE(SUM(CASE WHEN r.status = 'active' THEN r.quantity ELSE 0 END), 0) - p.safety_stock AS INTEGER)) END AS availableQuantity,
        -- Сопоставление с площадками берём подзапросами, а не вторым JOIN:

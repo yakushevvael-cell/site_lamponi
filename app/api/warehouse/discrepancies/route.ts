@@ -4,7 +4,8 @@
  * Показывает, где учёт и склад разошлись: артикул, количество по 1С, дата
  * блокировки, кто заблокировал, сколько заказов сорвалось. Строки, где
  * количество в ОСВ выросло после блокировки, подсвечиваются — это подсказка,
- * куда смотреть первым делом, а не команда снимать блокировку.
+ * куда смотреть первым делом. Вернуть товар в продажу можно только
+ * подтверждением остатка по ОСВ (/api/stocks/zero-decisions).
  */
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
@@ -73,6 +74,5 @@ export async function GET() {
     items,
     log: log.results,
     lastOsv,
-    canRelease: auth.permissions.includes("warehouse.problems.release"),
   });
 }
