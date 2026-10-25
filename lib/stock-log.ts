@@ -15,6 +15,14 @@ const LOG_RETENTION_DAYS = 30;
 /** Успешные строки — самые массовые (~1,3 млн в сутки): храним их коротко, иначе база растёт на 0,5 ГБ в день. */
 const SUCCESS_RETENTION_DAYS = 3;
 const BATCH_SIZE = 50;
+/**
+ * Чистка журнала — не чаще раза в час. База синхронная и общая со столом
+ * упаковки: пока DELETE перебирает миллионы строк журнала, сервер не отвечает
+ * никому. После каждого прогона выгрузки чистить незачем — строки
+ * устаревают сутками.
+ */
+const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+let lastCleanupAt = 0;
 
 export type LogRow = Partial<SendableRow> & {
   marketplaceId: string;
@@ -61,6 +69,8 @@ export async function finishSyncRun(
      SET status = ?, message = ?, finished_at = CURRENT_TIMESTAMP
      WHERE id = ?`,
   ).bind(status, text(message), runId).run();
+  if (Date.now() - lastCleanupAt < CLEANUP_INTERVAL_MS) return;
+  lastCleanupAt = Date.now();
   await db.prepare(
     `DELETE FROM stock_sync_log
      WHERE created_at < datetime('now', ?)

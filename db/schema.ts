@@ -764,6 +764,7 @@ export const shipmentLabels = sqliteTable(
   (table) => [
     uniqueIndex("shipment_label_posting_unique").on(table.marketplaceId, table.externalOrderId),
     index("shipment_label_status_idx").on(table.status, table.createdAt),
+    index("shipment_label_task_idx").on(table.taskId),
   ],
 );
 

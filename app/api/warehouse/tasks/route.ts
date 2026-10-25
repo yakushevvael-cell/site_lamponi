@@ -41,6 +41,13 @@ export async function GET(request: Request) {
     });
   }
 
+  // Столу упаковки и поставкам нужен только список заданий: сводка ожидающих
+  // заказов читает все заказы и раскладку, и считать её на каждый скан листа
+  // подбора незачем.
+  if (url.searchParams.get("brief") === "1") {
+    return Response.json({ scope, manages, tasks: await readTaskList(db, { limit: 120 }), permissions: auth.permissions });
+  }
+
   const [tasks, waiting, batchSizes, blockedCount] = await Promise.all([
     readTaskList(db, { limit: 120 }),
     readWaitingSummary(db),

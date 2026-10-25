@@ -189,7 +189,7 @@ export function WarehouseScanWorkspace() {
   const fileInput = useRef<HTMLInputElement>(null);
 
   const loadTasks = useCallback(async () => {
-    const response = await fetch("/api/warehouse/tasks", { cache: "no-store" });
+    const response = await fetch("/api/warehouse/tasks?brief=1", { cache: "no-store" });
     const data = await response.json() as { tasks?: Task[]; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Задания не загрузились.");
     // На столе упаковки нужны собранные задания: до них товар не доходит.
@@ -450,7 +450,9 @@ export function WarehouseScanWorkspace() {
         description: "УИН передаются на площадку, этикетки готовятся.",
       });
       await loadLabels(taskId);
-      await prepare(taskId).catch(() => undefined);
+      // Подготовка идёт фоном: ответы площадок по пачке этикеток — секунды,
+      // и держать на них поле скана заблокированным незачем.
+      void prepare(taskId).catch(() => undefined);
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "УПД не загрузилась.");
     } finally {

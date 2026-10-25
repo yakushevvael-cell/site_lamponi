@@ -144,7 +144,7 @@ export function WarehouseSuppliesWorkspace() {
   }
 
   const loadTasks = useCallback(async () => {
-    const response = await fetch("/api/warehouse/tasks", { cache: "no-store" });
+    const response = await fetch("/api/warehouse/tasks?brief=1", { cache: "no-store" });
     const data = await response.json() as { tasks?: Task[]; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Задания не загрузились.");
     const ready = (data.tasks ?? []).filter((task) => task.status === "picked");

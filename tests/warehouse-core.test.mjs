@@ -281,6 +281,23 @@ test("ячейка находится, если в раскладке длинн
   assert.deepEqual(attachCells(items, placements).map((item) => item.cellCode), ["5", "7"]);
 });
 
+test("индекс раскладки строится один раз на массив, а свежая раскладка читается заново", () => {
+  const items = [{ article: "К-1234", size: "17" }];
+  const morning = [{ article: "К-1234", size: null, cellCode: "1", sortOrder: 1 }];
+  const evening = [{ article: "К-1234", size: null, cellCode: "9", sortOrder: 9 }];
+  // Сводка зовёт attachCells по отправлению: повторный вызов с той же
+  // раскладкой даёт тот же ответ, а новая раскладка из базы — свой.
+  assert.equal(attachCells(items, morning)[0].cellCode, "1");
+  assert.equal(attachCells(items, morning)[0].cellCode, "1");
+  assert.equal(attachCells(items, evening)[0].cellCode, "9");
+
+  // Тысячи вызовов по большой раскладке — доли секунды, а не минуты.
+  const big = Array.from({ length: 5000 }, (_, i) => ({ article: `С-${1000 + i}р`, size: null, cellCode: `A-${i}`, sortOrder: i }));
+  const started = Date.now();
+  for (let i = 0; i < 2000; i += 1) attachCells([{ article: `С-${1000 + i}р`, size: "17" }], big);
+  assert.ok(Date.now() - started < 2000);
+});
+
 test("отменённое задание WB: продавцом, покупателем или самим WB", () => {
   assert.equal(isWildberriesCancelled({ supplierStatus: "cancel", wbStatus: "canceled" }), true);
   assert.equal(isWildberriesCancelled({ supplierStatus: "new", wbStatus: "canceled_by_client" }), true);
