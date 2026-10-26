@@ -203,6 +203,7 @@ export const stockReservations = sqliteTable(
   },
   (table) => [
     index("reservation_product_status_idx").on(table.productSku, table.status),
+    index("reservation_status_idx").on(table.status, table.productSku, table.quantity),
     uniqueIndex("reservation_order_item_unique").on(table.orderItemId),
   ],
 );

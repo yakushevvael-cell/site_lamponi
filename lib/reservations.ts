@@ -51,10 +51,18 @@ async function readActiveReserveBySku(db: D1Database) {
 }
 
 /**
- * Полностью перестраивает резервы. Вызывается после загрузки ОСВ, после
- * синхронизации заказов и перед стартом полной синхронизации остатков.
+ * Перестраивает резервы. Вызывается после загрузки ОСВ, после синхронизации
+ * заказов и перед каждой выгрузкой остатков.
+ *
+ * Активным резерв бывает только у заказа моложе RESERVE_TTL_DAYS, поэтому
+ * обычный пересчёт берёт заказы этого окна (с запасом) и резервы, которые
+ * сейчас активны. Старые заказы при каждом пересчёте получали бы тот же
+ * «снят» или «списан по ОСВ», а один запрос по всей истории заказов шёл
+ * секунды — всё это время сервер не отвечал ни скану, ни печати на столах.
+ * Полный пересчёт по всей истории (`full`) — после загрузки ОСВ: она редкая,
+ * и счётчики «списано по ОСВ» должны сойтись по всем заказам.
  */
-export async function rebuildReservations(db: D1Database): Promise<RebuildResult> {
+export async function rebuildReservations(db: D1Database, options: { full?: boolean } = {}): Promise<RebuildResult> {
   const balanceDate = await readBalanceDate(db);
   // Снимок «до»: по разнице с состоянием «после» видно, какие именно позиции
   // изменили остаток. Только они поедут на площадки доотправкой.
@@ -91,22 +99,46 @@ export async function rebuildReservations(db: D1Database): Promise<RebuildResult
             END
      FROM order_items oi
      JOIN orders o ON o.id = oi.order_id
-     WHERE oi.product_sku IS NOT NULL
+     WHERE oi.product_sku IS NOT NULL${options.full ? "" : `
+       AND oi.id IN (
+         SELECT ri.id FROM orders ro JOIN order_items ri ON ri.order_id = ro.id
+         WHERE ro.ordered_at >= datetime('now', ?3)
+         UNION
+         SELECT order_item_id FROM stock_reservations WHERE status = 'active'
+       )`}
      ON CONFLICT(order_item_id) DO UPDATE SET
        product_sku = excluded.product_sku,
        marketplace_id = excluded.marketplace_id,
        quantity = excluded.quantity,
        status = excluded.status,
        order_status = excluded.order_status,
-       released_at = excluded.released_at`,
-  ).bind(cutoff, `-${RESERVE_TTL_DAYS} days`).run();
+       -- Момент снятия запоминается первым: иначе протухший резерв на каждом
+       -- пересчёте получал новое «сейчас» и строка переписывалась впустую.
+       released_at = CASE WHEN stock_reservations.status = excluded.status
+                          THEN COALESCE(stock_reservations.released_at, excluded.released_at)
+                          ELSE excluded.released_at END
+     -- Неизменившиеся строки не переписываются: запись — самая дорогая часть.
+     WHERE stock_reservations.status IS NOT excluded.status
+        OR stock_reservations.product_sku IS NOT excluded.product_sku
+        OR stock_reservations.marketplace_id IS NOT excluded.marketplace_id
+        OR stock_reservations.quantity IS NOT excluded.quantity
+        OR stock_reservations.order_status IS NOT excluded.order_status`,
+  ).bind(
+    cutoff,
+    `-${RESERVE_TTL_DAYS} days`,
+    // Два дня запаса: заказ, только что перешедший порог, ещё надо снять.
+    ...(options.full ? [] : [`-${RESERVE_TTL_DAYS + 2} days`]),
+  ).run();
 
   // 2. Позиция, потерявшая сопоставление с товаром, больше не держит остаток.
   await db.prepare(
     `UPDATE stock_reservations
      SET status = 'released', released_at = CURRENT_TIMESTAMP
      WHERE status = 'active'
-       AND order_item_id NOT IN (SELECT id FROM order_items WHERE product_sku IS NOT NULL)`,
+       AND NOT EXISTS (
+         SELECT 1 FROM order_items oi
+         WHERE oi.id = stock_reservations.order_item_id AND oi.product_sku IS NOT NULL
+       )`,
   ).run();
 
   const totals = await db.prepare(
