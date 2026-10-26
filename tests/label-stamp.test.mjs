@@ -39,3 +39,21 @@ for (const [width, height] of [[164, 113], [340, 212], [212, 340]]) {
     assert.ok(Number(match[2]) + size <= height * 0.11 + 0.01, `y=${match[2]} должен быть внизу`);
   });
 }
+
+test("в шрифте этикетки есть все буквы артикулов, а сама этикетка лёгкая", async () => {
+  const { default: fontkit } = await import("@pdf-lib/fontkit");
+  const { LABEL_FONT_BASE64 } = await import("../lib/label-font.mjs");
+  const font = fontkit.create(Buffer.from(LABEL_FONT_BASE64, "base64"));
+  // Шрифт урезан заранее: без нужной буквы на этикетке вышел бы пустой квадрат.
+  const sample = "ЛМ-1200 / 17,5 С-3254зр001-З К–1298з (16-21) Ёё № «» ABCXYZ abcxyz 0123456789 ×°";
+  for (const character of sample) {
+    if (character.trim() === "") continue;
+    assert.ok(font.hasGlyphForCodePoint(character.codePointAt(0)), `нет глифа «${character}»`);
+  }
+
+  const doc = await PDFDocument.create();
+  doc.addPage([340, 212]);
+  const bytes = await stampLabelLines(await doc.save(), [{ article: "ЛМ-1200-45", size: "17,5" }]);
+  // Полный шрифт добавлял к каждой этикетке ~150 КБ.
+  assert.ok(bytes.length < 40_000, `этикетка ${bytes.length} байт`);
+});

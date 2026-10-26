@@ -126,7 +126,12 @@ type Outcome =
   | { status: "cancelled"; uin: string; item: ScanItem; message: string }
   | { status: "label_not_ready"; uin: string; item: ScanItem; error: string | null };
 
-type HistoryRow = { at: string; uin: string; status: Outcome["status"]; text: string };
+/** timing — сколько шли скан и файл этикетки: видно, ждали сайт или окно печати. */
+type HistoryRow = { at: string; uin: string; status: Outcome["status"]; text: string; timing?: string };
+
+function seconds(ms: number) {
+  return `${(ms / 1000).toFixed(1).replace(".", ",")} с`;
+}
 
 /** Звук нужен затем, что сборщик смотрит на товар, а не на экран. */
 function beep(kind: "ok" | "warn" | "error") {
@@ -306,12 +311,14 @@ export function WarehouseScanWorkspace() {
     return () => clearTimeout(timer);
   }, [taskId, summary, preparing, offline, prepare]);
 
-  function printLabel(marketplaceId: string, posting: string) {
+  function printLabel(marketplaceId: string, posting: string, onLoaded?: (ms: number) => void) {
     const frame = printFrame.current;
     if (!frame) return;
+    const started = performance.now();
     frame.src = `/api/warehouse/labels/file?marketplace=${encodeURIComponent(marketplaceId)}&posting=${encodeURIComponent(posting)}`;
     // Печать запускается после загрузки файла: иначе на принтер уходит пустая страница.
     frame.onload = () => {
+      onLoaded?.(performance.now() - started);
       try {
         frame.contentWindow?.focus();
         frame.contentWindow?.print();
@@ -376,6 +383,7 @@ export function WarehouseScanWorkspace() {
       return;
     }
     setBusy(true);
+    const started = performance.now();
     try {
       const response = await fetch("/api/warehouse/scan", {
         method: "POST",
@@ -388,18 +396,27 @@ export function WarehouseScanWorkspace() {
       if (!response.ok) throw new Error(data.error ?? "Скан не обработан.");
       const result = data.outcome;
       if (!result) throw new Error("Пустой ответ сервера.");
+      const scanMs = performance.now() - started;
+      const at = new Date().toISOString();
 
       setOutcome(result);
       setSummary(data.summary ?? null);
       if (data.board) setBoard(data.board);
       setHistory((current) => [
-        { at: new Date().toISOString(), uin, status: result.status, text: OUTCOME_TEXT[result.status] },
+        { at, uin, status: result.status, text: OUTCOME_TEXT[result.status], timing: `скан ${seconds(scanMs)}` },
         ...current,
       ].slice(0, 40));
 
       if (result.status === "ok") {
         beep("ok");
-        printLabel(result.label.marketplaceId, result.label.externalOrderId);
+        // Время до окна печати делится на скан, файл этикетки и сам браузер:
+        // если первые два малы, а окно всё равно долго не появляется, ждут
+        // принтер или окно печати, а не сайт.
+        printLabel(result.label.marketplaceId, result.label.externalOrderId, (fileMs) => {
+          setHistory((current) => current.map((row) => (
+            row.at === at && row.uin === uin ? { ...row, timing: `скан ${seconds(scanMs)} · этикетка ${seconds(fileMs)}` } : row
+          )));
+        });
       } else if (result.status === "grouped") {
         beep("ok");
         // Этикетка печатается из окна отправлений, когда собрано всё.
@@ -880,7 +897,10 @@ export function WarehouseScanWorkspace() {
                 <TableRow key={`${row.uin}-${index}`} className={row.status === "ok" ? undefined : "bg-amber-50/60"}>
                   <TableCell className="pl-5 text-xs text-muted-foreground">{formatMoment(row.at)}</TableCell>
                   <TableCell className="font-mono text-xs">{row.uin}</TableCell>
-                  <TableCell className="pr-5 text-sm">{row.text}</TableCell>
+                  <TableCell className="pr-5 text-sm">
+                    {row.text}
+                    {row.timing ? <span className="ml-2 text-xs text-muted-foreground">{row.timing}</span> : null}
+                  </TableCell>
                 </TableRow>
               ))}
               {history.length === 0 ? (
