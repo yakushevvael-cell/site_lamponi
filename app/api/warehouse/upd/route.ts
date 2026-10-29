@@ -15,6 +15,12 @@
  */
 import { authorizePermission } from "@/lib/permissions";
 import { getRuntimeEnv } from "@/lib/runtime-env";
+import {
+  foreignUinProblem,
+  parseUpdUploadDetails,
+  removeUpdConflict,
+  serializeUpdUploadDetails,
+} from "@/lib/upd-conflicts.mjs";
 import { matchUpdToTask } from "@/lib/upd-match.mjs";
 import { parseUpdWorkbook } from "@/lib/upd-parser";
 import { findTaskByPickSheet, logWarehouseEvent, readTask } from "@/lib/warehouse";
@@ -30,15 +36,6 @@ type UploadRow = {
   uploadedBy: string | null;
   createdAt: string;
 };
-
-function parseProblems(value: string | null) {
-  try {
-    const parsed = value ? JSON.parse(value) : [];
-    return Array.isArray(parsed) ? parsed.map(String) : [];
-  } catch {
-    return [];
-  }
-}
 
 /** Состояние УПД задания: сверена ли, и что не сошлось в последней загрузке. */
 export async function GET(request: Request) {
@@ -58,6 +55,7 @@ export async function GET(request: Request) {
             uploaded_by AS uploadedBy, created_at AS createdAt
      FROM upd_uploads WHERE task_id = ? ORDER BY id DESC LIMIT 1`,
   ).bind(taskId).first<UploadRow>();
+  const details = parseUpdUploadDetails(last?.problemsJson);
 
   return Response.json({
     matched: Boolean(task.updMatchedAt),
@@ -67,7 +65,8 @@ export async function GET(request: Request) {
         fileName: last.fileName,
         items: Number(last.itemCount ?? 0),
         status: last.status,
-        problems: parseProblems(last.problemsJson),
+        problems: details.problems,
+        conflicts: details.conflicts,
         uploadedBy: last.uploadedBy,
         createdAt: last.createdAt,
       }
@@ -148,9 +147,8 @@ export async function POST(request: Request) {
   // УИН уже в другом открытом задании — это чужая УПД или пересорт.
   const problems = [...match.problems];
   const uins = parsed.items.map((item) => item.uin);
-  for (const conflict of await findForeignUins(db, uins, task.id)) {
-    problems.push(`УИН ${conflict.uin} уже закреплён за заданием ${conflict.taskNumber ?? conflict.taskId}.`);
-  }
+  const conflicts = await findForeignUins(db, uins, task.id);
+  for (const conflict of conflicts) problems.push(foreignUinProblem(conflict));
   if (items.results.length === 0) problems.push("В задании нет изделий для упаковки.");
   const ok = problems.length === 0;
 
@@ -164,7 +162,7 @@ export async function POST(request: Request) {
     auth.user.email,
     task.id,
     ok ? "matched" : "mismatch",
-    ok ? null : JSON.stringify(problems.slice(0, 200)),
+    ok ? null : serializeUpdUploadDetails(problems, conflicts),
   ).run();
   const uploadId = Number(insert.meta.last_row_id ?? 0);
 
@@ -181,6 +179,7 @@ export async function POST(request: Request) {
       ok: false,
       error: `УПД не сходится с заданием ${task.number}. Исправьте УПД и загрузите заново — до этого упаковка по заданию заблокирована.`,
       problems: problems.slice(0, 200),
+      conflicts: conflicts.slice(0, 200),
     }, { status: 422 });
   }
 
@@ -249,6 +248,105 @@ export async function POST(request: Request) {
     bound: match.assign.length,
     parsed: parsed.items.length,
     errors: parsed.errors.slice(0, 20),
+  });
+}
+
+/**
+ * Снимает конфликтующий УИН с прежнего задания. Это нужно, например, когда
+ * покупатель отменил заказ, а тот же физический товар уже попал в следующее
+ * задание. Прежнее задание к этому моменту может быть закрыто: отменённый
+ * товар всё равно никуда не уехал. Код листа подтверждает, что действие
+ * вызвано именно из последней ошибки УПД, а не произвольным запросом.
+ */
+export async function DELETE(request: Request) {
+  const auth = await authorizePermission("warehouse.scan");
+  if ("response" in auth) return auth.response;
+  const runtime = getRuntimeEnv();
+  if (!runtime.DB) return Response.json({ error: "База данных недоступна." }, { status: 500 });
+  const db = runtime.DB;
+
+  const body = await request.json().catch(() => null) as { uin?: unknown; code?: unknown } | null;
+  const uin = typeof body?.uin === "string" ? body.uin.trim() : "";
+  const code = typeof body?.code === "string" ? body.code.trim() : "";
+  if (!uin || !code) return Response.json({ error: "Не указаны УИН или лист подбора." }, { status: 400 });
+
+  const currentTask = await findTaskByPickSheet(db, code);
+  if (!currentTask) return Response.json({ error: "Текущее задание по листу подбора не найдено." }, { status: 404 });
+  if (currentTask.status === "cancelled") {
+    return Response.json({ error: `Текущее задание ${currentTask.number} отменено.` }, { status: 409 });
+  }
+  if (currentTask.status === "shipped") {
+    return Response.json({ error: `По текущему заданию ${currentTask.number} уже оформлена поставка.` }, { status: 409 });
+  }
+  if (currentTask.updMatchedAt) {
+    return Response.json({ error: "УПД текущего задания уже сверена — открепление не требуется." }, { status: 409 });
+  }
+
+  const upload = await db.prepare(
+    `SELECT id, file_name AS fileName, item_count AS itemCount, status, problems_json AS problemsJson,
+            uploaded_by AS uploadedBy, created_at AS createdAt
+     FROM upd_uploads WHERE task_id = ? AND status = 'mismatch' ORDER BY id DESC LIMIT 1`,
+  ).bind(currentTask.id).first<UploadRow>();
+  if (!upload) return Response.json({ error: "Сначала загрузите УПД и получите список конфликтующих УИН." }, { status: 409 });
+
+  const details = parseUpdUploadDetails(upload.problemsJson);
+  const expected = details.conflicts.find((conflict) => conflict.uin === uin);
+  if (!expected) {
+    return Response.json({ error: `УИН ${uin} отсутствует в последней ошибке УПД. Загрузите файл снова.` }, { status: 409 });
+  }
+
+  const source = await db.prepare(
+    `SELECT u.task_id AS taskId, t.number AS taskNumber, ti.id AS itemId
+     FROM uin_items u
+     LEFT JOIN pick_tasks t ON t.id = u.task_id
+     LEFT JOIN pick_task_items ti ON ti.task_id = u.task_id AND ti.uin = u.uin
+     WHERE u.uin = ?`,
+  ).bind(uin).first<{
+    taskId: number | null;
+    taskNumber: string | null;
+    itemId: number | null;
+  }>();
+
+  if (!source) {
+    const updated = removeUpdConflict(details, uin);
+    await db.prepare("UPDATE upd_uploads SET problems_json = ? WHERE id = ? AND task_id = ?")
+      .bind(serializeUpdUploadDetails(updated.problems, updated.conflicts), upload.id, currentTask.id)
+      .run();
+    return Response.json({ ok: true, uin, alreadyDetached: true });
+  }
+  if (source.taskId !== expected.taskId || source.taskId === currentTask.id) {
+    return Response.json({ error: `Привязка УИН ${uin} уже изменилась. Загрузите УПД снова.` }, { status: 409 });
+  }
+  const updated = removeUpdConflict(details, uin);
+  const results = await db.batch([
+    db.prepare("DELETE FROM uin_items WHERE uin = ? AND task_id = ?").bind(uin, source.taskId),
+    db.prepare("UPDATE pick_task_items SET uin = NULL WHERE task_id = ? AND uin = ?")
+      .bind(source.taskId, uin),
+    db.prepare("UPDATE upd_uploads SET problems_json = ? WHERE id = ? AND task_id = ?")
+      .bind(serializeUpdUploadDetails(updated.problems, updated.conflicts), upload.id, currentTask.id),
+  ]);
+  if (!Number(results[0]?.meta.changes ?? 0)) {
+    return Response.json({ error: `УИН ${uin} уже успели изменить. Загрузите УПД снова.` }, { status: 409 });
+  }
+
+  await logWarehouseEvent(db, {
+    kind: "uin_detached_for_upd",
+    taskId: source.taskId,
+    taskNumber: source.taskNumber,
+    actorEmail: auth.user.email,
+    payload: {
+      uin,
+      itemId: source.itemId,
+      requestedByTaskId: currentTask.id,
+      requestedByTaskNumber: currentTask.number,
+    },
+  });
+
+  return Response.json({
+    ok: true,
+    uin,
+    previousTaskId: source.taskId,
+    previousTaskNumber: source.taskNumber,
   });
 }
 

@@ -75,7 +75,13 @@ type Summary = {
 type UpdInfo = {
   matched: boolean;
   matchedAt: string | null;
-  lastUpload: { fileName: string; status: "matched" | "mismatch" | null; problems: string[]; createdAt: string } | null;
+  lastUpload: {
+    fileName: string;
+    status: "matched" | "mismatch" | null;
+    problems: string[];
+    conflicts: Array<{ uin: string; taskId: number; taskNumber: string | null }>;
+    createdAt: string;
+  } | null;
 };
 
 type BoardItem = { itemId: number; article: string; size: string | null; uin: string | null; scannedAt: string | null };
@@ -187,6 +193,7 @@ export function WarehouseScanWorkspace() {
   const [preparing, setPreparing] = useState(false);
   const [offline, setOffline] = useState(false);
   const [updInfo, setUpdInfo] = useState<UpdInfo | null>(null);
+  const [detachingUin, setDetachingUin] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
 
   const inputRef = useRef<HTMLInputElement>(null);
@@ -479,6 +486,39 @@ export function WarehouseScanWorkspace() {
     }
   }
 
+  async function detachForeignUin(uin: string) {
+    if (!taskId || !sheetCode) return;
+    setBusy(true);
+    setDetachingUin(uin);
+    try {
+      const response = await fetch("/api/warehouse/upd", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ uin, code: sheetCode }),
+      });
+      const data = await response.json() as {
+        error?: string;
+        previousTaskNumber?: string | null;
+        alreadyDetached?: boolean;
+      };
+      if (!response.ok) throw new Error(data.error ?? `Не удалось открепить УИН ${uin}.`);
+      await loadUpd(taskId);
+      beep("ok");
+      toast.success(data.alreadyDetached ? `УИН ${uin} уже был откреплён` : `УИН ${uin} откреплён`, {
+        description: data.previousTaskNumber
+          ? `Прежнее задание: ${data.previousTaskNumber}. Загрузите УПД снова.`
+          : "Загрузите УПД снова.",
+      });
+    } catch (error) {
+      beep("error");
+      toast.error(error instanceof Error ? error.message : `Не удалось открепить УИН ${uin}.`);
+    } finally {
+      setDetachingUin(null);
+      setBusy(false);
+      inputRef.current?.focus();
+    }
+  }
+
   if (loading) {
     return <div className="grid min-h-72 place-items-center text-sm text-muted-foreground"><Loader2 className="mr-2 inline size-4 animate-spin" />Готовим стол…</div>;
   }
@@ -599,13 +639,46 @@ export function WarehouseScanWorkspace() {
               <p className="flex items-center gap-2 font-semibold">
                 <AlertTriangle className="size-4" />
                 {updInfo.lastUpload?.status === "mismatch"
-                  ? `УПД «${updInfo.lastUpload.fileName}» не сходится с заданием. Исправьте УПД и загрузите заново.`
+                  ? updInfo.lastUpload.conflicts.length > 0
+                    ? `УПД «${updInfo.lastUpload.fileName}» не сходится с заданием. Открепите УИН из других заданий и загрузите УПД снова.`
+                    : `УПД «${updInfo.lastUpload.fileName}» не сходится с заданием. Исправьте УПД и загрузите заново.`
                   : "Загрузите УПД этого задания."}
               </p>
               <p>Пока УПД не сверена с заданием, скан УИН и этикетки по заданию заблокированы, на площадку ничего не передаётся.</p>
+              {updInfo.lastUpload?.status === "mismatch" && updInfo.lastUpload.conflicts.length > 0 ? (
+                <div className="space-y-2">
+                  <p>Эти УИН присутствуют в других заданиях. Если прежний заказ отменён, открепите УИН и загрузите УПД снова.</p>
+                  <div className="space-y-2">
+                    {updInfo.lastUpload.conflicts.map((conflict) => (
+                      <div
+                        key={`${conflict.uin}-${conflict.taskId}`}
+                        className="flex flex-wrap items-center gap-2 rounded-lg border border-red-200 bg-white/70 px-3 py-2"
+                      >
+                        <span className="min-w-0 flex-1 font-mono text-xs">
+                          УИН {conflict.uin} · задание {conflict.taskNumber ?? conflict.taskId}
+                        </span>
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          disabled={busy}
+                          onClick={() => void detachForeignUin(conflict.uin)}
+                        >
+                          {detachingUin === conflict.uin ? <Loader2 className="size-4 animate-spin" /> : null}
+                          Открепить
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              ) : null}
               {updInfo.lastUpload?.status === "mismatch" && updInfo.lastUpload.problems.length > 0 ? (
                 <ul className="max-h-60 list-disc space-y-0.5 overflow-auto pl-5 font-mono text-xs">
-                  {updInfo.lastUpload.problems.map((problem) => <li key={problem}>{problem}</li>)}
+                  {updInfo.lastUpload.problems
+                    .filter((problem) => !updInfo.lastUpload?.conflicts.some(
+                      (conflict) => problem === `УИН ${conflict.uin} уже закреплён за заданием ${conflict.taskNumber ?? conflict.taskId}.`,
+                    ))
+                    .map((problem) => <li key={problem}>{problem}</li>)}
                 </ul>
               ) : null}
             </div>
