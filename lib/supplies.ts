@@ -425,11 +425,15 @@ export async function checkSupplyReadiness(db: D1Database, taskId: number): Prom
   if (task.status === "shipped") return { reason: "По заданию уже оформлена поставка.", details: [] };
 
   const rows = await db.prepare(
-    `SELECT ti.article, ti.size, ti.status, ti.scanned_at AS scannedAt, ti.external_order_id AS externalOrderId
+    `SELECT ti.id, ti.article, ti.size, ti.status, ti.scanned_at AS scannedAt, ti.external_order_id AS externalOrderId
      FROM pick_task_items ti WHERE ti.task_id = ?`,
-  ).bind(taskId).all<{ article: string; size: string | null; status: string; scannedAt: string | null; externalOrderId: string }>();
+  ).bind(taskId).all<{ id: number; article: string; size: string | null; status: string; scannedAt: string | null; externalOrderId: string }>();
 
-  const notFound = rows.results.filter((row) => row.status === "not_found");
+  const activeCancel = await db.prepare("SELECT posting, error FROM missing_item_cancellations WHERE task_id=? AND state<>'done' LIMIT 1").bind(taskId).first<{posting:string;error:string|null}>();
+  if (activeCancel) return { reason: "Не подтверждена отмена отсутствующего изделия.", details: [activeCancel.posting, activeCancel.error ?? "Отмена выполняется."] };
+  const doneCancel = await db.prepare("SELECT item_id AS itemId FROM missing_item_cancellations WHERE task_id=? AND state='done'").bind(taskId).all<{itemId:number}>();
+  const doneIds = new Set(doneCancel.results.map(row => row.itemId));
+  const notFound = rows.results.filter((row) => row.status === "not_found" && !doneIds.has(row.id));
   if (notFound.length > 0) {
     // ТЗ, п. 6: пока проблемные не разобраны, оформление недоступно.
     // Разобранным считается и товар, чей заказ отменён на площадке: в

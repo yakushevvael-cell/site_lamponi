@@ -1060,3 +1060,23 @@ export const ozonLabelJobs = sqliteTable("ozon_label_jobs", {
   taskId: integer("task_id").notNull(),
   createdAt: integer("created_at").notNull(),
 }, (table) => [primaryKey({ columns: [table.clientId, table.postingNumber] })]);
+
+/** Only the missing units from one task row may be cancelled by this durable outbox. */
+export const missingItemCancellations = sqliteTable("missing_item_cancellations", {
+  id: integer("id").primaryKey({autoIncrement:true}),
+  itemId: integer("item_id").notNull().unique(), taskId: integer("task_id").notNull(),
+  marketplaceId: text("marketplace_id").notNull(), posting: text("posting").notNull(), remotePosting: text("remote_posting"),
+  sku: text("sku").notNull(), quantity: integer("quantity").notNull(), actor: text("actor").notNull(),
+  state: text("state").notNull().default("queued"), resumeState: text("resume_state"),
+  message: text("message"), promo: text("promo"), chatId: text("chat_id"),
+  sentAt: integer("sent_at"), dueAt: integer("due_at"), cancelRequestedAt: integer("cancel_requested_at"),
+  beforeJson: text("before_json"), targetJson: text("target_json"), error: text("error"),
+  createdAt: integer("created_at").notNull(), updatedAt: integer("updated_at").notNull(),
+}, table=>[
+  index("missing_cancel_due_idx").on(table.state,table.dueAt),
+  uniqueIndex("missing_cancel_posting_lock").on(table.marketplaceId,table.posting).where(sql`${table.state} IN ('working','sending','cancelling')`),
+]);
+export const missingCancelEvents = sqliteTable("missing_cancel_events", {
+  id:integer("id").primaryKey({autoIncrement:true}), jobId:integer("job_id").notNull(),
+  state:text("state").notNull(), detail:text("detail"), createdAt:integer("created_at").notNull(),
+});

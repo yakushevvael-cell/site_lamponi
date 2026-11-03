@@ -846,9 +846,19 @@ export async function resolveTaskItem(
   if (task.status === "cancelled") return { ok: false, error: "Задание отменено." };
   if (task.status === "shipped") return { ok: false, error: "По заданию уже оформлена поставка." };
 
-  await db.prepare(
-    "UPDATE pick_task_items SET status = ?, resolved_by = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?",
-  ).bind(input.status, input.actorEmail, input.itemId).run();
+  const cancellation = await db.prepare("SELECT id FROM missing_item_cancellations WHERE item_id=?").bind(item.id).first();
+  if (cancellation && input.status === "picked") return { ok: false, error: "По изделию запущена отмена. Вернуть его в сборку этой кнопкой нельзя." };
+  const writes = [];
+  if (input.status === "not_found" && ["ozon", "wildberries"].includes(item.marketplaceId)) {
+    writes.push(db.prepare(`INSERT OR IGNORE INTO missing_item_cancellations
+      (item_id,task_id,marketplace_id,posting,sku,quantity,actor,created_at,updated_at)
+      SELECT id,task_id,marketplace_id,external_order_id,external_sku,quantity,?,?,?
+      FROM pick_task_items WHERE id=? AND task_id=? AND status<>'not_found'`)
+      .bind(input.actorEmail, Date.now(), Date.now(), item.id, input.taskId));
+  }
+  writes.push(db.prepare("UPDATE pick_task_items SET status = ?, resolved_by = ?, resolved_at = CURRENT_TIMESTAMP WHERE id = ?")
+    .bind(input.status, input.actorEmail, input.itemId));
+  await db.batch(writes);
   await refreshTaskCounters(db, input.taskId);
 
   await logWarehouseEvent(db, {

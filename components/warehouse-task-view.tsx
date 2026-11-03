@@ -84,6 +84,7 @@ const MARKETPLACE_LABEL = { ozon: "Ozon", wildberries: "Wildberries", yandex: "�
 export function WarehouseTaskView({ taskId }: { taskId: number }) {
   const [task, setTask] = useState<Task | null>(null);
   const [items, setItems] = useState<Item[]>([]);
+  const [cancellations,setCancellations]=useState<Array<{itemId:number;state:string;error:string|null;sentAt:number|null;dueAt:number|null;cancelRequestedAt:number|null}>>([]);
   const [manages, setManages] = useState(false);
   const [own, setOwn] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -94,10 +95,11 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
 
   const load = useCallback(async () => {
     const response = await fetch(`/api/warehouse/task?id=${taskId}`, { cache: "no-store" });
-    const data = await response.json() as { task?: Task; items?: Item[]; manages?: boolean; own?: boolean; error?: string };
+    const data = await response.json() as { task?: Task; items?: Item[]; cancellations?: typeof cancellations; manages?: boolean; own?: boolean; error?: string };
     if (!response.ok) throw new Error(data.error ?? "Задание не загрузилось.");
     setTask(data.task ?? null);
     setItems(data.items ?? []);
+    setCancellations(data.cancellations ?? []);
     setManages(Boolean(data.manages));
     setOwn(Boolean(data.own));
   }, [taskId]);
@@ -108,6 +110,12 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
       .catch((loadError: unknown) => setError(loadError instanceof Error ? loadError.message : "Задание не загрузилось."))
       .finally(() => setLoading(false));
   }, [load]);
+
+  useEffect(()=>{
+    if(!cancellations.some(c=>!["done","error","uncertain"].includes(c.state))) return;
+    const timer=setInterval(()=>void load().catch(()=>undefined),5000);
+    return ()=>clearInterval(timer);
+  },[load,cancellations]);
 
   async function act(action: string, payload: Record<string, unknown> = {}, message?: string) {
     setBusy(`${action}:${payload.itemId ?? ""}`);
@@ -270,6 +278,11 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
                       ) : null}
                       {item.status === "picked" ? <Badge className="bg-emerald-100 text-emerald-900 hover:bg-emerald-100">собрано</Badge> : null}
                       {item.status === "not_found" ? <Badge variant="destructive">не найден</Badge> : null}
+                      {cancellations.filter(c=>c.itemId===item.id).map(c=><div key={c.itemId} className="mt-2 max-w-sm text-xs">
+                        <span>{c.state==="done"?"Отмена изделия подтверждена":c.state==="scheduled"?`Сообщение отправлено. Отмена не раньше ${new Date(c.dueAt??0).toLocaleTimeString("ru-RU")}`:c.state==="queued"?"Отмена в очереди":c.state==="verifying"?"Проверяем результат отмены":c.state==="error"||c.state==="uncertain"?"Отмена требует внимания":"Обрабатывается отмена"}</span>
+                        {c.error&&<p className="text-destructive">{c.error}</p>}
+                        {manages&&(c.state==="error"||(c.state==="uncertain"&&c.cancelRequestedAt))&&<Button size="sm" variant="outline" disabled={Boolean(busy)} onClick={()=>void act("retry_cancellation",{itemId:item.id},"Проверка отмены запущена")}>{c.cancelRequestedAt?"Проверить отмену":"Повторить отмену"}</Button>}
+                      </div>)}
                       {canWork ? (
                         <>
                           {/* Отмеченная строка показывает только обратное действие. */}
@@ -358,7 +371,7 @@ export function WarehouseTaskView({ taskId }: { taskId: number }) {
             <AlertDialogDescription>
               {notFoundTarget?.article}{notFoundTarget?.size ? `, размер ${notFoundTarget.size}` : ""} —
               остаток по артикулу сразу уйдёт в ноль на Wildberries, Ozon и Яндекс Маркете, чтобы его не заказали снова.
-              Артикул попадёт в проблемные: разбирает кладовщик, снимает блокировку начальник склада.
+              Артикул попадёт в проблемные. Для WB будет отменено только это изделие; для Ozon покупателю отправится настроенное сообщение с промокодом, а через 60 секунд — запрос отмены отсутствующего количества. Остальные изделия сохраняются.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

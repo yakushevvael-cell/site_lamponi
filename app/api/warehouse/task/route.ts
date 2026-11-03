@@ -1,3 +1,5 @@
+import { after } from "next/server";
+import { readMissingCancellations, runMissingCancellationJobs } from "@/lib/missing-cancellations";
 /**
  * Одно задание: состав и действия по нему.
  *
@@ -46,7 +48,7 @@ export async function GET(request: Request) {
     return Response.json({ error: "Это задание закреплено за другим сборщиком." }, { status: 403 });
   }
 
-  return Response.json({ task, items: await readTaskItems(runtime.DB, taskId), manages, own });
+  return Response.json({ task, items: await readTaskItems(runtime.DB, taskId), cancellations: await readMissingCancellations(runtime.DB, taskId), manages, own });
 }
 
 export async function POST(request: Request) {
@@ -152,6 +154,19 @@ export async function POST(request: Request) {
     return Response.json({ ok: true, task: result.task });
   }
 
+  if (action === "retry_cancellation") {
+    if (!manages) return Response.json({error:"Повторить отмену может кладовщик."}, {status:403});
+    const itemId = taskIdFrom(body?.itemId);
+    const changed = await db.prepare(`UPDATE missing_item_cancellations SET
+      state=CASE WHEN cancel_requested_at IS NOT NULL THEN 'verifying' WHEN sent_at IS NOT NULL THEN 'scheduled' ELSE 'queued' END,
+      error=NULL, due_at=CASE WHEN sent_at IS NOT NULL AND cancel_requested_at IS NULL THEN sent_at+60000 ELSE NULL END,
+      updated_at=? WHERE item_id=? AND task_id=? AND (state='error' OR (state='uncertain' AND cancel_requested_at IS NOT NULL))`)
+      .bind(Date.now(),itemId,taskId).run();
+    if (!changed.meta.changes) return Response.json({error:"Нет отмены, которую можно безопасно повторить. Проверьте результат в кабинете площадки."},{status:409});
+    after(async () => { await runMissingCancellationJobs(db,runtime,itemId ?? undefined); });
+    return Response.json({ok:true});
+  }
+
   if (action === "resolve") {
     const itemId = taskIdFrom(body?.itemId);
     const status = body?.status === "picked" || body?.status === "not_found" ? body.status : null;
@@ -177,6 +192,7 @@ export async function POST(request: Request) {
       });
     }
 
+    if (status === "not_found") after(async () => { await runMissingCancellationJobs(db, runtime, itemId); });
     return Response.json({ ok: true, item: result.item, task: result.task, problem });
   }
 

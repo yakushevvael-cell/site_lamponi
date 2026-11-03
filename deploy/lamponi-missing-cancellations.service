@@ -1,0 +1,13 @@
+[Unit]
+Description=Lamponi: отмена отсутствующих изделий
+After=lamponi.service
+Requires=lamponi.service
+
+[Service]
+Type=oneshot
+User=lamponi
+Group=lamponi
+WorkingDirectory=/opt/lamponi/current
+EnvironmentFile=/opt/lamponi/shared/.env
+ExecStart=/usr/bin/node scripts/sync-task.mjs missing-cancellations
+TimeoutStartSec=240

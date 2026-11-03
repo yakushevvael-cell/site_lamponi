@@ -1,3 +1,4 @@
+import { MissingCancelSettings } from "@/components/missing-cancel-settings";
 import { IntegrationsWorkspace } from "@/components/integrations-workspace";
 import { PageHeader } from "@/components/page-header";
 import { requirePageUser } from "@/lib/app-auth";
@@ -10,6 +11,7 @@ export default async function SettingsPage() {
     <main className="min-h-svh bg-background">
       <PageHeader title="Подключения" description="API-ключи, режим синхронизации и готовность площадок" />
       <IntegrationsWorkspace />
+      <MissingCancelSettings />
     </main>
   );
 }

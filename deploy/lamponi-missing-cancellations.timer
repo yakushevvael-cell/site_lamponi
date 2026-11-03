@@ -1,0 +1,11 @@
+[Unit]
+Description=Lamponi: проверка очереди отмен каждые 5 секунд
+
+[Timer]
+OnBootSec=30
+OnUnitInactiveSec=5
+AccuracySec=1
+Unit=lamponi-missing-cancellations.service
+
+[Install]
+WantedBy=timers.target

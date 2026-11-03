@@ -1,3 +1,4 @@
+import { missingPostingBlocked } from "@/lib/missing-cancellations";
 /**
  * Этикетки и стол сканирования (ТЗ, п. 5).
  *
@@ -312,6 +313,10 @@ export async function prepareLabelsForTask(
 
   for (const [key, group] of postings) {
     const label = byPosting.get(key);
+    if (await missingPostingBlocked(db, group[0].marketplaceId, group[0].externalOrderId)) {
+      waiting += 1;
+      continue;
+    }
     if (label?.status === "ready") {
       ready += 1;
       continue;
@@ -772,6 +777,9 @@ async function runOzonSteps(db: D1Database, runtime: AppRuntimeEnv, input: OzonI
     return { kind: "waiting", exemplarStatus: progress.status, note: progress.message, uins };
   }
 
+  if (await missingPostingBlocked(db,"ozon",input.postingNumber)) {
+    return {kind:"waiting",exemplarStatus:"",note:"Ожидается подтверждение отмены отсутствующего изделия.",uins};
+  }
   let labelPostings: string[] = [input.postingNumber];
   try {
     // Многотоварное отправление уезжает отдельными упаковками: Ozon делит его
@@ -1180,6 +1188,9 @@ export async function resolveScan(
   const cancelledNote = await readPostingCancelled(db, target.marketplaceId, target.externalOrderId);
   if (cancelledNote) return { status: "cancelled", uin, item: target, message: cancelledNote };
 
+  if (await missingPostingBlocked(db, target.marketplaceId, target.externalOrderId)) {
+    return {status:"label_not_ready",uin,item:target,error:"Ожидается подтверждение отмены отсутствующего изделия. Остальные изделия сохранены."};
+  }
   if (target.scannedAt) return { status: "repeat", uin, item: target };
 
   const postingItems = await db.prepare(

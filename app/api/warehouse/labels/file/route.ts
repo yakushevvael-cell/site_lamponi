@@ -1,3 +1,4 @@
+import { missingPostingBlocked } from "@/lib/missing-cancellations";
 /**
  * Файл этикетки для печати.
  *
@@ -21,6 +22,7 @@ export async function GET(request: Request) {
   const posting = (url.searchParams.get("posting") ?? "").trim();
   if (!posting) return new Response("Не указано отправление.", { status: 400 });
 
+  if (await missingPostingBlocked(runtime.DB, marketplaceId, posting)) return new Response("Ожидается подтверждение отмены отсутствующего изделия.", {status:409});
   const label = await readLabel(runtime.DB, marketplaceId, posting);
   if (!label || label.status !== "ready" || !label.storageKey) {
     return new Response("Этикетка ещё не готова.", { status: 409 });

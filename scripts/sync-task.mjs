@@ -250,6 +250,12 @@ async function main() {
   if (action === "orders") return syncOrders();
   if (action === "stocks") return syncStocks();
   if (action === "checks") return runChecks();
+  if (action === "missing-cancellations") {
+    const {status,data}=await call("/api/warehouse/missing-cancellations/run",{});
+    if(status>=400) throw new Error(data.error ?? `HTTP ${status}`);
+    if(data.processed) log(`Обработано отмен изделий: ${data.processed}`);
+    return;
+  }
   fail("укажите режим: orders, stocks или checks.");
 }
 
