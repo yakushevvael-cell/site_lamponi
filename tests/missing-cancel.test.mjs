@@ -103,3 +103,37 @@ test("message rendering and configured promo are preserved",()=>{
   assert.equal(renderMissingMessage({text:"Нет {артикул}",promo:"CODE"},{article:"К-1",posting:"P",quantity:1}),"Нет К-1\nПромокод: CODE");
   assert.throws(()=>renderMissingMessage({text:"hello",promo:""},{}));
 });
+
+test("two missing units in the same posting are processed sequentially without cancelling the remaining SKU",async t=>{
+  const f=await fixture(t);
+  await f.db.exec(`INSERT INTO pick_task_items VALUES(3,1,'ozon','ORDER-1','100',1,'not_found','К-1');
+    INSERT INTO missing_item_cancellations(item_id,task_id,marketplace_id,posting,sku,quantity,actor,created_at,updated_at)
+    VALUES(3,1,'ozon','ORDER-1','100',1,'picker',1000,1000)`);
+  await f.run();assert.equal(f.calls.filter(c=>c[0]==="message").length,1);
+  f.advance(60000);await f.run();f.advance(5000);await f.run();
+  await f.run();assert.equal(f.calls.filter(c=>c[0]==="message").length,2);
+  f.advance(60000);await f.run();f.advance(5000);await f.run();
+  assert.deepEqual(f.posting.products,[{sku:100,quantity:0},{sku:200,quantity:1}]);
+  assert.equal((await f.db.prepare("SELECT COUNT(*) AS n FROM missing_item_cancellations WHERE state='done'").first()).n,2);
+});
+
+test("a new posting number is applied only after its remaining composition is verified",async t=>{
+  const f=await fixture(t);
+  await f.db.exec("INSERT INTO pick_task_items VALUES(3,1,'ozon','ORDER-1','200',1,'picked','К-2')");
+  await f.run();f.advance(60000);
+  await f.run({ozonCancel:async()=>"NEW-POSTING"});
+  assert.equal((await f.db.prepare("SELECT external_order_id AS p FROM pick_task_items WHERE id=3").first()).p,"ORDER-1");
+  f.advance(5000);
+  await f.run({ozonPosting:async posting=>{assert.equal(posting,"NEW-POSTING");return {status:"awaiting_packaging",products:[{sku:100,quantity:1},{sku:200,quantity:1}]};}});
+  assert.equal((await f.row()).state,"done");
+  assert.equal((await f.db.prepare("SELECT external_order_id AS p FROM pick_task_items WHERE id=3").first()).p,"NEW-POSTING");
+  assert.equal((await f.db.prepare("SELECT external_order_id AS p FROM pick_task_items WHERE id=2").first()).p,"OTHER-ORDER");
+});
+
+test("persisted message acknowledgement recovers the deadline after an interruption",async t=>{
+  const f=await fixture(t);await f.run();
+  await f.db.exec("UPDATE missing_item_cancellations SET state='sending'");
+  f.advance(300001);await f.run();
+  assert.equal(f.calls.filter(c=>c[0]==="message").length,1);
+  assert.equal(f.calls.filter(c=>c[0]==="cancel").length,1);
+});
