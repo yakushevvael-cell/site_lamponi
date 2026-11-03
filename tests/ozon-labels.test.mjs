@@ -158,3 +158,66 @@ test("completed with unprinted postings never prints an incomplete PDF", async (
     }), /не сформировал все этикетки/);
   }
 });
+
+function afterShipFixture(state = { status: "awaiting_deliver" }) {
+  let time = 1000;
+  let ready = false;
+  const calls = [];
+  const f = fixture({ now: () => time, request: async (path, body) => {
+    calls.push({ path, body });
+    if (path.endsWith("/create")) {
+      if (!ready) throw new Error("Ozon: NO_POSTINGS_FOR_BATCH_DOWNLOAD");
+      return { tasks: [{ task_id: 42, task_type: "small_label" }] };
+    }
+    if (path === "/v3/posting/fbs/get") return { result: state };
+    assert.equal(body.task_id, 42, "local waiting marker must never be sent to Ozon");
+    return { status: { code: "completed" }, file_url: "https://cdn.ozon.ru/a.pdf" };
+  } });
+  return { ...f, calls, advance: ms => { time += ms; }, ready: () => { ready = true; } };
+}
+
+test("immediate label refusal after ship waits durably, then downloads without another ship", async () => {
+  const f = afterShipFixture();
+  assert.equal((await collectOzonLabelPdfs(["a"], f.deps)).ok, false);
+  assert.deepEqual(f.tasks.get("a"), { id: 0, createdAt: 1000 });
+  f.advance(30_000);
+  assert.equal((await collectOzonLabelPdfs(["a"], { ...f.deps })).ok, false);
+  assert.equal(f.calls.length, 2, "no API calls during the first minute");
+  f.advance(30_000); f.ready();
+  assert.equal((await collectOzonLabelPdfs(["a"], f.deps)).ok, true);
+  assert.deepEqual(f.tasks.get("a").id, 42);
+  assert.equal(f.calls.some(c => c.path.endsWith("/ship")), false);
+});
+
+test("repeated NO_POSTINGS does not reset the waiting deadline", async () => {
+  const f = afterShipFixture();
+  await collectOzonLabelPdfs(["a"], f.deps);
+  f.advance(60_000);
+  await collectOzonLabelPdfs(["a"], f.deps);
+  assert.equal(f.tasks.get("a").createdAt, 1000);
+  f.advance(840_000);
+  await assert.rejects(collectOzonLabelPdfs(["a"], f.deps), /15 минут/);
+});
+
+for (const state of [
+  { status: "awaiting_verification", substatus: "posting_split_pending" },
+  { status: "awaiting_packaging", substatus: "posting_split_pending" },
+]) {
+  test(`split transition ${state.status} waits`, async () => {
+    const f = afterShipFixture(state);
+    assert.equal((await collectOzonLabelPdfs(["a"], f.deps)).ok, false);
+  });
+}
+
+for (const state of [
+  { status: "cancelled" },
+  { status: "cancelled_from_split_pending" },
+  { status: "awaiting_packaging", substatus: "ship_failed" },
+  { status: "delivered" },
+]) {
+  test(`NO_POSTINGS with ${state.substatus ?? state.status} remains an explicit error`, async () => {
+    const f = afterShipFixture(state);
+    await assert.rejects(collectOzonLabelPdfs(["a"], f.deps), new RegExp(state.substatus ?? state.status));
+    assert.equal(f.tasks.size, 0);
+  });
+}
