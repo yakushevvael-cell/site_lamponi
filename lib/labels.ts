@@ -308,6 +308,7 @@ export async function prepareLabelsForTask(
   // Отменённые на этом заходе: только они попадают в журнал, а не все уже известные.
   let newlyCancelled = 0;
   let statusPolls = 0;
+  let started = 0;
 
   for (const [key, group] of postings) {
     const label = byPosting.get(key);
@@ -366,9 +367,12 @@ export async function prepareLabelsForTask(
         continue;
       }
       statusPolls += 1;
-    } else if (prepared + failed >= limit) {
+    } else if (started >= limit) {
       skipped += 1;
       continue;
+    } else {
+      // Новое асинхронное задание тоже расходует лимит, даже пока PDF не готов.
+      started += 1;
     }
 
     // УИН каждого изделия закреплён при загрузке УПД. Изделие без УИН — это
