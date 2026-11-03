@@ -19,7 +19,11 @@ function fixture(overrides = {}) {
         return { tasks: [{ task_id: ++id, task_type: "small_label" }] };
       }
       assert.deepEqual(Object.keys(body), ["task_id"]);
-      return { result: { status, file_url: `https://cdn.ozon.ru/${body.task_id}.pdf` } };
+      return {
+        status: { code: status, postings_count: 1, printed_postings_count: status === "completed" ? 1 : 0, unprinted_postings: [] },
+        file_url: status === "completed" ? `https://cdn.ozon.ru/${body.task_id}.pdf` : "",
+        error: { code: "", message: "" },
+      };
     },
     fetchFile: async url => new Response(`%PDF-${url}`),
     ...overrides,
@@ -106,4 +110,51 @@ test("PDF download receives no Seller API credentials", async () => {
     return new Response("%PDF-1.7");
   } }); f.complete();
   assert.equal((await collectOzonLabelPdfs(["a"], f.deps)).ok, true);
+});
+
+// Regression: the production v2 response contains an object, not a string status.
+for (const code of ["pending", "in_progress"]) {
+  test(`v2 object status ${code} waits without file_url or losing task`, async () => {
+    const f = fixture();
+    f.tasks.set("a", { id: 42, createdAt: Date.now() });
+    const result = await collectOzonLabelPdfs(["a"], {
+      ...f.deps,
+      request: async (path, body) => {
+        assert.equal(path, "/v2/posting/fbs/package-label/get");
+        assert.deepEqual(body, { task_id: 42 });
+        return { status: { code, postings_count: 1, printed_postings_count: 0 }, error: { code: "", message: "" } };
+      },
+    });
+    assert.equal(result.ok, false);
+    assert.equal(f.tasks.get("a").id, 42);
+  });
+}
+
+test("v2 completed recovers an existing task after the previous parser failed", async () => {
+  const f = fixture(); f.complete();
+  // An old task must still be downloaded when complete, even after the waiting deadline.
+  f.tasks.set("a", { id: 42, createdAt: 1 });
+  assert.equal((await collectOzonLabelPdfs(["a"], f.deps)).ok, true);
+  assert.equal(f.calls.length, 1);
+  assert.deepEqual(f.calls[0].body, { task_id: 42 });
+});
+
+test("v2 error object surfaces the actual Ozon reason", async () => {
+  const f = fixture(); f.tasks.set("a", { id: 42, createdAt: Date.now() });
+  await assert.rejects(collectOzonLabelPdfs(["a"], { ...f.deps, request: async () => ({
+    status: { code: "error" }, error: { code: "LABEL_ERROR", message: "Отправление недоступно" },
+  }) }), /Отправление недоступно/);
+});
+
+test("completed with unprinted postings never prints an incomplete PDF", async () => {
+  for (const extra of [
+    { unprinted_postings: [{ posting_number: "a", message: "Отменено" }] },
+    { postings_count: 1, printed_postings_count: 0 },
+  ]) {
+    const f = fixture(); f.tasks.set("a", { id: 42, createdAt: Date.now() });
+    await assert.rejects(collectOzonLabelPdfs(["a"], { ...f.deps,
+      request: async () => ({ status: { code: "completed", ...extra }, file_url: "https://cdn.ozon.ru/a.pdf" }),
+      fetchFile: async () => { assert.fail("must not download incomplete labels"); },
+    }), /не сформировал все этикетки/);
+  }
 });
