@@ -756,6 +756,7 @@ export const shipmentLabels = sqliteTable(
     note: text("note"),
     /** Номера отправлений после сборки, через запятую: по ним берётся этикетка. */
     shipPostings: text("ship_postings"),
+    ozonLabelLines: text("ozon_label_lines"),
     attempts: integer("attempts").notNull().default(0),
     preparedAt: text("prepared_at"),
     printedAt: text("printed_at"),
@@ -1051,3 +1052,11 @@ export const deliveryRequests = sqliteTable(
     index("delivery_request_task_idx").on(table.taskId),
   ],
 );
+
+/** Async Ozon scanit generation jobs, shared by retries and server restarts. */
+export const ozonLabelJobs = sqliteTable("ozon_label_jobs", {
+  clientId: text("client_id").notNull(),
+  postingNumber: text("posting_number").notNull(),
+  taskId: integer("task_id").notNull(),
+  createdAt: integer("created_at").notNull(),
+}, (table) => [primaryKey({ columns: [table.clientId, table.postingNumber] })]);

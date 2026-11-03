@@ -557,7 +557,8 @@ export async function prepareLabelsForTask(
         // У WB метка решает, повторит ли стол подготовку сам. Пустая строка, а
         // не null: null оставил бы прежнюю метку «остановлено» после ручного
         // повтора, закончившегося другой ошибкой.
-        exemplarStatus: marketplaceId === "wildberries" ? (error instanceof LabelStoppedError ? LABEL_STOPPED : "") : null,
+        exemplarStatus: error instanceof OzonLabelError ? LABEL_STOPPED
+          : marketplaceId === "wildberries" ? (error instanceof LabelStoppedError ? LABEL_STOPPED : "") : null,
       });
       failed += 1;
     }
@@ -593,6 +594,56 @@ type OzonInput = {
   shipPostings: string[];
 };
 
+/** Ошибка получения PDF не должна запускать сборку или создание задания повторно. */
+class OzonLabelError extends Error {}
+
+async function finishOzonLabel(
+  db: D1Database, runtime: AppRuntimeEnv, input: OzonInput,
+  clientId: string, apiKey: string, postings: string[],
+  lines?: Array<{ article: string; size: string | null }>,
+): Promise<OzonStep> {
+  try {
+    // Сохраняем номера сразу после ship, даже если следующий запрос завершится ошибкой.
+    // Вместе с ними — порядок подписей: после разделения исходное отправление недоступно.
+    const saved = await db.prepare(
+      "SELECT ozon_label_lines AS lines FROM shipment_labels WHERE marketplace_id = 'ozon' AND external_order_id = ?",
+    ).bind(input.postingNumber).first<{ lines: string | null }>();
+    const labelLines = lines ?? (saved?.lines ? JSON.parse(saved.lines) : input.products.map(({ article, size }) => ({ article, size })));
+    await db.prepare(
+      `INSERT INTO shipment_labels (marketplace_id, external_order_id, ship_postings, ozon_label_lines)
+       VALUES ('ozon', ?, ?, ?)
+       ON CONFLICT(marketplace_id, external_order_id) DO UPDATE SET
+       ship_postings = excluded.ship_postings, ozon_label_lines = excluded.ozon_label_lines`,
+    ).bind(input.postingNumber, postings.join(","), JSON.stringify(labelLines)).run();
+    const label = await ozonPackageLabel(clientId, apiKey, postings, {
+      readTask: (posting) => db.prepare(
+        "SELECT task_id AS id, created_at AS createdAt FROM ozon_label_jobs WHERE client_id = ? AND posting_number = ?",
+      ).bind(clientId, posting).first<{ id: number; createdAt: number }>(),
+      saveTask: async (posting, task) => {
+        await db.prepare(
+          `INSERT INTO ozon_label_jobs (client_id, posting_number, task_id, created_at) VALUES (?, ?, ?, ?)
+           ON CONFLICT(client_id, posting_number) DO UPDATE SET task_id = excluded.task_id, created_at = excluded.created_at`,
+        ).bind(clientId, posting, task.id, task.createdAt).run();
+      },
+      deleteTask: async (posting) => {
+        await db.prepare("DELETE FROM ozon_label_jobs WHERE client_id = ? AND posting_number = ?").bind(clientId, posting).run();
+      },
+    });
+    const uins = input.products.map((product) => product.uin);
+    if (!label.ok) {
+      if (label.notReady) return { kind: "waiting", exemplarStatus: "", note: label.message, uins, shipPostings: postings };
+      throw new Error(label.message);
+    }
+    let pdf: Uint8Array = label.pdf;
+    try { pdf = await stampLabelLines(label.pdf, labelLines) as Uint8Array; }
+    catch (error) { console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, error); }
+    const storageKey = await storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
+    return { kind: "ready", storageKey, uins, shipPostings: postings };
+  } catch (error) {
+    throw new OzonLabelError(error instanceof Error ? error.message : "Не удалось получить этикетку Ozon.");
+  }
+}
+
 /**
  * Шаг Ozon с разбором отказа.
  *
@@ -606,6 +657,7 @@ async function prepareOzonLabel(db: D1Database, runtime: AppRuntimeEnv, input: O
   try {
     return await runOzonSteps(db, runtime, input);
   } catch (error) {
+    if (error instanceof OzonLabelError) throw error;
     const original = error instanceof Error ? error.message : "Ozon отказал в сборке.";
     const credentials = await getMarketplaceCredentials(db, runtime, "ozon").catch(() => null);
     if (!credentials?.OZON_CLIENT_ID || !credentials?.OZON_API_KEY) throw error;
@@ -620,21 +672,7 @@ async function prepareOzonLabel(db: D1Database, runtime: AppRuntimeEnv, input: O
 
     // Уже собрано: забираем этикетку по номерам сборки, если они известны.
     const postings = input.shipPostings.length > 0 ? input.shipPostings : [input.postingNumber];
-    const label = await ozonPackageLabel(clientId, apiKey, postings);
-    if (!label.ok) {
-      throw new Error(`${state.message} Этикетку Ozon не отдал: ${label.message} Распечатайте её в кабинете Ozon.`);
-    }
-    let pdf: Uint8Array = label.pdf;
-    try {
-      pdf = (await stampLabelLines(label.pdf, input.products.map((product) => ({
-        article: product.article,
-        size: product.size,
-      })))) as Uint8Array;
-    } catch (stampError) {
-      console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, stampError);
-    }
-    const storageKey = await storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
-    return { kind: "ready", storageKey, uins: input.products.map((product) => product.uin), shipPostings: postings };
+    return finishOzonLabel(db, runtime, input, clientId, apiKey, postings);
   }
 }
 
@@ -652,6 +690,11 @@ async function runOzonSteps(db: D1Database, runtime: AppRuntimeEnv, input: OzonI
   if (!credentials.OZON_CLIENT_ID || !credentials.OZON_API_KEY) throw new Error("Ключи Ozon не добавлены.");
   const clientId = credentials.OZON_CLIENT_ID;
   const apiKey = credentials.OZON_API_KEY;
+
+  // После сборки экземпляры больше не трогаем: продолжаем сохранённое задание PDF.
+  if (input.shipPostings.length > 0) {
+    return finishOzonLabel(db, runtime, input, clientId, apiKey, input.shipPostings);
+  }
 
   const created = await ozonExemplarCreateOrGet(clientId, apiKey, input.postingNumber);
 
@@ -689,35 +732,10 @@ async function runOzonSteps(db: D1Database, runtime: AppRuntimeEnv, input: OzonI
   // изделиями вызывающая сторона — иначе следующий заход возьмёт из УПД другой.
   const uins = build.assigned.map((entry) => entry.uin);
 
-  const finish = async (postings: string[]): Promise<OzonStep> => {
-    const label = await ozonPackageLabel(clientId, apiKey, postings);
-    // «Этикетка ещё не готова» — не отказ: отправление уже собрано. Номера
-    // сборки возвращаются вместе с ожиданием, иначе следующий заход начал бы
-    // цепочку с экземпляров — по собранному отправлению это заведомо ошибка.
-    if (!label.ok) {
-      if (label.notReady) {
-        return { kind: "waiting", exemplarStatus: "", note: label.message, uins, shipPostings: postings };
-      }
-      throw new Error(label.message);
-    }
-
-    // Впечатываем «артикул / размер» в нижнюю белую полосу этикетки. Строки идут
-    // в том же порядке, что и упаковки при сборке, поэтому каждая попадает на свою
-    // страницу PDF. Сбой впечатывания не должен ронять уже готовую этикетку —
-    // тогда сохраняем исходный PDF от Ozon, как было раньше.
-    let pdf: Uint8Array = label.pdf;
-    try {
-      const lines = buildLabelLines(created, input.products, input.products.length > 1) as Array<{ article: string; size: string | null }>;
-      pdf = (await stampLabelLines(label.pdf, lines)) as Uint8Array;
-    } catch (error) {
-      console.warn(`Не удалось впечатать артикул на этикетку ${input.postingNumber}:`, error);
-    }
-    const storageKey = await storeLabelFile(runtime, "ozon", input.postingNumber, pdf, "pdf");
-    return { kind: "ready", storageKey, uins, shipPostings: postings };
-  };
-
-  // Отправление уже собрано на прошлом заходе: номера известны, остаётся файл.
-  if (input.shipPostings.length > 0) return finish(input.shipPostings);
+  const finish = (postings: string[]): Promise<OzonStep> => finishOzonLabel(
+    db, runtime, input, clientId, apiKey, postings,
+    buildLabelLines(created, input.products, input.products.length > 1) as Array<{ article: string; size: string | null }>,
+  );
 
   if (build.mustSet) {
     try {

@@ -1,3 +1,4 @@
+import { collectOzonLabelPdfs } from "./ozon-labels.mjs";
 import { isRetryableStatus, pace, retryAfterFromHeaders, withRetry } from "@/lib/http-retry";
 
 const OZON_API_BASE = "https://api-seller.ozon.ru";
@@ -656,61 +657,35 @@ export async function ozonPostingStatus(clientId: string, apiKey: string, postin
   return String(payload.result?.status ?? payload.status ?? "");
 }
 
-/**
- * Этикетка отправлений одним PDF.
- *
- * Отдельный запрос, а не ozonRequest: тут приходит не JSON, а файл. Ozon на
- * «ещё не готово» отвечает то 409, то 400 — считать 400 фатальным нельзя,
- * именно на этом ломалась печать в таблице.
- */
+/** Durable storage for asynchronous Ozon label jobs. */
+export type OzonLabelTaskStore = {
+  readTask: (posting: string) => Promise<{ id: number; createdAt: number } | null>;
+  saveTask: (posting: string, task: { id: number; createdAt: number }) => Promise<void>;
+  deleteTask: (posting: string) => Promise<void>;
+};
+
+/** New scanit API: create a job, poll it on subsequent passes, download PDF. */
 export async function ozonPackageLabel(
   clientId: string,
   apiKey: string,
   postingNumbers: string[],
+  tasks: OzonLabelTaskStore,
 ): Promise<{ ok: true; pdf: Uint8Array } | { ok: false; notReady: boolean; message: string }> {
-  await pace("ozon", OZON_MIN_INTERVAL_MS);
-  let response: Response;
-  try {
-    response = await fetch(`${OZON_API_BASE}/v2/posting/fbs/package-label`, {
-      method: "POST",
-      headers: {
-        Accept: "application/pdf",
-        "Content-Type": "application/json",
-        "Client-Id": clientId,
-        "Api-Key": apiKey,
-      },
-      body: JSON.stringify({ posting_number: postingNumbers }),
-      signal: AbortSignal.timeout(30_000),
-    });
-  } catch (error) {
-    const timeout = error instanceof Error && error.name === "TimeoutError";
-    return {
-      ok: false,
-      notReady: true,
-      message: timeout ? "Ozon не отдал этикетку за 30 секунд." : "Не удалось связаться с Ozon.",
-    };
+  const result = await collectOzonLabelPdfs(postingNumbers, {
+    ...tasks,
+    scope: clientId,
+    request: (path: string, body: Record<string, unknown>) => ozonRequest(path, clientId, apiKey, body),
+    fetchFile: (url: string) => fetch(url, { signal: AbortSignal.timeout(30_000) }),
+  }) as { ok: true; pdfs: Uint8Array[] } | { ok: false; notReady: boolean; message: string };
+  if (!result.ok) return result;
+  if (result.pdfs.length === 1) return { ok: true, pdf: result.pdfs[0] };
+  const { PDFDocument } = await import("pdf-lib");
+  const merged = await PDFDocument.create();
+  for (const bytes of result.pdfs) {
+    const source = await PDFDocument.load(bytes);
+    for (const page of await merged.copyPages(source, source.getPageIndices())) merged.addPage(page);
   }
-
-  if (response.ok) {
-    const buffer = new Uint8Array(await response.arrayBuffer());
-    // Иногда вместо PDF приходит JSON с ошибкой и кодом 200.
-    const looksLikePdf = buffer.length > 4 && buffer[0] === 0x25 && buffer[1] === 0x50;
-    if (looksLikePdf) return { ok: true, pdf: buffer };
-    return { ok: false, notReady: true, message: "Ozon вернул не PDF — этикетка ещё не готова." };
-  }
-
-  const text = await response.text().catch(() => "");
-  const notReady = response.status === 409
-    || response.status === 400
-    || response.status === 404
-    || response.status === 429
-    || response.status >= 500
-    || /not ready|aren't ready|не готов/i.test(text);
-  return {
-    ok: false,
-    notReady,
-    message: `Ozon: HTTP ${response.status}${text ? ` — ${text.slice(0, 200)}` : ""}`,
-  };
+  return { ok: true, pdf: await merged.save() };
 }
 
 /* ============================================================
