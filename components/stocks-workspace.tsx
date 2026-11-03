@@ -4,7 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 import { Ban, Boxes, CloudUpload, FlaskConical, History, Layers, ListFilter, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, X, Zap } from "lucide-react";
 import { toast } from "sonner";
 
-import { PENDING_STOCK_BATCH_LIMIT, PENDING_STOCK_POLL_SECONDS } from "@/lib/stock-pending-core.mjs";
+import { advancePendingStockDrain, PENDING_STOCK_BATCH_LIMIT, PENDING_STOCK_POLL_SECONDS } from "@/lib/stock-pending-core.mjs";
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
 
 import {
@@ -897,18 +897,28 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
     setPushingPending(true);
     setPendingProgress("");
     try {
-      let totalSelected = 0;
+      const deferredSkus = new Set<string>();
+      let progress = {
+        totalSelected: 0,
+        totalCleared: 0,
+        deferredRetrying: 0,
+        pendingLeft: Number.POSITIVE_INFINITY,
+        readyLeft: Number.POSITIVE_INFINITY,
+        nextLimit: PENDING_STOCK_BATCH_LIMIT,
+        complete: false,
+        onlyErrorsLeft: false,
+        shouldContinue: true,
+      };
       let partialError: string | null = null;
-      let previousLeft = Number.POSITIVE_INFINITY;
       let fullyProcessed = false;
 
       for (let batch = 1; batch <= MAX_PENDING_DRAIN_BATCHES; batch += 1) {
         const response = await fetch("/api/stocks/sync-pending", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ limit: PENDING_STOCK_BATCH_LIMIT }),
+          body: JSON.stringify({ limit: progress.nextLimit, excludeSkus: [...deferredSkus] }),
         });
-        const data = await response.json() as { ok?: boolean; selected?: number; pendingLeft?: number; failures?: string[]; error?: string };
+        const data = await response.json() as { ok?: boolean; selected?: number; cleared?: number; retrying?: number; retrySkus?: string[]; pendingLeft?: number; failures?: string[]; error?: string };
         if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Доотправка не выполнена.");
         const selectedNow = Number(data.selected ?? 0);
         const pendingLeft = Number(data.pendingLeft ?? 0);
@@ -917,30 +927,31 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           break;
         }
 
-        totalSelected += selectedNow;
+        progress = advancePendingStockDrain(progress, data);
+        for (const sku of data.retrySkus ?? []) deferredSkus.add(sku);
         setPending(pendingLeft);
-        setPendingProgress(`Отправлено ${totalSelected.toLocaleString("ru-RU")}, осталось ${pendingLeft.toLocaleString("ru-RU")}`);
+        setPendingProgress(`Успешно ${progress.totalCleared.toLocaleString("ru-RU")}, осталось ${pendingLeft.toLocaleString("ru-RU")}`);
         if (!data.ok || (data.failures?.length ?? 0) > 0) {
-          partialError = data.failures?.[0] ?? "Одна из площадок не приняла остатки.";
-          break;
+          partialError ??= data.failures?.[0] ?? "Одна из площадок не приняла остатки.";
         }
-        if (pendingLeft <= 0) {
+        if (progress.complete) {
           fullyProcessed = true;
           break;
         }
-        if (pendingLeft >= previousLeft) throw new Error("Очередь не уменьшается. Повторите попытку позже и проверьте ошибки площадок.");
-        previousLeft = pendingLeft;
+        if (progress.onlyErrorsLeft) break;
       }
       if (!fullyProcessed && !partialError) {
         partialError = `Достигнут защитный предел ${MAX_PENDING_DRAIN_BATCHES} пакетов. Остаток обработает следующий запуск.`;
       }
 
-      if (totalSelected === 0) {
+      if (progress.totalSelected === 0) {
         toast.info("Доотправлять нечего", { description: "С прошлой выгрузки остатки не менялись." });
       } else if (partialError) {
-        toast.warning("Отправлено частично", { description: partialError });
+        toast.warning("Очередь обработана, есть ошибки", {
+          description: `Успешно: ${progress.totalCleared.toLocaleString("ru-RU")}; оставлено на повтор: ${progress.deferredRetrying.toLocaleString("ru-RU")}. ${partialError}`,
+        });
       } else {
-        toast.success("Изменившиеся остатки отправлены", { description: `Позиций: ${totalSelected}. Очередь обработана.` });
+        toast.success("Изменившиеся остатки отправлены", { description: `Позиций: ${progress.totalCleared}. Очередь обработана.` });
       }
       await loadPending();
       await load(query);

@@ -124,6 +124,8 @@ export type PushStocksResult = {
   runId: string;
   selected: number;
   unmapped: string[];
+  /** SKU, которые хотя бы одна включённая площадка не приняла и надо повторить. */
+  retrySkus: string[];
   wildberries: { warehouseCount: number; mappingCount: number; sent: number };
   ozon: { warehouseCount: number; mappingCount: number; sent: number; reserveDrift: number };
   yandex: { warehouseCount: number; mappingCount: number; sent: number };
@@ -165,6 +167,7 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   const resultRows: ResultRow[] = [];
   const logRows: LogRow[] = [];
   const failures: string[] = [];
+  const retrySkus = new Set<string>();
   let wbSent = 0;
   let ozonSent = 0;
   let yandexSent = 0;
@@ -236,6 +239,7 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
       const guard = isStockGuardError(error);
       const message = messageFrom(error, `Не удалось обновить склад ${warehouse.name}.`);
       failures.push(`Wildberries, ${warehouse.name}: ${message}`);
+      for (const item of wbBasis) retrySkus.add(item.sourceSku);
       await markWarehouseSync(db, "wildberries", warehouse.externalId, false, message);
       if (guard) {
         logRows.push({
@@ -361,6 +365,18 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
           : [];
         const failedKeys = new Map(apiFailures.map((failure) => [`${failure.offerId}::${failure.warehouseId}`, failure.message]));
         const realFailures = apiFailures.filter((failure) => !bootstrapKeys.has(`${failure.offerId}::${failure.warehouseId}`));
+        if (realFailures.length > 0) {
+          const failedOffers = new Set(realFailures.map((failure) => failure.offerId));
+          const knownOffers = new Set(ozonBasis.map((item) => item.externalSku));
+          for (const item of ozonBasis) {
+            if (failedOffers.has(item.externalSku)) retrySkus.add(item.sourceSku);
+          }
+          // Неизвестный offer_id в ответе Ozon нельзя безопасно сопоставить:
+          // в таком случае повторяем весь Ozon-поднабор, но не блокируем другие пакеты.
+          if ([...failedOffers].some((offerId) => !knownOffers.has(offerId))) {
+            for (const item of ozonBasis) retrySkus.add(item.sourceSku);
+          }
+        }
 
         for (const row of rows) {
           const key = `${row.externalSku}::${Number(row.warehouseId)}`;
@@ -394,6 +410,7 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
         const guard = isStockGuardError(error);
         const message = messageFrom(error, "Не удалось обновить остатки Ozon.");
         failures.push(`Ozon: ${message}`);
+        for (const item of ozonBasis) retrySkus.add(item.sourceSku);
         if (guard) {
           logRows.push({
             ...(error as { row: Partial<SendableRow> }).row,
@@ -481,6 +498,7 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
       const guard = isStockGuardError(error);
       const message = messageFrom(error, `Не удалось обновить склад ${warehouse.name}.`);
       failures.push(`Яндекс Маркет, ${warehouse.name}: ${message}`);
+      for (const item of yandexBasis) retrySkus.add(item.sourceSku);
       await markWarehouseSync(db, "yandex", warehouse.externalId, false, message);
       if (guard) {
         logRows.push({
@@ -559,6 +577,7 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
     runId,
     selected: sourceSkus.length,
     unmapped,
+    retrySkus: sourceSkus.filter((sku) => retrySkus.has(sku)),
     wildberries: { warehouseCount: wbWarehouses.length, mappingCount: wbBasis.length, sent: wbSent },
     ozon: { warehouseCount: ozonWarehouses.length, mappingCount: ozonBasis.length, sent: ozonSent, reserveDrift },
     yandex: { warehouseCount: yandexWarehouses.length, mappingCount: yandexBasis.length, sent: yandexSent },

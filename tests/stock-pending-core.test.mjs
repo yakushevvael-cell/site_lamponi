@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  advancePendingStockDrain,
   nextPendingStockRunAt,
+  partitionPendingStockSkus,
   PENDING_STOCK_BATCH_LIMIT,
   PENDING_STOCK_INTERVAL_MINUTES,
   PENDING_STOCK_POLL_SECONDS,
@@ -39,4 +41,39 @@ test("включённый, но ещё не синхронизированны�
     { marketplaceId: "yandex", syncStatus: "never", syncError: null, lastStockSyncAt: null },
   ]);
   assert.equal(statuses.find((item) => item.marketplaceId === "yandex")?.status, "waiting");
+});
+
+test("одна ошибка Ozon не удерживает остальные позиции пакета", () => {
+  const sourceSkus = Array.from({ length: 300 }, (_, index) => `sku-${index + 1}`);
+  const result = partitionPendingStockSkus(sourceSkus, ["sku-17"]);
+  assert.equal(result.completed.length, 299);
+  assert.deepEqual(result.retrying, ["sku-17"]);
+  assert.equal(result.completed.includes("sku-17"), false);
+});
+
+test("ошибочные SKU откладываются, а проход продолжается по остальной очереди", () => {
+  const first = advancePendingStockDrain({}, { selected: 300, cleared: 299, retrying: 1, pendingLeft: 1197 });
+  assert.equal(first.shouldContinue, true);
+  assert.equal(first.nextLimit, 300);
+  assert.equal(first.deferredRetrying, 1);
+
+  const penultimate = advancePendingStockDrain(first, { selected: 300, cleared: 300, retrying: 0, pendingLeft: 297 });
+  assert.equal(penultimate.nextLimit, 296);
+  assert.equal(penultimate.onlyErrorsLeft, false);
+
+  const last = advancePendingStockDrain(penultimate, { selected: 296, cleared: 296, retrying: 0, pendingLeft: 1 });
+  assert.equal(last.shouldContinue, false);
+  assert.equal(last.onlyErrorsLeft, true);
+  assert.equal(last.deferredRetrying, 1);
+});
+
+test("даже полностью ошибочный первый пакет не блокирует следующие пакеты", () => {
+  const first = advancePendingStockDrain({}, { selected: 300, cleared: 0, retrying: 300, pendingLeft: 1496 });
+  assert.equal(first.shouldContinue, true);
+  assert.equal(first.readyLeft, 1196);
+  assert.equal(first.nextLimit, 300);
+
+  const last = advancePendingStockDrain(first, { selected: 296, cleared: 296, retrying: 0, pendingLeft: 300 });
+  assert.equal(last.onlyErrorsLeft, true);
+  assert.equal(last.nextLimit, 0);
 });

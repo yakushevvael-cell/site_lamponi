@@ -19,7 +19,7 @@
  * а не вторая копия логики, которая со временем разошлась бы с первой.
  */
 
-import { PENDING_STOCK_BATCH_LIMIT } from "../lib/stock-pending-core.mjs";
+import { advancePendingStockDrain, PENDING_STOCK_BATCH_LIMIT } from "../lib/stock-pending-core.mjs";
 
 const APP_URL = (process.env.APP_URL ?? "http://127.0.0.1:3000").replace(/\/+$/, "");
 const TOKEN = process.env.SYNC_TASK_TOKEN ?? "";
@@ -145,11 +145,20 @@ async function syncFinance() {
  * изменился резерв, поэтому запуск дешёвый и его не жалко делать часто.
  */
 async function pushChangedStocks() {
-  let totalSelected = 0;
-  let previousPending = Number.POSITIVE_INFINITY;
+  const deferredSkus = new Set();
+  let progress = {
+    totalSelected: 0,
+    totalCleared: 0,
+    deferredRetrying: 0,
+    pendingLeft: Number.POSITIVE_INFINITY,
+    nextLimit: PENDING_STOCK_BATCH_LIMIT,
+  };
 
   for (let batch = 1; batch <= MAX_PENDING_BATCHES; batch += 1) {
-    const { status, data } = await call("/api/stocks/sync-pending", { limit: PENDING_STOCK_BATCH_LIMIT });
+    const { status, data } = await call("/api/stocks/sync-pending", {
+      limit: progress.nextLimit,
+      excludeSkus: [...deferredSkus],
+    });
     if (status === 423 && data.stockSyncPaused) {
       log("Выгрузка остатков остановлена вручную — доотправка пропущена.");
       return;
@@ -160,34 +169,32 @@ async function pushChangedStocks() {
       return;
     }
     if (!data.selected) {
-      if (totalSelected === 0) log("Изменившихся позиций нет — доотправлять нечего.");
-      else log(`Очередь обработана. Всего отправлено позиций: ${totalSelected}.`);
+      if (progress.totalSelected === 0) log("Изменившихся позиций нет — доотправлять нечего.");
+      else log(`Текущий проход очереди завершён. Успешно снято позиций: ${progress.totalCleared}.`);
       return;
     }
 
-    totalSelected += Number(data.selected) || 0;
+    progress = advancePendingStockDrain(progress, data);
+    for (const sku of data.retrySkus ?? []) deferredSkus.add(sku);
     const wb = data.wildberries?.sent ?? 0;
     const ozon = data.ozon?.sent ?? 0;
     const yandex = data.yandex?.sent ?? 0;
-    const pendingLeft = Number(data.pendingLeft ?? 0);
-    log(`Доотправка, пакет ${batch}: позиций ${data.selected}, WB ${wb}, Ozon ${ozon}, Маркет ${yandex}. В очереди осталось: ${pendingLeft}.`);
+    log(`Доотправка, пакет ${batch}: выбрано ${data.selected}, снято с очереди ${data.cleared ?? 0}, `
+      + `оставлено с ошибкой ${data.retrying ?? 0}; WB ${wb}, Ozon ${ozon}, Маркет ${yandex}. `
+      + `В очереди осталось: ${progress.pendingLeft}.`);
 
     if (!data.ok || (Array.isArray(data.failures) && data.failures.length > 0)) {
       for (const failure of data.failures ?? []) log(`Замечание: ${failure}`);
-      log("Разбор очереди остановлен: непринятые позиции останутся для следующего запуска.");
       process.exitCode = 2;
+    }
+    if (progress.complete) {
+      log(`Очередь обработана полностью. Успешно снято позиций: ${progress.totalCleared}.`);
       return;
     }
-    if (pendingLeft <= 0) {
-      log(`Очередь обработана полностью. Всего отправлено позиций: ${totalSelected}.`);
+    if (progress.onlyErrorsLeft) {
+      log(`Все остальные позиции обработаны. С ошибками оставлено до следующего запуска: ${progress.deferredRetrying}.`);
       return;
     }
-    if (pendingLeft >= previousPending) {
-      log(`Очередь не уменьшается (осталось ${pendingLeft}) — останавливаю цикл до следующего запуска.`);
-      process.exitCode = 2;
-      return;
-    }
-    previousPending = pendingLeft;
   }
 
   log(`Достигнут предел ${MAX_PENDING_BATCHES} пакетов. Остаток очереди будет обработан следующим запуском.`);

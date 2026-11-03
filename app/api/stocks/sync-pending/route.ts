@@ -1,8 +1,9 @@
 import { authorizeApi, hasManagerAccess } from "@/lib/app-auth";
 import { getRuntimeEnv } from "@/lib/runtime-env";
 import { pushStocksForSkus } from "@/lib/stock-push";
-import { clearDirtySkus, countDirtySkus, readDirtySkus } from "@/lib/stock-queue";
+import { clearDirtySkus, countDirtySkus, deferDirtySkus, readDirtySkus } from "@/lib/stock-queue";
 import {
+  partitionPendingStockSkus,
   nextPendingStockRunAt,
   PENDING_STOCK_BATCH_LIMIT,
   PENDING_STOCK_INTERVAL_MINUTES,
@@ -74,11 +75,14 @@ export async function POST(request: Request) {
   const scope = await bulkStockSyncScope(db);
   if (scope.blocked) return scope.blocked;
 
-  const body = await request.json().catch(() => null) as { limit?: unknown } | null;
+  const body = await request.json().catch(() => null) as { limit?: unknown; excludeSkus?: unknown } | null;
   const requested = Number(body?.limit);
   const limit = Number.isFinite(requested) ? Math.min(MAX_LIMIT, Math.max(1, Math.trunc(requested))) : DEFAULT_LIMIT;
+  const excludeSkus = Array.isArray(body?.excludeSkus)
+    ? [...new Set(body.excludeSkus.filter((sku): sku is string => typeof sku === "string" && sku.length > 0).slice(0, 30_000))]
+    : [];
 
-  const sourceSkus = await readDirtySkus(db, limit, pilotFilterSql(scope.mode));
+  const sourceSkus = await readDirtySkus(db, limit, pilotFilterSql(scope.mode), excludeSkus);
   if (sourceSkus.length === 0) {
     return Response.json({
       ok: true,
@@ -98,15 +102,17 @@ export async function POST(request: Request) {
   });
   if ("error" in result) return Response.json({ error: result.error }, { status: 400 });
 
-  // Позиции без активного сопоставления отправить некуда — держать их в
-  // очереди вечно бессмысленно, они уйдут при полной выгрузке.
-  if (result.unmapped.length > 0) await clearDirtySkus(db, result.unmapped).catch(() => undefined);
-  // Остальные снимаем с очереди только при полном успехе: иначе следующий
-  // запуск повторит отправку, а повтор безопасен — значения абсолютные.
-  if (result.ok) await clearDirtySkus(db, sourceSkus).catch(() => undefined);
+  // Один непринятый Ozon SKU не должен удерживать весь пакет. С очереди
+  // снимаются все позиции, которые приняли их включённые площадки; ошибочные
+  // переносятся в хвост текущего прохода и повторятся через пять минут.
+  const partition = partitionPendingStockSkus(sourceSkus, result.retrySkus);
+  await deferDirtySkus(db, partition.retrying);
+  await clearDirtySkus(db, partition.completed);
 
   return Response.json({
     ...result,
+    cleared: partition.completed.length,
+    retrying: partition.retrying.length,
     pendingLeft: await countDirtySkus(db),
   }, { status: result.ok ? 200 : 207 });
 }

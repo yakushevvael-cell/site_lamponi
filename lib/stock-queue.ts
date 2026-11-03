@@ -45,25 +45,58 @@ export async function countDirtySkus(db: D1Database) {
  * Берёт из очереди самые давние позиции: они ждут дольше всех.
  *
  * `pilotSql` сужает выборку до пилотного списка. Отбор идёт в запросе, а не
- * после него: иначе первые двести очередников могли бы оказаться непилотными,
+ * после него: иначе первые триста очередников могли бы оказаться непилотными,
  * и доотправка в пилотном режиме не находила бы ничего.
  */
-export async function readDirtySkus(db: D1Database, limit: number, pilotSql = "") {
-  const rows = await db.prepare(
-    `SELECT d.product_sku AS productSku
-     FROM stock_dirty_skus d
-     JOIN products p ON p.source_sku = d.product_sku
-     WHERE 1 = 1${pilotSql}
-     ORDER BY d.marked_at, d.product_sku
-     LIMIT ?`,
-  ).bind(Math.max(1, Math.min(1000, Math.trunc(limit)))).all<{ productSku: string }>();
-  return rows.results.map((row) => row.productSku);
+export async function readDirtySkus(db: D1Database, limit: number, pilotSql = "", excludedSourceSkus: string[] = []) {
+  const safeLimit = Math.max(1, Math.min(1000, Math.trunc(limit)));
+  const excluded = new Set(excludedSourceSkus);
+  const selected: string[] = [];
+  const pageSize = Math.max(safeLimit, 300);
+  let offset = 0;
+
+  // Исключение делается в памяти, а не через огромный NOT IN: за один проход
+  // ошибок может накопиться больше лимита параметров SQLite. Страницы нужны,
+  // чтобы не читать всю очередь, когда исключений всего несколько.
+  for (let page = 0; page < 100 && selected.length < safeLimit; page += 1) {
+    const rows = await db.prepare(
+      `SELECT d.product_sku AS productSku
+       FROM stock_dirty_skus d
+       JOIN products p ON p.source_sku = d.product_sku
+       WHERE 1 = 1${pilotSql}
+       ORDER BY d.marked_at, d.product_sku
+       LIMIT ? OFFSET ?`,
+    ).bind(pageSize, offset).all<{ productSku: string }>();
+    for (const row of rows.results) {
+      if (!excluded.has(row.productSku)) selected.push(row.productSku);
+      if (selected.length >= safeLimit) break;
+    }
+    offset += rows.results.length;
+    if (rows.results.length < pageSize) break;
+  }
+  return selected;
 }
 
 /** Убирает разобранные позиции. Вызывается только после успешной отправки. */
 export async function clearDirtySkus(db: D1Database, sourceSkus: string[]) {
   if (sourceSkus.length === 0) return;
   const statements = sourceSkus.map((sku) => db.prepare("DELETE FROM stock_dirty_skus WHERE product_sku = ?").bind(sku));
+  for (let start = 0; start < statements.length; start += MARK_BATCH) {
+    await db.batch(statements.slice(start, start + MARK_BATCH));
+  }
+}
+
+/**
+ * Переносит непринятые позиции в хвост текущего прохода.
+ *
+ * Метка на минуту вперёд гарантирует, что сначала будут обработаны остальные
+ * старые позиции. Следующий пятиминутный запуск уже увидит эти SKU снова.
+ */
+export async function deferDirtySkus(db: D1Database, sourceSkus: string[]) {
+  if (sourceSkus.length === 0) return;
+  const statements = [...new Set(sourceSkus)].map((sku) => db.prepare(
+    "UPDATE stock_dirty_skus SET marked_at = datetime('now', '+1 minute') WHERE product_sku = ?",
+  ).bind(sku));
   for (let start = 0; start < statements.length; start += MARK_BATCH) {
     await db.batch(statements.slice(start, start + MARK_BATCH));
   }
