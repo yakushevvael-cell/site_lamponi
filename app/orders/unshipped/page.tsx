@@ -61,7 +61,7 @@ export default async function UnshippedPage({ searchParams }: { searchParams: Pr
         <p className="text-xs text-muted-foreground">
           Состояние восстановлено по датам событий заказа: оформлен до указанного времени и к нему ещё не передан в доставку
           и не отменён. Смотрятся заказы за {UNSHIPPED_WINDOW_DAYS} дней до этого момента. У Яндекс Маркета и части Ozon
-          время передачи и отмены — момент, когда синхронизация это увидела, поэтому точность около 15 минут.
+          время передачи и отмены — момент, когда синхронизация это увидела, поэтому точность около 5 минут.
         </p>
 
         <div className="overflow-x-auto rounded-lg border">

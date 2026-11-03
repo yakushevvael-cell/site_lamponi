@@ -9,4 +9,9 @@ User=lamponi
 Group=lamponi
 WorkingDirectory=/opt/lamponi/current
 EnvironmentFile=/opt/lamponi/shared/.env
-ExecStart=/usr/bin/node scripts/sync-task.mjs orders
+# Пятиминутная доотправка не должна идти одновременно с полной часовой:
+# обе операции меняют одни и те же остатки. Если полная выгрузка ещё работает,
+# этот короткий цикл безопасно пропускается и повторится через пять минут.
+ExecStart=/usr/bin/flock -n -E 0 /var/lib/lamponi/stock-sync.lock /usr/bin/node scripts/sync-task.mjs orders
+# Большая накопившаяся очередь может состоять из нескольких десятков пакетов.
+TimeoutStartSec=1800

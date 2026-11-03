@@ -1,9 +1,10 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Ban, Boxes, CloudUpload, FlaskConical, History, Layers, ListFilter, Loader2, PackageCheck, Radar, RefreshCw, Ruler, Search, ShieldAlert, ShoppingCart, SlidersHorizontal, Warehouse, X, Zap } from "lucide-react";
 import { toast } from "sonner";
 
+import { PENDING_STOCK_BATCH_LIMIT, PENDING_STOCK_POLL_SECONDS } from "@/lib/stock-pending-core.mjs";
 import { describeSummary, readSyncState, runFullStockSync, type SyncState } from "@/lib/stock-sync-client";
 
 import {
@@ -126,6 +127,27 @@ type StockSyncState = {
   reason: string | null;
 };
 
+type PendingMarketplaceStatus = {
+  marketplaceId: "wildberries" | "ozon" | "yandex";
+  status: "ok" | "error" | "waiting" | "inactive";
+  error: string | null;
+  lastStockSyncAt: string | null;
+};
+
+type PendingQueueStatus = {
+  pending: number;
+  checkedAt: string;
+  nextRunAt: string;
+  intervalMinutes: number;
+  pollSeconds: number;
+  batchLimit: number;
+  marketplaces: PendingMarketplaceStatus[];
+};
+
+type PendingMovement = { delta: number; at: string };
+
+const MAX_PENDING_DRAIN_BATCHES = 100;
+
 /**
  * Три режима вместо россыпи кнопок.
  *
@@ -136,7 +158,7 @@ const MODES: Record<StockSyncMode, { title: string; summary: string; detail: str
   auto: {
     title: "Автоматический",
     summary: "Сервис сам держит остатки на площадках в актуальном состоянии.",
-    detail: "Раз в час остатки уезжают на площадки по всему ассортименту, каждые 15 минут — по тем позициям, где прошли заказы. Обычный режим работы магазина.",
+    detail: "Раз в час остатки уезжают на площадки по всему ассортименту, каждые 5 минут — по тем позициям, где прошли заказы. Обычный режим работы магазина.",
     tone: "border-emerald-200 bg-emerald-50 text-emerald-950",
   },
   pilot: {
@@ -167,6 +189,20 @@ const statusLabel = {
   skipped: "Пропущено",
   blocked: "Заблокировано",
 } as const;
+
+function clockTime(value: string | null | undefined) {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return "—";
+  return parsed.toLocaleTimeString("ru-RU", { hour: "2-digit", minute: "2-digit" });
+}
+
+function pendingMovementText(movement: PendingMovement | null) {
+  if (!movement || movement.delta === 0) return "без изменений";
+  return movement.delta < 0
+    ? `уменьшилось на ${Math.abs(movement.delta).toLocaleString("ru-RU")}`
+    : `увеличилось на ${movement.delta.toLocaleString("ru-RU")}`;
+}
 
 const emptyTotals: StockTotals = {
   articleCount: 0,
@@ -575,6 +611,12 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const [pause, setPause] = useState<StockSyncState | null>(null);
   const [modeOpen, setModeOpen] = useState(false);
   const [pending, setPending] = useState(0);
+  const [pendingStatus, setPendingStatus] = useState<PendingQueueStatus | null>(null);
+  const [pendingMovement, setPendingMovement] = useState<PendingMovement | null>(null);
+  const [lastPendingChange, setLastPendingChange] = useState<PendingMovement | null>(null);
+  const [pendingLoadError, setPendingLoadError] = useState<string | null>(null);
+  const [pendingProgress, setPendingProgress] = useState("");
+  const previousPending = useRef<number | null>(null);
   const [unitsOpen, setUnitsOpen] = useState(false);
   const [unitsValue, setUnitsValue] = useState("2");
   const [savingUnits, setSavingUnits] = useState(false);
@@ -618,14 +660,31 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
   const loadPending = useCallback(async () => {
     try {
       const response = await fetch("/api/stocks/sync-pending", { cache: "no-store" });
-      const data = await response.json() as { pending?: number };
-      setPending(Number(data.pending ?? 0));
-    } catch {
-      // Индикатор вспомогательный: без него страница работает как раньше.
+      const data = await response.json() as Partial<PendingQueueStatus> & { error?: string };
+      if (!response.ok) throw new Error(data.error ?? "Не удалось прочитать очередь.");
+      const nextPending = Number(data.pending ?? 0);
+      const checkedAt = typeof data.checkedAt === "string" ? data.checkedAt : new Date().toISOString();
+      if (previousPending.current !== null) {
+        const movement = { delta: nextPending - previousPending.current, at: checkedAt };
+        setPendingMovement(movement);
+        if (movement.delta !== 0) setLastPendingChange(movement);
+      }
+      previousPending.current = nextPending;
+      setPending(nextPending);
+      setPendingStatus(data as PendingQueueStatus);
+      setPendingLoadError(null);
+    } catch (error) {
+      setPendingLoadError(error instanceof Error ? error.message : "Не удалось обновить индикатор очереди.");
     }
   }, []);
 
-  useEffect(() => { void loadPending(); }, [loadPending]);
+  useEffect(() => {
+    void loadPending();
+    const timer = window.setInterval(() => {
+      if (document.visibilityState === "visible") void loadPending();
+    }, PENDING_STOCK_POLL_SECONDS * 1000);
+    return () => window.clearInterval(timer);
+  }, [loadPending]);
 
   // Автоподхват: цикл синхронизации ведёт вкладка браузера, поэтому закрытая
   // вкладка оставляет запуск незавершённым. Показываем его администратору,
@@ -833,22 +892,64 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
     }
   }
 
-  /** Ручной запуск доотправки: обычно её делает планировщик каждые 15 минут. */
+  /** Ручной запуск разбирает всю очередь пакетами, как пятиминутный планировщик. */
   async function pushPendingStocks() {
     setPushingPending(true);
+    setPendingProgress("");
     try {
-      const response = await fetch("/api/stocks/sync-pending", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) });
-      const data = await response.json() as { ok?: boolean; selected?: number; pendingLeft?: number; failures?: string[]; error?: string };
-      if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Доотправка не выполнена.");
-      if (!data.selected) toast.info("Доотправлять нечего", { description: "С прошлой выгрузки остатки не менялись." });
-      else if (data.ok) toast.success("Изменившиеся остатки отправлены", { description: `Позиций: ${data.selected}.` });
-      else toast.warning("Отправлено частично", { description: data.failures?.[0] ?? `Позиций: ${data.selected}.` });
+      let totalSelected = 0;
+      let partialError: string | null = null;
+      let previousLeft = Number.POSITIVE_INFINITY;
+      let fullyProcessed = false;
+
+      for (let batch = 1; batch <= MAX_PENDING_DRAIN_BATCHES; batch += 1) {
+        const response = await fetch("/api/stocks/sync-pending", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ limit: PENDING_STOCK_BATCH_LIMIT }),
+        });
+        const data = await response.json() as { ok?: boolean; selected?: number; pendingLeft?: number; failures?: string[]; error?: string };
+        if (!response.ok && response.status !== 207) throw new Error(data.error ?? "Доотправка не выполнена.");
+        const selectedNow = Number(data.selected ?? 0);
+        const pendingLeft = Number(data.pendingLeft ?? 0);
+        if (selectedNow <= 0) {
+          fullyProcessed = true;
+          break;
+        }
+
+        totalSelected += selectedNow;
+        setPending(pendingLeft);
+        setPendingProgress(`Отправлено ${totalSelected.toLocaleString("ru-RU")}, осталось ${pendingLeft.toLocaleString("ru-RU")}`);
+        if (!data.ok || (data.failures?.length ?? 0) > 0) {
+          partialError = data.failures?.[0] ?? "Одна из площадок не приняла остатки.";
+          break;
+        }
+        if (pendingLeft <= 0) {
+          fullyProcessed = true;
+          break;
+        }
+        if (pendingLeft >= previousLeft) throw new Error("Очередь не уменьшается. Повторите попытку позже и проверьте ошибки площадок.");
+        previousLeft = pendingLeft;
+      }
+      if (!fullyProcessed && !partialError) {
+        partialError = `Достигнут защитный предел ${MAX_PENDING_DRAIN_BATCHES} пакетов. Остаток обработает следующий запуск.`;
+      }
+
+      if (totalSelected === 0) {
+        toast.info("Доотправлять нечего", { description: "С прошлой выгрузки остатки не менялись." });
+      } else if (partialError) {
+        toast.warning("Отправлено частично", { description: partialError });
+      } else {
+        toast.success("Изменившиеся остатки отправлены", { description: `Позиций: ${totalSelected}. Очередь обработана.` });
+      }
       await loadPending();
       await load(query);
     } catch (error) {
       toast.error("Не удалось доотправить остатки", { description: error instanceof Error ? error.message : "Повторите попытку." });
+      await loadPending();
     } finally {
       setPushingPending(false);
+      setPendingProgress("");
     }
   }
 
@@ -952,14 +1053,53 @@ export function StocksWorkspace({ canSyncAll, canSyncSelected }: { canSyncAll: b
           </p>
         ) : null}
         {bulkAllowedHere ? (
-          <p className="mt-2 text-xs leading-5 opacity-80">
-            Очередь доотправки: {pending > 0 ? `ждут отправки ${pending} позиций.` : "пусто."}
-          </p>
+          <div className="mt-3 rounded-xl border border-emerald-200/80 bg-white/70 px-4 py-3 text-xs text-slate-700">
+            <p className="font-semibold text-slate-950">
+              В очереди {pending.toLocaleString("ru-RU")} позиций
+              {pendingMovement ? `; ${pendingMovementText(pendingMovement)}` : ""}.
+            </p>
+            <p className="mt-1 leading-5 text-slate-600">
+              Индикатор обновлён {clockTime(pendingStatus?.checkedAt)} · следующий автоматический запуск около {clockTime(pendingStatus?.nextRunAt)} · пакет до {(pendingStatus?.batchLimit ?? PENDING_STOCK_BATCH_LIMIT).toLocaleString("ru-RU")} позиций, очередь разбирается полностью.
+            </p>
+            {pendingMovement?.delta === 0 && lastPendingChange ? (
+              <p className="mt-1 leading-5 text-slate-600">
+                Последнее изменение: {pendingMovementText(lastPendingChange)} в {clockTime(lastPendingChange.at)}.
+              </p>
+            ) : null}
+            <div className="mt-2 flex flex-wrap gap-1.5">
+              {(pendingStatus?.marketplaces ?? []).map((marketplace) => {
+                const label = marketplaceLabel[marketplace.marketplaceId];
+                const text = marketplace.status === "error"
+                  ? `${label}: ошибка`
+                  : marketplace.status === "ok"
+                    ? `${label}: принято`
+                    : marketplace.status === "waiting"
+                      ? `${label}: ожидает отправки`
+                      : `${label}: выгрузка отключена`;
+                const tone = marketplace.status === "error"
+                  ? "border-red-200 bg-red-50 text-red-800"
+                  : marketplace.status === "ok"
+                    ? "border-emerald-200 bg-emerald-50 text-emerald-800"
+                    : "border-slate-200 bg-slate-50 text-slate-600";
+                return <Badge key={marketplace.marketplaceId} variant="outline" className={tone}>{text}</Badge>;
+              })}
+            </div>
+            {(pendingStatus?.marketplaces ?? []).filter((marketplace) => marketplace.status === "error").map((marketplace) => (
+              <p key={`${marketplace.marketplaceId}-error`} className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 leading-5 text-red-800">
+                <b>{marketplaceLabel[marketplace.marketplaceId]}:</b> {marketplace.error ?? "Площадка не приняла остатки."}
+              </p>
+            ))}
+            {pendingLoadError ? (
+              <p className="mt-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 leading-5 text-amber-900">
+                Индикатор временно не обновляется: {pendingLoadError}
+              </p>
+            ) : null}
+          </div>
         ) : null}
         {canSyncSelected && bulkAllowedHere ? (
           <Button variant="outline" size="sm" className="mt-3 bg-white" onClick={() => void pushPendingStocks()} disabled={pushingPending || syncingAll || syncingSelected}>
             {pushingPending ? <Loader2 className="animate-spin" /> : <Zap />}
-            {pushingPending ? "Отправляем…" : "Доотправить изменившиеся сейчас"}
+            {pushingPending ? (pendingProgress || "Отправляем…") : "Доотправить изменившиеся сейчас"}
           </Button>
         ) : null}
         {syncProgress ? <p className="mt-2 flex items-center gap-2 text-xs font-medium"><Loader2 className="size-3.5 animate-spin" />{syncProgress}</p> : null}

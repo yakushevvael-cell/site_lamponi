@@ -9,7 +9,12 @@ User=lamponi
 Group=lamponi
 WorkingDirectory=/opt/lamponi/current
 EnvironmentFile=/opt/lamponi/shared/.env
-ExecStart=/usr/bin/node scripts/sync-task.mjs stocks
+# Пока удерживается общий замок, выдерживаем больше двух минут после возможной
+# доотправки: Ozon не разрешает обновлять один SKU чаще этого интервала.
+Environment=STOCK_SYNC_SETTLE_SECONDS=125
+# Полная выгрузка ждёт завершения пятиминутной доотправки и затем получает
+# общий замок. Следующие короткие циклы пропустятся, пока она не закончится.
+ExecStart=/usr/bin/flock /var/lib/lamponi/stock-sync.lock /usr/bin/node scripts/sync-task.mjs stocks
 # Ozon разрешает обновлять остаток одного артикула не чаще раза в 2 минуты,
 # поэтому запуск не должен накладываться сам на себя.
 TimeoutStartSec=1800

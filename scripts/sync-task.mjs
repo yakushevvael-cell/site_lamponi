@@ -19,10 +19,16 @@
  * а не вторая копия логики, которая со временем разошлась бы с первой.
  */
 
+import { PENDING_STOCK_BATCH_LIMIT } from "../lib/stock-pending-core.mjs";
+
 const APP_URL = (process.env.APP_URL ?? "http://127.0.0.1:3000").replace(/\/+$/, "");
 const TOKEN = process.env.SYNC_TASK_TOKEN ?? "";
 const MAX_RATE_LIMIT_WAITS = 6;
 const MAX_WAIT_SECONDS = 180;
+/** Защита от бесконечного цикла при повреждённой очереди: 100 пакетов = 30 000 SKU. */
+const MAX_PENDING_BATCHES = 100;
+/** Пауза полной выгрузки после получения общего замка: Ozon запрещает повтор SKU раньше двух минут. */
+const STOCK_SYNC_SETTLE_SECONDS = Math.max(0, Math.min(300, Number(process.env.STOCK_SYNC_SETTLE_SECONDS) || 0));
 
 function log(message) {
   console.log(`[${new Date().toISOString()}] ${message}`);
@@ -139,31 +145,60 @@ async function syncFinance() {
  * изменился резерв, поэтому запуск дешёвый и его не жалко делать часто.
  */
 async function pushChangedStocks() {
-  const { status, data } = await call("/api/stocks/sync-pending", {});
-  if (status === 423 && data.stockSyncPaused) {
-    log("Выгрузка остатков остановлена вручную — доотправка пропущена.");
-    return;
+  let totalSelected = 0;
+  let previousPending = Number.POSITIVE_INFINITY;
+
+  for (let batch = 1; batch <= MAX_PENDING_BATCHES; batch += 1) {
+    const { status, data } = await call("/api/stocks/sync-pending", { limit: PENDING_STOCK_BATCH_LIMIT });
+    if (status === 423 && data.stockSyncPaused) {
+      log("Выгрузка остатков остановлена вручную — доотправка пропущена.");
+      return;
+    }
+    if (status >= 400 && status !== 207) {
+      log(`Доотправка остатков не выполнена: ${data.error ?? `ответ ${status}`}`);
+      process.exitCode = 2;
+      return;
+    }
+    if (!data.selected) {
+      if (totalSelected === 0) log("Изменившихся позиций нет — доотправлять нечего.");
+      else log(`Очередь обработана. Всего отправлено позиций: ${totalSelected}.`);
+      return;
+    }
+
+    totalSelected += Number(data.selected) || 0;
+    const wb = data.wildberries?.sent ?? 0;
+    const ozon = data.ozon?.sent ?? 0;
+    const yandex = data.yandex?.sent ?? 0;
+    const pendingLeft = Number(data.pendingLeft ?? 0);
+    log(`Доотправка, пакет ${batch}: позиций ${data.selected}, WB ${wb}, Ozon ${ozon}, Маркет ${yandex}. В очереди осталось: ${pendingLeft}.`);
+
+    if (!data.ok || (Array.isArray(data.failures) && data.failures.length > 0)) {
+      for (const failure of data.failures ?? []) log(`Замечание: ${failure}`);
+      log("Разбор очереди остановлен: непринятые позиции останутся для следующего запуска.");
+      process.exitCode = 2;
+      return;
+    }
+    if (pendingLeft <= 0) {
+      log(`Очередь обработана полностью. Всего отправлено позиций: ${totalSelected}.`);
+      return;
+    }
+    if (pendingLeft >= previousPending) {
+      log(`Очередь не уменьшается (осталось ${pendingLeft}) — останавливаю цикл до следующего запуска.`);
+      process.exitCode = 2;
+      return;
+    }
+    previousPending = pendingLeft;
   }
-  if (status >= 400 && status !== 207) {
-    log(`Доотправка остатков не выполнена: ${data.error ?? `ответ ${status}`}`);
-    process.exitCode = 2;
-    return;
-  }
-  if (!data.selected) {
-    log("Изменившихся позиций нет — доотправлять нечего.");
-    return;
-  }
-  const wb = data.wildberries?.sent ?? 0;
-  const ozon = data.ozon?.sent ?? 0;
-  const yandex = data.yandex?.sent ?? 0;
-  log(`Доотправка: позиций ${data.selected}, WB ${wb}, Ozon ${ozon}, Маркет ${yandex}. В очереди осталось: ${data.pendingLeft ?? 0}.`);
-  if (Array.isArray(data.failures) && data.failures.length > 0) {
-    for (const failure of data.failures) log(`Замечание: ${failure}`);
-    process.exitCode = 2;
-  }
+
+  log(`Достигнут предел ${MAX_PENDING_BATCHES} пакетов. Остаток очереди будет обработан следующим запуском.`);
+  process.exitCode = 2;
 }
 
 async function syncStocks() {
+  if (STOCK_SYNC_SETTLE_SECONDS > 0) {
+    log(`Перед полной выгрузкой жду ${STOCK_SYNC_SETTLE_SECONDS} с после последней доотправки.`);
+    await sleep(STOCK_SYNC_SETTLE_SECONDS * 1000);
+  }
   log("Запускаю полную синхронизацию остатков…");
   const plan = await step({ action: "start" }, "Старт");
   const jobId = plan.jobId;

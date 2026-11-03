@@ -179,7 +179,9 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   // --- Wildberries: остатки отправляются по каждому включённому складу отдельно.
   for (const warehouse of wbWarehouses) {
     if (wbBasis.length === 0) {
-      failures.push("Для выбранных позиций нет активных сопоставлений Wildberries.");
+      const message = "Для выбранных позиций нет активных сопоставлений Wildberries.";
+      failures.push(message);
+      await markWarehouseSync(db, "wildberries", warehouse.externalId, false, message);
       break;
     }
     let rows: SendableRow[] = [];
@@ -283,7 +285,11 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   // --- Ozon: значения отправляются парами «товар–склад» одним запросом.
   if (ozonWarehouses.length > 0) {
     if (ozonBasis.length === 0) {
-      failures.push("Для выбранных позиций нет активных сопоставлений Ozon.");
+      const message = "Для выбранных позиций нет активных сопоставлений Ozon.";
+      failures.push(message);
+      for (const warehouse of ozonWarehouses) {
+        await markWarehouseSync(db, "ozon", warehouse.externalId, false, message);
+      }
     } else {
       try {
         const credentials = await getMarketplaceCredentials(db, runtime, "ozon");
@@ -424,7 +430,9 @@ export async function pushStocksForSkus(options: PushStocksOptions): Promise<Pus
   // --- Яндекс Маркет: склад магазина DBS один, его номер — campaignId.
   for (const warehouse of yandexWarehouses) {
     if (yandexBasis.length === 0) {
-      failures.push("Для выбранных позиций нет активных сопоставлений Яндекс Маркета.");
+      const message = "Для выбранных позиций нет активных сопоставлений Яндекс Маркета.";
+      failures.push(message);
+      await markWarehouseSync(db, "yandex", warehouse.externalId, false, message);
       break;
     }
     try {

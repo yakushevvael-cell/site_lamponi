@@ -1,11 +1,12 @@
 [Unit]
-Description=Заказы Lamponi каждые 15 минут
+Description=Заказы Lamponi каждые 5 минут
 
 [Timer]
 # Резерв должен быть свежим до того, как остатки поедут на площадки,
 # поэтому заказы обновляются чаще и раньше выгрузки.
-OnCalendar=*:00,15,30,45
-RandomizedDelaySec=90
+OnCalendar=*:00,05,10,15,20,25,30,35,40,45,50,55
+RandomizedDelaySec=20
+AccuracySec=1s
 Persistent=true
 
 [Install]
